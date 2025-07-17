@@ -1,0 +1,8 @@
+# venv
+venv/
+myvenv/
+.env/
+.env
+
+# logs
+logs/

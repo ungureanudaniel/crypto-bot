@@ -1,0 +1,11 @@
+services:
+  trader_bot:
+    build: .
+    container_name: kraken_trader_bot
+    restart: always
+    volumes:
+      - ./config.json:/app/config.json
+      - ./portfolio.json:/app/portfolio.json
+      - ./logs:/app/logs
+    environment:
+      - TZ=UTC

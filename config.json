@@ -1,0 +1,11 @@
+{
+  "starting_balance": 1000,
+  "position_size_pct": 10,
+  "coins": ["BTC/USD", "ETH/USD", "DOT/USD", "PYTH/USD", "ATOM/USD", "XMR/USD", "LINK/USD", "ADA/USD", "DYM/USD", "IMX/USD", "GRT/USD", "JUP/USD"],
+  "timeframe": "1W",
+  "telegram_token": "7767712527:AAFANChTpq3xNNwuCcDuMPcuRv6YT5mtcss",
+  "telegram_chat_id": "6309119418",
+  "live_trading": false,
+  "kraken_api_key": "",
+  "kraken_api_secret": ""
+}
