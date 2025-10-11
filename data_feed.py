@@ -19,7 +19,7 @@ EXCHANGE = ccxt.binance({
 })
 LOOPBACK = 200
 
-def fetch_ohlcv(coin, timeframe='1w'):
+def fetch_ohlcv(coin, timeframe='1m'):
     logging.info(f"Fetching OHLCV data for {coin} from Binance...")
     try:
         # Ensure your coin symbols are in Binance format (e.g., 'BTC/USDC')
