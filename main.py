@@ -3,6 +3,8 @@ import os
 from telegram_bot import start_telegram_bot
 from scheduler import start_schedulers
 
+logging.info("✅ Logging works! This should appear immediately.")
+
 # Ensure logs directory exists
 os.makedirs("logs", exist_ok=True)
 

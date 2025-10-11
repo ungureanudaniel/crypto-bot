@@ -17,4 +17,4 @@ COPY . .
 RUN mkdir -p /app/logs
 
 # Start bot
-CMD ["python", "main.py"]
+CMD ["python3.12", "main.py"]
