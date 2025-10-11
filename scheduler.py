@@ -26,7 +26,7 @@ logging.basicConfig(
 # -------------------------------------------------------------------
 # Weekly trading job
 def weekly_trading_job(bot_data):
-    interval = bot_data.get("trading_interval", "1W")  # fallback to 1W
+    interval = bot_data.get("trading_interval", "1h")  # fallback to 1h
     logging.info("Running weekly trading job...")
 
     for coin in CONFIG['coins']:

@@ -91,7 +91,7 @@ def train_model():
     
     for coin in config['coins']:
         try:
-            df = fetch_ohlcv(coin, "1W")
+            df = fetch_ohlcv(coin, "1m")
             df = add_features(df)
             df = label_regime(df)
             
