@@ -1,7 +1,7 @@
 services:
   trader_bot:
     build: .
-    container_name: kraken_trader_bot
+    container_name: binance_trader_bot
     restart: always
     volumes:
       - ./config.json:/app/config.json

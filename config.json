@@ -6,6 +6,6 @@
   "telegram_token": "7767712527:AAFANChTpq3xNNwuCcDuMPcuRv6YT5mtcss",
   "telegram_chat_id": "6309119418",
   "live_trading": false,
-  "kraken_api_key": "",
-  "kraken_api_secret": ""
+  "binance_api_key": "",
+  "binance_api_secret": ""
 }
