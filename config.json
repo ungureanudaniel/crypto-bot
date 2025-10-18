@@ -3,10 +3,9 @@
   "position_size_pct": 10,
   "coins": [
   "BTC/USDC", "ETH/USDC", "BNB/USDC", "SOL/USDC", "XRP/USDC",
-  "LINK/USDC", "DOT/USDC", "ATOM/USDC", "AVAX/USDC", "NEAR/USDC", "ARB/USDC", "INJ/USDC", "TON/USDC",
-  "PYTH/USDC", "JUP/USDC"
+  "TRX/USDC", "TON/USDC"
 ],
-  "timeframe": "1h",
+  "timeframe": "15m",
   "telegram_token": "7767712527:AAFANChTpq3xNNwuCcDuMPcuRv6YT5mtcss",
   "telegram_chat_id": "6309119418",
   "live_trading": false,
