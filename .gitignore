@@ -6,3 +6,6 @@ myvenv/
 
 # logs
 logs/
+config.json
+
+portfolio.json

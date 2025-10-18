@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import pandas as pd
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from regime_switcher import train_model, predict_regime
@@ -335,9 +336,6 @@ async def set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data["trading_interval"] = interval
     await update.message.reply_text(f"Trading interval set to {interval}")
 
-async def limit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pass
-
 async def get_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     interval = context.bot_data.get("trading_interval", "1h")
     await update.message.reply_text(f"Current trading interval: {interval}")
@@ -485,9 +483,6 @@ async def limit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except ValueError as e:
         await update.message.reply_text("❌ Invalid amount or price format")
-    except Exception as e:
-        logging.error(f"Error placing limit order: {e}")
-        await update.message.reply_text("❌ Error placing limit order")
 
 async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all pending limit orders"""
