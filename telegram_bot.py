@@ -355,34 +355,47 @@ async def scheduler_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     commands = [
-        "🤖 *BOT CONTROL*",
-        "/start - Start bot • /stop - Stop bot • /status - Check status",
+        "🤖 BOT CONTROL",
+        "/start - Start bot",
+        "/stop - Stop bot", 
+        "/status - Check status",
         "",
-        "💼 *PORTFOLIO*", 
-        "/balance - Holdings • /latest_trades - Trade history • /price <sym> - Current price",
+        "💼 PORTFOLIO",
+        "/balance - Show holdings",
+        "/latest_trades - Trade history", 
+        "/price <symbol> - Current price",
         "",
-        "📊 *TRADING*",
-        "/regime <sym> - Market regime • /trade <sym> - Execute trade",
-        "/mode <paper|live> - Trading mode • /paper_stats - Performance",
+        "📊 TRADING",
+        "/regime <symbol> - Market regime",
+        "/trade <symbol> - Execute trade",
+        "/mode <paper|live> - Trading mode",
+        "/paper_stats - Performance stats",
         "",
-        "📋 *ORDERS*",
-        "/limit_order <sym> <side> <amt> <price> - Place limit order",
-        "/pending_orders - View pending • /cancel_order <sym|all> - Cancel orders",
+        "📋 ORDERS", 
+        "/limit_order <symbol> <side> <amount> <price>",
+        "/pending_orders - View pending orders",
+        "/cancel_order <symbol|all> - Cancel orders",
         "",
-        "⚙️ *SETTINGS*",
-        "/set_interval <1m|5m|1h> - Timeframe • /train - Retrain model",
-        "/scheduler_status - Jobs • /config - Settings • /api_status - API test",
+        "⚙️ SETTINGS",
+        "/set_interval <1m|5m|1h> - Timeframe",
+        "/train - Retrain model",
+        "/scheduler_status - Jobs status",
+        "/config - Current settings", 
+        "/api_status - Test API connection",
         "",
-        "🔐 *SAFETY*",
-        "• Start with `/mode paper` for safe testing",
-        "• Use `/mode live confirm` for real trading",
-        "• Reset with `/paper_reset confirm` if needed",
+        "🔐 SAFETY",
+        "Use /mode paper for safe testing",
+        "Use /mode live confirm for real trading",
+        "Use /paper_reset confirm to reset",
         "",
-        "❓ Need more help? Check /config for current settings"
+        "💡 Examples:",
+        "/regime BTC/USDT",
+        "/limit_order ETH/USDT buy 0.1 2500.00",
+        "/mode paper"
     ]
     
     help_text = "\n".join(commands)
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    await update.message.reply_text(help_text)
 
 async def limit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Place a manual limit order: /limit_order BTC/USDC buy 0.001 35000.50"""
