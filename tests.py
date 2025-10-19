@@ -5,6 +5,9 @@ import os
 from data_feed import fetch_ohlcv
 from strategy_tools import check_breakout, calculate_position_size, generate_trade_signal
 import pandas as pd
+from unittest.mock import Mock, patch, MagicMock, mock_open
+import pytest
+import json
 
 # Add the current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -361,49 +364,11 @@ def debug_regime_model():
         else:
             print(f"   ❌ No data for {symbol}")
 
+
 if __name__ == "__main__":
     # test_scheduler()
-    # test_regime_detection()
+    test_regime_detection()
     # test_feature_alignment()
     # debug_regime_model()
     # debug_strategy()
     # test_breakout_scenarios()
-    # Run the comprehensive test suite
-    print("🚀 Starting Comprehensive Trade Engine Test Suite...")
-    
-    # Run basic tests first
-    run_basic_tests()
-    
-    print("\n" + "=" * 50)
-    print("📋 Running Advanced Test Suite...")
-    
-    # Run the comprehensive tests
-    import test_trade_engine
-    test_suite = test_trade_engine.TestTradeEngine()
-    
-    # Run each test method
-    test_methods = [method for method in dir(test_suite) if method.startswith('test_')]
-    
-    passed = 0
-    failed = 0
-    
-    for method_name in test_methods:
-        try:
-            test_suite.setup_method()
-            method = getattr(test_suite, method_name)
-            method()
-            print(f"✅ {method_name} - PASSED")
-            passed += 1
-        except Exception as e:
-            print(f"❌ {method_name} - FAILED: {e}")
-            failed += 1
-        finally:
-            test_suite.teardown_method()
-    
-    print("=" * 50)
-    print(f"📊 Test Results: {passed} passed, {failed} failed")
-    
-    if failed == 0:
-        print("🎉 All tests passed! Your trade engine is ready.")
-    else:
-        print("⚠️  Some tests failed. Please review the issues above.")

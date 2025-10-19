@@ -2,8 +2,11 @@ import json
 import logging
 import ccxt
 import pandas as pd
+from datetime import datetime, timedelta
 from strategy_tools import generate_trade_signal
-from notifier import send_telegram_message
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 TRADING_FEE = 0.001  # 0.1%
 MAX_POSITION_SIZE = 0.1  # Max 10% of portfolio per trade
@@ -14,28 +17,70 @@ DAILY_LOSS_LIMIT = 0.05  # Max 5% daily loss
 # Portfolio handling
 # -------------------------------------------------------------------
 def load_portfolio():
-    with open("portfolio.json", "r") as f:
-        return json.load(f)
+    """Load portfolio from JSON file"""
+    try:
+        with open("portfolio.json", "r") as f:
+            portfolio = json.load(f)
+        logging.info("Portfolio loaded successfully")
+        return portfolio
+    except FileNotFoundError:
+        logging.warning("Portfolio file not found, creating default portfolio")
+        return create_default_portfolio()
+    except Exception as e:
+        logging.error(f"Error loading portfolio: {e}")
+        return create_default_portfolio()
 
 def save_portfolio(portfolio):
-    with open("portfolio.json", "w") as f:
-        json.dump(portfolio, f, indent=2)
+    """Save portfolio to JSON file"""
+    try:
+        with open("portfolio.json", "w") as f:
+            json.dump(portfolio, f, indent=2)
+        logging.info("Portfolio saved successfully")
+    except Exception as e:
+        logging.error(f"Error saving portfolio: {e}")
+
+def create_default_portfolio():
+    """Create a default portfolio structure"""
+    with open('config.json', 'r') as f:
+        config = json.load(f)
+    
+    portfolio = {
+        "cash_balance": config.get('starting_balance', 1000),
+        "holdings": {},
+        "positions": {},
+        "trade_history": [],
+        "pending_orders": [],
+        "initial_balance": config.get('starting_balance', 1000),
+        "performance_metrics": {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "total_pnl": 0.0,
+            "max_drawdown": 0.0
+        }
+    }
+    save_portfolio(portfolio)
+    return portfolio
 
 # -------------------------------------------------------------------
 # Config
 # -------------------------------------------------------------------
 def load_config():
-    with open('config.json', 'r') as f:
-        return json.load(f)
+    """Load configuration from JSON file"""
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+        return config
+    except Exception as e:
+        logging.error(f"Error loading config: {e}")
+        return {}
 
 # -------------------------------------------------------------------
 # Trading Mode Detection
 # -------------------------------------------------------------------
 def get_trading_mode():
-    """Get current trading mode from your config"""
+    """Get current trading mode from config"""
     try:
-        with open('config.json') as f:
-            config = json.load(f)
+        config = load_config()
         return 'live' if config.get('live_trading', False) else 'paper'
     except:
         return 'paper'  # Always default to paper for safety
@@ -45,10 +90,9 @@ def is_paper_trading():
     return get_trading_mode() == 'paper'
 
 def get_exchange():
-    """Get Binance exchange connection using your config structure"""
+    """Get Binance exchange connection"""
     try:
-        with open('config.json') as f:
-            config = json.load(f)
+        config = load_config()
         
         api_key = config.get('binance_api_key', '')
         api_secret = config.get('binance_api_secret', '')
@@ -60,7 +104,7 @@ def get_exchange():
         exchange = ccxt.binance({
             'apiKey': api_key,
             'secret': api_secret,
-            'sandbox': True,  # Use testnet for safety during development
+            'sandbox': True,  # Use testnet for safety
             'options': {
                 'defaultType': 'spot',
             },
@@ -71,7 +115,7 @@ def get_exchange():
         return None
 
 # -------------------------------------------------------------------
-# RISK MANAGEMENT FUNCTIONS (NEW)
+# RISK MANAGEMENT FUNCTIONS
 # -------------------------------------------------------------------
 def calculate_position_size(symbol, price, portfolio, risk_pct=0.02, stop_loss_pct=0.05):
     """
@@ -105,102 +149,141 @@ def check_portfolio_health():
     """
     Check overall portfolio health and enforce limits
     """
-    portfolio = load_portfolio()
-    initial_balance = portfolio.get('initial_balance', portfolio['cash_balance'])
-    
-    # Calculate current portfolio value
-    current_value = portfolio['cash_balance']
-    for symbol, position in portfolio.get('positions', {}).items():
-        # In real implementation, you'd fetch current price
-        current_value += position['amount'] * position['entry_price']  # Simplified
-    
-    # Check drawdown limit
-    drawdown = (initial_balance - current_value) / initial_balance
-    if drawdown > MAX_DRAWDOWN:
-        logging.warning(f"🛑 Portfolio drawdown {drawdown:.1%} exceeds limit {MAX_DRAWDOWN:.1%}")
+    try:
+        portfolio = load_portfolio()
+        initial_balance = portfolio.get('initial_balance', portfolio['cash_balance'])
+        
+        # Calculate current portfolio value
+        current_value = portfolio['cash_balance']
+        for symbol, position in portfolio.get('positions', {}).items():
+            current_value += position['amount'] * position['entry_price']  # Simplified
+        
+        # Check drawdown limit
+        drawdown = (initial_balance - current_value) / initial_balance
+        if drawdown > MAX_DRAWDOWN:
+            logging.warning(f"🛑 Portfolio drawdown {drawdown:.1%} exceeds limit {MAX_DRAWDOWN:.1%}")
+            return False
+        
+        return True
+        
+    except Exception as e:
+        logging.error(f"Error in portfolio health check: {e}")
         return False
-    
-    # Check daily loss limit (simplified - you'd track daily PnL separately)
-    daily_trades = portfolio.get('trade_history', [])
-    today = pd.Timestamp.now().date()
-    today_trades = [t for t in daily_trades if pd.Timestamp(t['timestamp']).date() == today]
-    today_pnl = sum(t.get('pnl', 0) for t in today_trades)
-    
-    if today_pnl < -initial_balance * DAILY_LOSS_LIMIT:
-        logging.warning(f"🛑 Daily loss {today_pnl:.2f} exceeds limit")
-        return False
-    
-    return True
 
 def check_stop_losses(current_prices):
     """
     Check and execute stop losses for all open positions
     """
-    portfolio = load_portfolio()
-    positions = portfolio.get('positions', {})
-    positions_closed = False
-    
-    for symbol, position in list(positions.items()):
-        current_price = current_prices.get(symbol)
-        if current_price is None:
-            continue
-            
-        stop_loss = position['stop_loss']
-        take_profit = position['take_profit']
+    try:
+        portfolio = load_portfolio()
+        positions = portfolio.get('positions', {})
+        positions_closed = False
         
-        # Check stop loss (for long positions)
-        if position['side'] == 'long' and current_price <= stop_loss:
-            logging.info(f"🛑 Stop loss triggered for {symbol} at ${current_price:.2f}")
-            close_position(symbol, current_price)
-            positions_closed = True
+        for symbol, position in list(positions.items()):
+            current_price = current_prices.get(symbol)
+            if current_price is None:
+                continue
+                
+            stop_loss = position['stop_loss']
+            take_profit = position['take_profit']
             
-            # Send alert
-            msg = (
-                f"🛑 STOP LOSS EXECUTED\n"
-                f"Symbol: {symbol}\n"
-                f"Price: ${current_price:.2f}\n"
-                f"Stop: ${stop_loss:.2f}\n"
-                f"Position closed automatically"
-            )
-            send_telegram_message(msg)
+            # Check stop loss (for long positions)
+            if position['side'] == 'long' and current_price <= stop_loss:
+                logging.info(f"🛑 Stop loss triggered for {symbol} at ${current_price:.2f}")
+                close_position(symbol, current_price)
+                positions_closed = True
+                
+            # Check take profit (for long positions)  
+            elif position['side'] == 'long' and current_price >= take_profit:
+                logging.info(f"🎯 Take profit triggered for {symbol} at ${current_price:.2f}")
+                close_position(symbol, current_price)
+                positions_closed = True
+        
+        return positions_closed
+        
+    except Exception as e:
+        logging.error(f"Error checking stop losses: {e}")
+        return False
+
+def close_position(symbol, current_price):
+    """
+    Close an open position and update portfolio
+    """
+    try:
+        portfolio = load_portfolio()
+        positions = portfolio.get('positions', {})
+        
+        if symbol not in positions:
+            logging.warning(f"No position found for {symbol}")
+            return False
             
-        # Check take profit (for long positions)  
-        elif position['side'] == 'long' and current_price >= take_profit:
-            logging.info(f"🎯 Take profit triggered for {symbol} at ${current_price:.2f}")
-            close_position(symbol, current_price)
-            positions_closed = True
-            
-            # Send alert
-            msg = (
-                f"🎯 TAKE PROFIT EXECUTED\n"
-                f"Symbol: {symbol}\n"
-                f"Price: ${current_price:.2f}\n"
-                f"Target: ${take_profit:.2f}\n"
-                f"Position closed automatically"
-            )
-            send_telegram_message(msg)
-    
-    return positions_closed
+        position = positions[symbol]
+        entry_price = position['entry_price']
+        amount = position['amount']
+        
+        # Calculate PnL
+        if position['side'] == 'long':
+            pnl = (current_price - entry_price) * amount
+        else:
+            pnl = (entry_price - current_price) * amount
+        
+        # Add cash back
+        portfolio['cash_balance'] += amount * current_price
+        
+        # Record trade history
+        trade = {
+            'action': 'close_position',
+            'coin': symbol,
+            'amount': amount,
+            'entry_price': entry_price,
+            'exit_price': current_price,
+            'pnl': pnl,
+            'timestamp': datetime.now().isoformat(),
+            'side': position['side'],
+            'reason': 'stop_loss' if current_price <= position['stop_loss'] else 'take_profit'
+        }
+        portfolio.setdefault('trade_history', []).append(trade)
+        
+        # Update performance metrics
+        if pnl > 0:
+            portfolio['performance_metrics']['winning_trades'] += 1
+        portfolio['performance_metrics']['total_trades'] += 1
+        portfolio['performance_metrics']['total_pnl'] += pnl
+        
+        # Remove position
+        del portfolio['positions'][symbol]
+        save_portfolio(portfolio)
+        
+        logging.info(f"Closed position for {symbol}: PnL ${pnl:.2f}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Error closing position for {symbol}: {e}")
+        return False
 
 def calculate_dynamic_stop_loss(symbol, entry_price, side='long', atr_multiplier=2):
     """
-    Calculate dynamic stop loss using ATR (Average True Range)
-    In practice, you'd fetch ATR from your data feed
+    Calculate dynamic stop loss and take profit
     """
-    # Simplified ATR calculation - in reality, fetch from your data
-    if side == 'long':
-        # Stop loss below entry price
-        stop_loss = entry_price * 0.95  # 5% fixed for now
-        take_profit = entry_price * 1.10  # 10% fixed for now
-    else:
-        # For short positions (if you add them)
-        stop_loss = entry_price * 1.05
-        take_profit = entry_price * 0.90
-    
-    return stop_loss, take_profit
+    try:
+        if side == 'long':
+            stop_loss = entry_price * 0.95  # 5% stop loss
+            take_profit = entry_price * 1.10  # 10% take profit
+        else:
+            stop_loss = entry_price * 1.05
+            take_profit = entry_price * 0.90
+        
+        return stop_loss, take_profit
+    except Exception as e:
+        logging.error(f"Error calculating stop loss for {symbol}: {e}")
+        # Fallback values
+        if side == 'long':
+            return entry_price * 0.95, entry_price * 1.10
+        else:
+            return entry_price * 1.05, entry_price * 0.90
 
 # -------------------------------------------------------------------
-# LIMIT ORDER FUNCTIONS (UPDATED WITH RISK CHECKS)
+# ORDER EXECUTION FUNCTIONS
 # -------------------------------------------------------------------
 def execute_limit_order(symbol, side, amount, price):
     """Execute a manual limit order with risk checks"""
@@ -233,22 +316,12 @@ def execute_limit_order(symbol, side, amount, price):
                     'amount': amount,
                     'price': price,
                     'total': total_cost,
-                    'timestamp': pd.Timestamp.now().isoformat(),
+                    'timestamp': datetime.now().isoformat(),
                     'type': 'manual_limit'
                 }
                 portfolio.setdefault('trade_history', []).append(trade)
                 
                 save_portfolio(portfolio)
-                
-                # Send notification
-                msg = (
-                    f"✅ MANUAL LIMIT BUY EXECUTED\n"
-                    f"Symbol: {symbol}\n"
-                    f"Amount: {amount:.6f} @ ${price:.2f}\n"
-                    f"Total: ${total_cost:.2f}\n"
-                    f"Cash Balance: ${portfolio['cash_balance']:.2f}"
-                )
-                send_telegram_message(msg)
                 logging.info(f"Manual limit BUY executed: {amount} {symbol} @ ${price}")
                 return True, "Limit buy order executed successfully"
             else:
@@ -276,22 +349,12 @@ def execute_limit_order(symbol, side, amount, price):
                     'amount': amount,
                     'price': price,
                     'total': total_value,
-                    'timestamp': pd.Timestamp.now().isoformat(),
+                    'timestamp': datetime.now().isoformat(),
                     'type': 'manual_limit'
                 }
                 portfolio.setdefault('trade_history', []).append(trade)
                 
                 save_portfolio(portfolio)
-                
-                # Send notification
-                msg = (
-                    f"✅ MANUAL LIMIT SELL EXECUTED\n"
-                    f"Symbol: {symbol}\n"
-                    f"Amount: {amount:.6f} @ ${price:.2f}\n"
-                    f"Total: ${total_value:.2f}\n"
-                    f"Cash Balance: ${portfolio['cash_balance']:.2f}"
-                )
-                send_telegram_message(msg)
                 logging.info(f"Manual limit SELL executed: {amount} {symbol} @ ${price}")
                 return True, "Limit sell order executed successfully"
             else:
@@ -351,89 +414,99 @@ def check_pending_orders(current_prices):
         logging.error(f"Error checking pending orders: {e}")
 
 # -------------------------------------------------------------------
-# Execute a trade with ENHANCED RISK MANAGEMENT
+# MAIN TRADE EXECUTION
 # -------------------------------------------------------------------
 def execute_trade(symbol, regime, price):
     """
     Execute trade with comprehensive risk management
     """
-    portfolio = load_portfolio()
-    
-    # Skip automatic trading if manual orders exist for this symbol
-    pending_orders = portfolio.get('pending_orders', [])
-    symbol_pending_orders = [order for order in pending_orders if order['symbol'] == symbol]
-    
-    if symbol_pending_orders:
-        logging.info(f"[{symbol}] Skipping automatic trade - manual orders pending")
-        return
-    
-    # Portfolio health check
-    if not check_portfolio_health():
-        logging.warning(f"[{symbol}] Portfolio health check failed - skipping trade")
-        return
-    
-    positions = portfolio.get('positions', {})
-    cash_balance = portfolio['cash_balance']
-    config = load_config()
-
-    risk_pct = config.get('risk_pct', 0.02)  # 2% risk per trade
-
-    # Check if position already exists
-    if symbol in positions:
-        logging.info(f"[{symbol}] Position already open. Skipping new trade.")
-        return
-
-    # Trading logic based on regime
-    if regime == 2:  # Breakout regime - BUY
-        side = "long"
-        # Calculate position size with risk management
-        units = calculate_position_size(symbol, price, portfolio, risk_pct)
+    try:
+        portfolio = load_portfolio()
         
-    elif regime == 1:  # Trending regime - could go either way
-        # For now, skip trending or add your logic
-        logging.info(f"[{symbol}] Trending regime - no clear signal")
-        return
-    else:  # Rangebound regime - no trade
-        logging.info(f"[{symbol}] Rangebound regime - no trade")
-        return
+        # Skip automatic trading if manual orders exist for this symbol
+        pending_orders = portfolio.get('pending_orders', [])
+        symbol_pending_orders = [order for order in pending_orders if order['symbol'] == symbol]
+        
+        if symbol_pending_orders:
+            logging.info(f"[{symbol}] Skipping automatic trade - manual orders pending")
+            return
+        
+        # Portfolio health check
+        if not check_portfolio_health():
+            logging.warning(f"[{symbol}] Portfolio health check failed - skipping trade")
+            return
+        
+        positions = portfolio.get('positions', {})
+        cash_balance = portfolio['cash_balance']
+        config = load_config()
 
-    # Check if enough cash
-    required_cash = price * units
-    if required_cash > cash_balance:
-        logging.warning(f"[{symbol}] Not enough cash for trade. Required: ${required_cash:.2f}, Available: ${cash_balance:.2f}")
-        return
+        risk_pct = config.get('risk_pct', 0.02)  # 2% risk per trade
 
-    # Calculate dynamic stop loss and take profit
-    stop_loss, take_profit = calculate_dynamic_stop_loss(symbol, price, side)
+        # Check if position already exists
+        if symbol in positions:
+            logging.info(f"[{symbol}] Position already open. Skipping new trade.")
+            return
 
-    # Save the position with risk management data
-    positions[symbol] = {
-        "side": side,
-        "amount": units,
-        "entry_price": price,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "entry_time": pd.Timestamp.now().isoformat(),
-        "risk_pct": risk_pct
-    }
+        # Trading logic based on regime
+        if regime == 2:  # Breakout regime - BUY
+            side = "long"
+            # Calculate position size with risk management
+            units = calculate_position_size(symbol, price, portfolio, risk_pct)
+            
+        elif regime == 1:  # Trending regime - could go either way
+            # For now, skip trending or add your logic
+            logging.info(f"[{symbol}] Trending regime - no clear signal")
+            return
+        else:  # Rangebound regime - no trade
+            logging.info(f"[{symbol}] Rangebound regime - no trade")
+            return
 
-    # Deduct cash
-    portfolio['cash_balance'] -= required_cash
-    portfolio['positions'] = positions
-    
-    # Track initial balance if not set
-    if 'initial_balance' not in portfolio:
-        portfolio['initial_balance'] = portfolio['cash_balance'] + required_cash
-    
-    save_portfolio(portfolio)
+        # Check if enough cash
+        required_cash = price * units
+        if required_cash > cash_balance:
+            logging.warning(f"[{symbol}] Not enough cash for trade. Required: ${required_cash:.2f}, Available: ${cash_balance:.2f}")
+            return
 
-    # Send Telegram notification
-    msg = (
-        f"🚀 AUTOMATIC {side.upper()} {symbol}\n"
-        f"Amount: {units:.6f} @ ${price:.2f}\n"
-        f"Value: ${required_cash:.2f}\n"
-        f"Stop-Loss: ${stop_loss:.2f} | Take-Profit: ${take_profit:.2f}\n"
-        f"Risk: {risk_pct*100}% | Cash Remaining: ${portfolio['cash_balance']:.2f}"
-    )
-    logging.info(msg)
-    send_telegram_message(msg)
+        # Calculate dynamic stop loss and take profit
+        stop_loss, take_profit = calculate_dynamic_stop_loss(symbol, price, side)
+
+        # Save the position with risk management data
+        positions[symbol] = {
+            "side": side,
+            "amount": units,
+            "entry_price": price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "entry_time": datetime.now().isoformat(),
+            "risk_pct": risk_pct
+        }
+
+        # Deduct cash
+        portfolio['cash_balance'] -= required_cash
+        portfolio['positions'] = positions
+        
+        # Track initial balance if not set
+        if 'initial_balance' not in portfolio:
+            portfolio['initial_balance'] = portfolio['cash_balance'] + required_cash
+        
+        save_portfolio(portfolio)
+
+        # Log the trade
+        logging.info(f"🚀 AUTOMATIC {side.upper()} {symbol} - Amount: {units:.6f} @ ${price:.2f} - Value: ${required_cash:.2f}")
+        
+    except Exception as e:
+        logging.error(f"Error executing trade for {symbol}: {e}")
+
+# Telegram notification function (will be imported from notifier in actual use)
+def send_telegram_message(message):
+    """Send telegram notification using notifier.py"""
+    try:
+        from notifier import send_telegram_message as send_telegram
+        return send_telegram(message)
+    except ImportError as e:
+        logging.error(f"Failed to import notifier: {e}")
+        logging.info(f"Telegram notification: {message}")
+        return False
+    except Exception as e:
+        logging.error(f"Failed to send telegram message: {e}")
+        return False
