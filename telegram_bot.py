@@ -229,19 +229,59 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Bot status: {status_msg}")
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Always refresh portfolio from file
-    context.bot_data["portfolio"] = load_portfolio()
-    portfolio = context.bot_data["portfolio"]
-
-    msg_lines = [f"💰 *Portfolio Balance:*", f"Cash: ${portfolio.get('cash_balance', 0):,.2f}"]
-    holdings = portfolio.get("holdings", {})
-    if not holdings:
-        msg_lines.append("No current holdings.")
-    else:
+    """Show comprehensive portfolio including both holdings and positions"""
+    from trade_engine import load_portfolio
+    from data_feed import get_current_prices
+    
+    portfolio = load_portfolio()
+    current_prices = get_current_prices()
+    
+    cash = portfolio.get('cash_balance', 0)
+    holdings = portfolio.get('holdings', {})
+    positions = portfolio.get('positions', {})
+    
+    # Calculate total portfolio value
+    total_value = cash
+    
+    msg_lines = [
+        "💼 *Portfolio Balance*",
+        f"💰 Cash: `${cash:,.2f}`"
+    ]
+    
+    # Show unprotected holdings
+    if holdings:
+        msg_lines.append("\n📦 *Unprotected Holdings:*")
         for coin, amount in holdings.items():
-            msg_lines.append(f"{coin}: {amount}")
-
-    await update.message.reply_text("\n".join(msg_lines))
+            symbol = f"{coin}/USDC"
+            price = current_prices.get(symbol, 0)
+            value = amount * price
+            total_value += value
+            msg_lines.append(f"• {coin}: {amount:.6f} (${value:.2f})")
+    else:
+        msg_lines.append("\n📦 *Unprotected Holdings:* None")
+    
+    # Show protected positions (what your bot is creating)
+    if positions:
+        msg_lines.append("\n🛡️ *Protected Positions:*")
+        for symbol, position in positions.items():
+            current_price = current_prices.get(symbol, position['entry_price'])
+            value = position['amount'] * current_price
+            pnl = (current_price - position['entry_price']) * position['amount']
+            pnl_pct = (current_price / position['entry_price'] - 1) * 100
+            total_value += value
+            
+            msg_lines.append(
+                f"• {symbol}: {position['amount']:.6f}\n"
+                f"  Entry: ${position['entry_price']:.2f} | Now: ${current_price:.2f}\n"
+                f"  PnL: ${pnl:+.2f} ({pnl_pct:+.1f}%)\n"
+                f"  SL: ${position['stop_loss']:.2f} | TP: ${position['take_profit']:.2f}"
+            )
+    else:
+        msg_lines.append("\n🛡️ *Protected Positions:* None")
+    
+    msg_lines.append(f"\n📊 *Total Portfolio Value:* `${total_value:,.2f}`")
+    
+    await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
 
 async def train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("📚 Retraining ML model...")
@@ -352,48 +392,103 @@ async def scheduler_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text("\n".join(msg), parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    commands = [
-        "🤖 BOT CONTROL",
-        "/start - Start bot",
-        "/stop - Stop bot", 
-        "/status - Check status",
-        "",
-        "💼 PORTFOLIO",
-        "/balance - Show holdings",
-        "/latest_trades - Trade history", 
-        "/price <symbol> - Current price",
-        "",
-        "📊 TRADING",
-        "/regime <symbol> - Market regime",
-        "/trade <symbol> - Execute trade",
-        "/mode <paper|live> - Trading mode",
-        "/paper_stats - Performance stats",
-        "",
-        "📋 ORDERS", 
-        "/limit_order <symbol> <side> <amount> <price>",
-        "/pending_orders - View pending orders",
-        "/cancel_order <symbol|all> - Cancel orders",
-        "",
-        "⚙️ SETTINGS",
-        "/set_interval <1m|5m|1h> - Timeframe",
-        "/train - Retrain model",
-        "/scheduler_status - Jobs status",
-        "/config - Current settings", 
-        "/api_status - Test API connection",
-        "",
-        "🔐 SAFETY",
-        "Use /mode paper for safe testing",
-        "Use /mode live confirm for real trading",
-        "Use /paper_reset confirm to reset",
-        "",
-        "💡 Examples:",
-        "/regime BTC/USDT",
-        "/limit_order ETH/USDT buy 0.1 2500.00",
-        "/mode paper"
-    ]
+    """Enhanced help command with debugging capabilities"""
     
-    help_text = "\n".join(commands)
-    await update.message.reply_text(help_text)
+    help_categories = {
+        "🤖 BOT CONTROL": [
+            "/start - Start trading bot",
+            "/stop - Stop trading bot", 
+            "/status - Check bot status",
+            "/restart - Restart bot services (if implemented)"
+        ],
+        
+        "💼 PORTFOLIO & BALANCE": [
+            "/balance - Show cash & unprotected holdings",
+            "/portfolio - Show detailed portfolio (positions + holdings)",
+            "/latest_trades - Recent trade history", 
+            "/performance - Trading performance stats",
+            "/price <symbol> - Current price (e.g., /price BTC/USDC)"
+        ],
+        
+        "📊 TRADING & ANALYSIS": [
+            "/regime <symbol> - Market regime analysis",
+            "/trade <symbol> - Execute immediate trade",
+            "/scan - Scan all coins for opportunities",
+            "/volatility - Market volatility overview"
+        ],
+        
+        "📋 ORDER MANAGEMENT": [
+            "/limit_order <symbol> <side> <amount> <price> - Place limit order",
+            "/pending_orders - View pending limit orders",
+            "/cancel_order <symbol|all> - Cancel orders",
+            "/check_orders_now - Manually check pending orders"
+        ],
+        
+        "🛡️ RISK & PROTECTION": [
+            "/protect <symbol> <sl%> <tp%> - Add stop loss/take profit",
+            "/risk - Current risk exposure",
+            "/emergency_stop - Immediately close all positions"
+        ],
+        
+        "⚙️ SETTINGS & CONFIG": [
+            "/mode <paper|live|status> - Trading mode",
+            "/set_interval <timeframe> - Set trading interval",
+            "/get_interval - Show current interval",
+            "/config - Current configuration",
+            "/coins - View monitored coins"
+        ],
+        
+        "🔧 SYSTEM & MAINTENANCE": [
+            "/train - Retrain ML model",
+            "/scheduler_status - Job scheduler status",
+            "/api_status - Test exchange API connection",
+            "/logs - View recent bot logs",
+            "/health - System health check"
+        ],
+        
+        "🐛 DEBUGGING & MONITORING": [
+            "/debug_portfolio - Detailed portfolio analysis",
+            "/debug_positions - Show all protected positions",
+            "/debug_holdings - Show all unprotected holdings",
+            "/debug_regime <symbol> - Detailed regime analysis",
+            "/debug_trade <symbol> - Test trade without executing",
+            "/debug_scheduler - Detailed scheduler info",
+            "/debug_model - ML model status and performance",
+            "/debug_balance - Cash flow analysis"
+        ],
+        
+        "💡 QUICK EXAMPLES": [
+            "• /regime BTC/USDC",
+            "• /limit_order ETH/USDC buy 0.1 2500.00",
+            "• /portfolio (to see both holdings AND positions)",
+            "• /debug_portfolio (for detailed analysis)",
+            "• /debug_regime ETH/USDC",
+            "• /scan"
+        ],
+        
+        "🔐 SAFETY REMINDERS": [
+            "• Always test with /mode paper first",
+            "• Use /mode live confirm for real trading",
+            "• Monitor with /risk and /portfolio regularly",
+            "• Use /emergency_stop if needed",
+            "• Check /debug_positions to see protected trades"
+        ]
+    }
+    
+    # Build the help message
+    help_text = "🤖 *Binance AI AutoTrader - Command Reference*\n\n"
+    
+    for category, commands in help_categories.items():
+        help_text += f"*{category}*\n"
+        for command in commands:
+            help_text += f"• {command}\n"
+        help_text += "\n"
+    
+    help_text += "---\n"
+    help_text += "🔍 *Having Issues?*\n"
+    help_text += "Use the /debug_* commands to investigate problems\n"
+    
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def limit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Place a manual limit order: /limit_order BTC/USDC buy 0.001 35000.50"""
