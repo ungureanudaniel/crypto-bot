@@ -135,7 +135,7 @@ def train_model():
     
     for coin in config['coins']:
         try:
-            df = fetch_ohlcv(coin, "15m")
+            df = fetch_ohlcv(coin, "1h")
             if df.empty:
                 continue
                 

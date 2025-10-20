@@ -9,6 +9,8 @@ from unittest.mock import Mock, patch, MagicMock, mock_open
 import pytest
 import json
 
+from trade_engine import execute_limit_order
+
 # Add the current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -364,10 +366,46 @@ def debug_regime_model():
         else:
             print(f"   ❌ No data for {symbol}")
 
+def test_auto_protection():
+    print("Testing auto-protection for manual buys...")
+    
+    # Test 1: Manual buy with auto-protection
+    print("\n1. Testing manual buy WITH auto-protection...")
+    success, message = execute_limit_order("BTC/USDC", "buy", 0.001, 50000.0, auto_protect=True)
+    print(f"Result: {success} - {message}")
+    
+    # Check portfolio
+    from trade_engine import load_portfolio
+    portfolio = load_portfolio()
+    print(f"Portfolio status:")
+    print(f"  Cash: ${portfolio['cash_balance']:.2f}")
+    print(f"  Holdings: {portfolio.get('holdings', {})}")
+    print(f"  Protected Positions: {len(portfolio.get('positions', {}))}")
+    
+    for symbol, position in portfolio.get('positions', {}).items():
+        print(f"    {symbol}: {position['amount']} units")
+        print(f"      Entry: ${position['entry_price']:.2f}")
+        print(f"      Stop Loss: ${position['stop_loss']:.2f}")
+        print(f"      Take Profit: ${position['take_profit']:.2f}")
+    
+    # Test 2: Manual buy WITHOUT auto-protection
+    print("\n2. Testing manual buy WITHOUT auto-protection...")
+    success, message = execute_limit_order("ETH/USDC", "buy", 0.01, 2800.0, auto_protect=True)
+    print(f"Result: {success} - {message}")
+    
+    # Check portfolio again
+    portfolio = load_portfolio()
+    print(f"Portfolio status:")
+    print(f"  Cash: ${portfolio['cash_balance']:.2f}")
+    print(f"  Holdings: {portfolio.get('holdings', {})}")
+    print(f"  Protected Positions: {len(portfolio.get('positions', {}))}")
+    
+    print("\n✅ Auto-protection test completed!")
 
 if __name__ == "__main__":
     # test_scheduler()
-    test_regime_detection()
+    # test_regime_detection()
+    test_auto_protection()
     # test_feature_alignment()
     # debug_regime_model()
     # debug_strategy()

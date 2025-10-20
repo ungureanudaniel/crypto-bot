@@ -74,23 +74,21 @@ def weekly_trading_job(bot_data):
         except Exception as e:
             logging.error(f"Error in weekly trading job for {coin}: {e}")
 
-# 15min trading job
 def intraday_trading_job(bot_data):
-    # Use 15m for trading signals
-    interval = bot_data.get("trading_interval", "15m")
-    logging.info(f"Running 15m trading job...")
+    """15min trading job - should run every 15 minutes"""
+    logging.info("🚀 Running 15m trading job...")
     
     for coin in CONFIG['coins']:
         try:
-            # Fetch 15m data for trading decisions
             df = fetch_ohlcv(coin, "15m")
             if df.empty:
                 continue
                 
-            # Your trading logic here
-            regime = predict_regime(df)
+            regime = predict_regime(df)  # Returns string like "Trending 📈"
             price = df.iloc[-1]['close']
-            execute_trade(coin, df, regime, price)  # Pass the full DataFrame
+            
+            # This should now work for trending regimes too!
+            execute_trade(coin, regime, price)
             
         except Exception as e:
             logging.error(f"Error in 15m trading job for {coin}: {e}")

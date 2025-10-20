@@ -285,8 +285,8 @@ def calculate_dynamic_stop_loss(symbol, entry_price, side='long', atr_multiplier
 # -------------------------------------------------------------------
 # ORDER EXECUTION FUNCTIONS
 # -------------------------------------------------------------------
-def execute_limit_order(symbol, side, amount, price):
-    """Execute a manual limit order with risk checks"""
+def execute_limit_order(symbol, side, amount, price, auto_protect=True):
+    """Execute a manual limit order with risk checks and auto-protection"""
     try:
         portfolio = load_portfolio()
         
@@ -323,6 +323,15 @@ def execute_limit_order(symbol, side, amount, price):
                 
                 save_portfolio(portfolio)
                 logging.info(f"Manual limit BUY executed: {amount} {symbol} @ ${price}")
+
+                # AUTO-PROTECTION: Add stop loss protection
+                if auto_protect:
+                    protection_success = add_stop_loss_to_manual_buy(symbol, price, amount)
+                    if protection_success:
+                        logging.info(f"✅ Auto-protection added to {symbol}")
+                    else:
+                        logging.warning(f"⚠️ Failed to add auto-protection to {symbol}")
+                
                 return True, "Limit buy order executed successfully"
             else:
                 return False, f"Insufficient funds. Need ${total_cost:.2f}, have ${portfolio['cash_balance']:.2f}"
@@ -418,15 +427,14 @@ def check_pending_orders(current_prices):
 # -------------------------------------------------------------------
 def execute_trade(symbol, regime, price):
     """
-    Execute trade with comprehensive risk management
+    Execute trade based on ALL detected regimes
     """
     try:
         portfolio = load_portfolio()
         
-        # Skip automatic trading if manual orders exist for this symbol
+        # Skip if manual orders exist
         pending_orders = portfolio.get('pending_orders', [])
         symbol_pending_orders = [order for order in pending_orders if order['symbol'] == symbol]
-        
         if symbol_pending_orders:
             logging.info(f"[{symbol}] Skipping automatic trade - manual orders pending")
             return
@@ -440,27 +448,40 @@ def execute_trade(symbol, regime, price):
         cash_balance = portfolio['cash_balance']
         config = load_config()
 
-        risk_pct = config.get('risk_pct', 0.02)  # 2% risk per trade
-
         # Check if position already exists
         if symbol in positions:
             logging.info(f"[{symbol}] Position already open. Skipping new trade.")
             return
 
-        # Trading logic based on regime
-        if regime == 2:  # Breakout regime - BUY
-            side = "long"
-            # Calculate position size with risk management
-            units = calculate_position_size(symbol, price, portfolio, risk_pct)
+        # FIXED: Handle string-based regime predictions
+        side = "long"  # We only do long positions for now
+        
+        if "Breakout" in regime:
+            # Breakout regime - AGGRESSIVE
+            risk_pct = config.get('risk_pct', 0.02)  # 2% risk
+            position_type = "BREAKOUT"
+            logging.info(f"🚀 {symbol} - BREAKOUT regime detected - AGGRESSIVE BUY")
             
-        elif regime == 1:  # Trending regime - could go either way
-            # For now, skip trending or add your logic
-            logging.info(f"[{symbol}] Trending regime - no clear signal")
-            return
-        else:  # Rangebound regime - no trade
-            logging.info(f"[{symbol}] Rangebound regime - no trade")
+        elif "Trending" in regime:
+            # Trending regime - MODERATE  
+            risk_pct = config.get('risk_pct', 0.02)  # 2% risk - ETH SHOULD TRADE HERE!
+            position_type = "TRENDING"
+            logging.info(f"📈 {symbol} - TRENDING regime detected - MODERATE BUY")
+            
+        elif "Range-Bound" in regime:
+            # Range-bound regime - CONSERVATIVE or NO TRADE
+            risk_pct = config.get('risk_pct', 0.02) * 0.3  # 0.6% risk (very conservative)
+            position_type = "RANGEBOUND"
+            logging.info(f"📊 {symbol} - RANGE-BOUND regime detected - CONSERVATIVE BUY")
+            
+        else:
+            # Unknown regime - skip
+            logging.info(f"[{symbol}] Unknown regime: {regime} - skipping trade")
             return
 
+        # Calculate position size with appropriate risk
+        units = calculate_position_size(symbol, price, portfolio, risk_pct)
+        
         # Check if enough cash
         required_cash = price * units
         if required_cash > cash_balance:
@@ -478,7 +499,9 @@ def execute_trade(symbol, regime, price):
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "entry_time": datetime.now().isoformat(),
-            "risk_pct": risk_pct
+            "risk_pct": risk_pct,
+            "regime_type": position_type,
+            "original_regime_prediction": regime  # Store the full prediction string
         }
 
         # Deduct cash
@@ -492,10 +515,61 @@ def execute_trade(symbol, regime, price):
         save_portfolio(portfolio)
 
         # Log the trade
-        logging.info(f"🚀 AUTOMATIC {side.upper()} {symbol} - Amount: {units:.6f} @ ${price:.2f} - Value: ${required_cash:.2f}")
+        logging.info(f"🎯 {position_type} {side.upper()} {symbol} - Amount: {units:.6f} @ ${price:.2f} - Risk: {risk_pct*100}%")
+        
+        # Send Telegram notification
+        message = (
+            f"🎯 {position_type} TRADE EXECUTED\n"
+            f"Symbol: {symbol}\n"
+            f"Regime: {regime}\n"
+            f"Amount: {units:.6f} @ ${price:.2f}\n"
+            f"Value: ${required_cash:.2f}\n"
+            f"Stop Loss: ${stop_loss:.2f}\n"
+            f"Take Profit: ${take_profit:.2f}\n"
+            f"Risk: {risk_pct*100:.1f}%"
+        )
+        send_telegram_message(message)
         
     except Exception as e:
         logging.error(f"Error executing trade for {symbol}: {e}")
+
+def add_stop_loss_to_manual_buy(symbol, entry_price, amount, stop_loss_pct=0.05, take_profit_pct=0.10):
+    """Add stop loss protection to manual buys"""
+    try:
+        portfolio = load_portfolio()
+        
+        # Calculate stop loss and take profit
+        stop_loss = entry_price * (1 - stop_loss_pct)
+        take_profit = entry_price * (1 + take_profit_pct)
+        
+        # Move from holdings to positions (protected)
+        base_currency = symbol.split('/')[0]
+        
+        # Remove from holdings
+        if base_currency in portfolio['holdings']:
+            portfolio['holdings'][base_currency] -= amount
+            if portfolio['holdings'][base_currency] == 0:
+                del portfolio['holdings'][base_currency]
+        
+        # Add to protected positions
+        portfolio['positions'][symbol] = {
+            "side": "long",
+            "amount": amount,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "entry_time": datetime.now().isoformat(),
+            "risk_pct": stop_loss_pct,
+            "type": "manual_protected"
+        }
+        
+        save_portfolio(portfolio)
+        logging.info(f"✅ Added protection to manual {symbol} buy: SL=${stop_loss:.2f}, TP=${take_profit:.2f}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Error adding protection to manual buy: {e}")
+        return False
 
 # Telegram notification function (will be imported from notifier in actual use)
 def send_telegram_message(message):

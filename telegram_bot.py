@@ -478,11 +478,54 @@ async def limit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Total: `${amount * price:.2f}`",
                 parse_mode='Markdown'
             )
+            # Ask if user wants stop loss protection
+            await update.message.reply_text(
+                f"✅ Limit order placed!\n"
+                f"Would you like to add stop loss protection?\n"
+                f"Use: /protect {symbol} {stop_loss_pct}% {take_profit_pct}%\n"
+                f"Example: /protect BTC/USDC 5 10"
+            )
         else:
             await update.message.reply_text(f"❌ Failed to place order: {message}")
 
     except ValueError as e:
         await update.message.reply_text("❌ Invalid amount or price format")
+
+async def protect_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add stop loss protection to existing position"""
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: /protect SYMBOL STOP_LOSS% TAKE_PROFIT%\n"
+            "Example: /protect BTC/USDC 5 10"
+        )
+        return
+    
+    symbol = context.args[0].upper()
+    stop_loss_pct = float(context.args[1]) / 100
+    take_profit_pct = float(context.args[2]) / 100
+    
+    from trade_engine import add_stop_loss_to_manual_buy, load_portfolio
+    
+    portfolio = load_portfolio()
+    
+    # Check if we have this in holdings
+    base_currency = symbol.split('/')[0]
+    if base_currency in portfolio.get('holdings', {}):
+        amount = portfolio['holdings'][base_currency]
+        current_price = get_current_price(symbol)  # You'll need to implement this
+        
+        success = add_stop_loss_to_manual_buy(symbol, current_price, amount, stop_loss_pct, take_profit_pct)
+        if success:
+            await update.message.reply_text(
+                f"✅ Protection added to {symbol}:\n"
+                f"Amount: {amount}\n"
+                f"Stop Loss: {stop_loss_pct*100}%\n"
+                f"Take Profit: {take_profit_pct*100}%"
+            )
+        else:
+            await update.message.reply_text("❌ Failed to add protection")
+    else:
+        await update.message.reply_text(f"❌ No {symbol} found in holdings")        
 
 async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all pending limit orders"""
