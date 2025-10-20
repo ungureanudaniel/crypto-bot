@@ -4,6 +4,7 @@ import os
 import pandas as pd
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import debug_portfolio
 from regime_switcher import train_model, predict_regime
 from data_feed import fetch_ohlcv
 from trade_engine import execute_trade
@@ -229,57 +230,30 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Bot status: {status_msg}")
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show comprehensive portfolio including both holdings and positions"""
+    """Show cash balance and unprotected holdings only"""
     from trade_engine import load_portfolio
-    from data_feed import get_current_prices
     
     portfolio = load_portfolio()
-    current_prices = get_current_prices()
-    
     cash = portfolio.get('cash_balance', 0)
     holdings = portfolio.get('holdings', {})
     positions = portfolio.get('positions', {})
     
-    # Calculate total portfolio value
-    total_value = cash
-    
     msg_lines = [
-        "💼 *Portfolio Balance*",
-        f"💰 Cash: `${cash:,.2f}`"
+        "💼 *Quick Balance*",
+        f"💰 Cash: `${cash:,.2f}`",
+        f"📦 Unprotected Holdings: {len(holdings)}",
+        f"🛡️ Protected Positions: {len(positions)}"
     ]
     
-    # Show unprotected holdings
     if holdings:
-        msg_lines.append("\n📦 *Unprotected Holdings:*")
+        msg_lines.append("\n📦 *Holdings (No Stop Loss):*")
         for coin, amount in holdings.items():
-            symbol = f"{coin}/USDC"
-            price = current_prices.get(symbol, 0)
-            value = amount * price
-            total_value += value
-            msg_lines.append(f"• {coin}: {amount:.6f} (${value:.2f})")
+            msg_lines.append(f"• {coin}: {amount}")
     else:
-        msg_lines.append("\n📦 *Unprotected Holdings:* None")
+        msg_lines.append("\n📦 No unprotected holdings")
     
-    # Show protected positions (what your bot is creating)
-    if positions:
-        msg_lines.append("\n🛡️ *Protected Positions:*")
-        for symbol, position in positions.items():
-            current_price = current_prices.get(symbol, position['entry_price'])
-            value = position['amount'] * current_price
-            pnl = (current_price - position['entry_price']) * position['amount']
-            pnl_pct = (current_price / position['entry_price'] - 1) * 100
-            total_value += value
-            
-            msg_lines.append(
-                f"• {symbol}: {position['amount']:.6f}\n"
-                f"  Entry: ${position['entry_price']:.2f} | Now: ${current_price:.2f}\n"
-                f"  PnL: ${pnl:+.2f} ({pnl_pct:+.1f}%)\n"
-                f"  SL: ${position['stop_loss']:.2f} | TP: ${position['take_profit']:.2f}"
-            )
-    else:
-        msg_lines.append("\n🛡️ *Protected Positions:* None")
-    
-    msg_lines.append(f"\n📊 *Total Portfolio Value:* `${total_value:,.2f}`")
+    msg_lines.append(f"\n💡 Use `/portfolio_value` for total portfolio value")
+    msg_lines.append(f"💡 Use `/debug_portfolio` for detailed breakdown")
     
     await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
 
@@ -391,6 +365,154 @@ async def scheduler_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         msg.append(f"- {job.job_func.__name__}: next run at {job.next_run}")
     await update.message.reply_text("\n".join(msg), parse_mode='Markdown')
 
+async def portfolio_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show total portfolio value including cash, holdings, and positions"""
+    from trade_engine import load_portfolio
+    from data_feed import get_current_prices
+    
+    portfolio = load_portfolio()
+    current_prices = get_current_prices()
+    
+    cash = portfolio.get('cash_balance', 0)
+    holdings = portfolio.get('holdings', {})
+    positions = portfolio.get('positions', {})
+    
+    # Calculate total value
+    total_value = cash
+    holdings_value = 0
+    positions_value = 0
+    
+    # Calculate holdings value
+    holdings_breakdown = []
+    for coin, amount in holdings.items():
+        symbol = f"{coin}/USDC"
+        price = current_prices.get(symbol, 0)
+        value = amount * price
+        holdings_value += value
+        holdings_breakdown.append(f"  • {coin}: {amount:.6f} = ${value:.2f}")
+    
+    # Calculate positions value
+    positions_breakdown = []
+    total_invested = 0
+    total_pnl = 0
+    
+    for symbol, position in positions.items():
+        current_price = current_prices.get(symbol, position['entry_price'])
+        invested = position['amount'] * position['entry_price']
+        current_value = position['amount'] * current_price
+        pnl = current_value - invested
+        pnl_pct = (current_price / position['entry_price'] - 1) * 100
+        
+        positions_value += current_value
+        total_invested += invested
+        total_pnl += pnl
+        
+        positions_breakdown.append(
+            f"  • {symbol}: {position['amount']:.6f} = ${current_value:.2f} "
+            f"(PnL: ${pnl:+.2f}, {pnl_pct:+.1f}%)"
+        )
+    
+    total_value = cash + holdings_value + positions_value
+    initial_balance = portfolio.get('initial_balance', total_value)
+    total_return = total_value - initial_balance
+    total_return_pct = (total_value / initial_balance - 1) * 100
+    
+    # Build the message
+    msg_lines = [
+        "💰 *PORTFOLIO SUMMARY*",
+        f"",
+        f"💵 *Cash Balance:* `${cash:,.2f}`",
+        f"📦 *Holdings Value:* `${holdings_value:,.2f}`",
+        f"🛡️ *Positions Value:* `${positions_value:,.2f}`",
+        f"",
+        f"📊 *TOTAL PORTFOLIO VALUE:* `${total_value:,.2f}`",
+        f"",
+        f"📈 *Performance:*",
+        f"Initial Balance: `${initial_balance:,.2f}`",
+        f"Total Return: `${total_return:+.2f}` ({total_return_pct:+.1f}%)",
+    ]
+    
+    # Add holdings breakdown if any
+    if holdings_breakdown:
+        msg_lines.extend([
+            f"",
+            f"📦 *Holdings Breakdown:*"
+        ] + holdings_breakdown)
+    
+    # Add positions breakdown if any
+    if positions_breakdown:
+        msg_lines.extend([
+            f"",
+            f"🛡️ *Positions Breakdown:*"
+        ] + positions_breakdown)
+    
+    # Add PnL summary for positions
+    if positions_value > 0:
+        total_pnl_pct = (positions_value / total_invested - 1) * 100 if total_invested > 0 else 0
+        msg_lines.extend([
+            f"",
+            f"🎯 *Positions Performance:*",
+            f"Total Invested: `${total_invested:.2f}`",
+            f"Total PnL: `${total_pnl:+.2f}` ({total_pnl_pct:+.1f}%)"
+        ])
+    
+    # Add quick stats
+    msg_lines.extend([
+        f"",
+        f"📋 *Quick Stats:*",
+        f"• Cash: {cash/total_value*100:.1f}% of portfolio",
+        f"• Holdings: {holdings_value/total_value*100:.1f}% of portfolio",
+        f"• Positions: {positions_value/total_value*100:.1f}% of portfolio",
+        f"• Total Assets: {len(holdings) + len(positions)}"
+    ])
+    
+    await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
+
+async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show portfolio overview with total value"""
+    from trade_engine import load_portfolio
+    from data_feed import get_current_prices
+    
+    portfolio = load_portfolio()
+    current_prices = get_current_prices()
+    
+    cash = portfolio.get('cash_balance', 0)
+    holdings = portfolio.get('holdings', {})
+    positions = portfolio.get('positions', {})
+    
+    # Calculate total value quickly
+    total_value = cash
+    
+    for coin, amount in holdings.items():
+        symbol = f"{coin}/USDC"
+        price = current_prices.get(symbol, 0)
+        total_value += amount * price
+    
+    for symbol, position in positions.items():
+        current_price = current_prices.get(symbol, position['entry_price'])
+        total_value += position['amount'] * current_price
+    
+    # Build concise message
+    msg_lines = [
+        "💼 *Portfolio Overview*",
+        f"",
+        f"💰 *Cash:* `${cash:,.2f}`",
+        f"📦 *Holdings:* {len(holdings)} coins",
+        f"🛡️ *Positions:* {len(positions)} coins",
+        f"",
+        f"📊 *Total Value:* `${total_value:,.2f}`"
+    ]
+    
+    # Show active positions if any
+    if positions:
+        msg_lines.append(f"\n🎯 *Active Positions:*")
+        for symbol, position in positions.items():
+            current_price = current_prices.get(symbol, position['entry_price'])
+            pnl_pct = (current_price / position['entry_price'] - 1) * 100
+            msg_lines.append(f"• {symbol}: {position['amount']:.6f} ({pnl_pct:+.1f}%)")
+    
+    await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Enhanced help command with debugging capabilities"""
     
@@ -404,7 +526,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         "💼 PORTFOLIO & BALANCE": [
             "/balance - Show cash & unprotected holdings",
-            "/portfolio - Show detailed portfolio (positions + holdings)",
+            "/portfolio - Portfolio overview with total value", 
+            "/portfolio_value - Detailed portfolio valuation",
             "/latest_trades - Recent trade history", 
             "/performance - Trading performance stats",
             "/price <symbol> - Current price (e.g., /price BTC/USDC)"
@@ -711,6 +834,9 @@ def start_telegram_bot():
         ("regime", regime),
         ("trade", trade),
         ("scheduler_status", scheduler_status),
+        ("portfolio", portfolio),  # New portfolio overview
+        ("portfolio_value", portfolio_value),  # New detailed portfolio value
+        ("debug_portfolio", debug_portfolio),
         ("limit_order", limit_order),
         ("pending_orders", pending_orders),
         ("cancel_order", cancel_order),

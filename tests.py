@@ -403,10 +403,10 @@ def test_auto_protection():
     print("\n✅ Auto-protection test completed!")
 
 if __name__ == "__main__":
-    # test_scheduler()
-    # test_regime_detection()
+    test_scheduler()
+    test_regime_detection()
     test_auto_protection()
-    # test_feature_alignment()
-    # debug_regime_model()
-    # debug_strategy()
-    # test_breakout_scenarios()
+    test_feature_alignment()
+    debug_regime_model()
+    debug_strategy()
+    test_breakout_scenarios()
