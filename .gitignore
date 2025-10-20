@@ -9,3 +9,5 @@ logs/
 config.json
 
 portfolio.json
+.pyc
+__pycache__/
