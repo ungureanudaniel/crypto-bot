@@ -468,6 +468,130 @@ async def portfolio_value(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
 
+async def scan_opportunities(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scan all coins for trading opportunities"""
+    from regime_switcher import predict_regime
+    from data_feed import fetch_ohlcv
+    from trade_engine import load_config
+    
+    await update.message.reply_text("🔍 Scanning all coins for trading opportunities...")
+    
+    config = load_config()
+    coins = config.get('coins', [])
+    
+    if not coins:
+        await update.message.reply_text("❌ No coins configured in config.json")
+        return
+    
+    opportunities = {
+        "breakout": [],
+        "trending": [], 
+        "rangebound": []
+    }
+    
+    scanned = 0
+    errors = 0
+    
+    # Scan each coin
+    for coin in coins:
+        try:
+            df = fetch_ohlcv(coin, '15m')
+            if not df.empty and len(df) > 50:  # Ensure enough data
+                regime = predict_regime(df)
+                current_price = df.iloc[-1]['close']
+                price_change_1h = (df.iloc[-1]['close'] - df.iloc[-4]['close']) / df.iloc[-4]['close'] * 100
+                
+                # Extract confidence
+                confidence = 70  # default
+                if '%' in regime:
+                    try:
+                        confidence = int(regime.split('(')[-1].split('%')[0])
+                    except:
+                        pass
+                
+                opportunity = {
+                    'symbol': coin,
+                    'regime': regime,
+                    'price': current_price,
+                    'change_1h': price_change_1h,
+                    'confidence': confidence
+                }
+                
+                if "Breakout" in regime and confidence > 70:
+                    opportunities["breakout"].append(opportunity)
+                elif "Trending" in regime and confidence > 70:
+                    opportunities["trending"].append(opportunity)
+                elif "Range-Bound" in regime and confidence > 80:
+                    opportunities["rangebound"].append(opportunity)
+                
+                scanned += 1
+                
+        except Exception as e:
+            errors += 1
+            continue
+    
+    # Build results message
+    msg_lines = [
+        f"📊 *Market Scan Complete*",
+        f"Scanned: {scanned} coins | Errors: {errors}",
+        f"",
+    ]
+    
+    # Breakout opportunities
+    if opportunities["breakout"]:
+        msg_lines.append("🚀 *BREAKOUT OPPORTUNITIES* (High Momentum)")
+        # Sort by confidence
+        opportunities["breakout"].sort(key=lambda x: x['confidence'], reverse=True)
+        for opp in opportunities["breakout"][:5]:  # Top 5
+            msg_lines.append(
+                f"• {opp['symbol']}: ${opp['price']:.2f} "
+                f"({opp['change_1h']:+.1f}% 1h) - {opp['regime']}"
+            )
+        msg_lines.append("")
+    
+    # Trending opportunities
+    if opportunities["trending"]:
+        msg_lines.append("📈 *TRENDING OPPORTUNITIES* (Good Direction)")
+        opportunities["trending"].sort(key=lambda x: x['confidence'], reverse=True)
+        for opp in opportunities["trending"][:5]:
+            msg_lines.append(
+                f"• {opp['symbol']}: ${opp['price']:.2f} "
+                f"({opp['change_1h']:+.1f}% 1h) - {opp['regime']}"
+            )
+        msg_lines.append("")
+    
+    # Range-bound opportunities  
+    if opportunities["rangebound"]:
+        msg_lines.append("📊 *RANGE-BOUND OPPORTUNITIES* (Conservative)")
+        opportunities["rangebound"].sort(key=lambda x: x['confidence'], reverse=True)
+        for opp in opportunities["rangebound"][:3]:
+            msg_lines.append(
+                f"• {opp['symbol']}: ${opp['price']:.2f} "
+                f"({opp['change_1h']:+.1f}% 1h) - {opp['regime']}"
+            )
+        msg_lines.append("")
+    
+    if not any(opportunities.values()):
+        msg_lines.extend([
+            "😴 *No Strong Opportunities Found*",
+            "",
+            "💡 *Suggestions:*",
+            "• Markets might be quiet right now",
+            "• Try again in 15-30 minutes",
+            "• Check individual coins with `/regime SYMBOL`"
+        ])
+    else:
+        msg_lines.extend([
+            "💡 *Trading Suggestions:*",
+            "• Breakout 🚀: Aggressive positions (2% risk)",
+            "• Trending 📈: Moderate positions (2% risk)", 
+            "• Range-Bound 📊: Conservative positions (0.6% risk)",
+            "",
+            "Use `/trade SYMBOL` to execute immediately"
+        ])
+    
+    await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
+
 async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show portfolio overview with total value"""
     from trade_engine import load_portfolio
@@ -768,6 +892,72 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ No pending orders found for {symbol}")
 
+async def quick_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Quick scan for top opportunities only"""
+    from regime_switcher import predict_regime
+    from data_feed import fetch_ohlcv
+    from trade_engine import load_config
+    
+    await update.message.reply_text("⚡ Quick scanning for top opportunities...")
+    
+    config = load_config()
+    # Scan only top 10 coins for speed
+    coins = config.get('coins', [])[:10]
+    
+    top_opportunities = []
+    
+    for coin in coins:
+        try:
+            df = fetch_ohlcv(coin, '15m')
+            if not df.empty:
+                regime = predict_regime(df)
+                current_price = df.iloc[-1]['close']
+                
+                # Only consider high confidence opportunities
+                if "Breakout" in regime or "Trending" in regime:
+                    # Extract confidence
+                    confidence = 70
+                    if '%' in regime:
+                        try:
+                            confidence = int(regime.split('(')[-1].split('%')[0])
+                        except:
+                            pass
+                    
+                    if confidence > 75:
+                        top_opportunities.append({
+                            'symbol': coin,
+                            'regime': regime,
+                            'price': current_price,
+                            'confidence': confidence
+                        })
+                        
+        except Exception as e:
+            continue
+    
+    # Sort by confidence
+    top_opportunities.sort(key=lambda x: x['confidence'], reverse=True)
+    
+    if top_opportunities:
+        msg_lines = ["🎯 *Top Trading Opportunities*"]
+        for opp in top_opportunities[:5]:  # Top 5 only
+            msg_lines.append(
+                f"• {opp['symbol']}: ${opp['price']:.2f} - {opp['regime']}"
+            )
+        
+        msg_lines.extend([
+            "",
+            "💡 Use `/trade SYMBOL` to execute",
+            "Or `/scan` for full market analysis"
+        ])
+    else:
+        msg_lines = [
+            "😴 *No Strong Opportunities Found*",
+            "Markets are quiet right now.",
+            "Try full scan with `/scan` for more details"
+        ]
+    
+    await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
+
 async def check_orders_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually trigger limit order check"""
     from scheduler import manual_limit_order_check
@@ -797,6 +987,8 @@ def start_telegram_bot():
         ("get_interval", get_interval),
         ("regime", regime),
         ("trade", trade),
+        ("scan", scan_opportunities),
+        ("quick_scan", quick_scan),
         ("scheduler_status", scheduler_status),
         ("portfolio", portfolio),  # New portfolio overview
         ("portfolio_value", portfolio_value),  # New detailed portfolio value
