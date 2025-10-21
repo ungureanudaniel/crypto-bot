@@ -638,68 +638,57 @@ async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Help command split into multiple messages"""
+    """Help command with no formatting - guaranteed to work"""
     
-    # Part 1: Basic commands
-    part1 = [
-        "🤖 *Binance AI AutoTrader - Help*",
-        "",
-        "🤖 *BOT CONTROL*",
-        "/start - Start trading bot",
-        "/stop - Stop trading bot", 
-        "/status - Check bot status",
-        "",
-        "💼 *PORTFOLIO & BALANCE*",
-        "/balance - Show cash & holdings",
-        "/portfolio - Portfolio overview", 
-        "/portfolio_value - Detailed valuation",
-        "/latest_trades - Trade history",
-        "/price <symbol> - Current price",
-        "",
-        "📊 *TRADING & ANALYSIS*",
-        "/regime <symbol> - Market regime",
-        "/trade <symbol> - Execute trade",
-        "/scan - Scan for opportunities"
-    ]
+    help_text = """
+        Binance AI AutoTrader - Command Reference
+
+        BOT CONTROL
+        /start - Start trading bot
+        /stop - Stop trading bot
+        /status - Check bot status
+
+        PORTFOLIO & BALANCE  
+        /balance - Show cash & holdings
+        /portfolio - Portfolio overview
+        /portfolio_value - Detailed valuation
+        /latest_trades - Trade history
+        /price <symbol> - Current price
+
+        TRADING & ANALYSIS
+        /regime <symbol> - Market regime
+        /trade <symbol> - Execute trade  
+        /scan - Scan for opportunities
+
+        ORDER MANAGEMENT
+        /limit_order <symbol> <side> <amount> <price>
+        /pending_orders - View pending orders
+        /cancel_order <symbol|all> - Cancel orders
+
+        RISK & PROTECTION
+        /protect <symbol> <sl%> <tp%> - Add stop loss
+        /risk - Risk exposure
+
+        SETTINGS & CONFIG
+        /mode <paper|live|status> - Trading mode
+        /set_interval <timeframe> - Set interval
+        /config - Configuration
+        /api_status - Test API
+
+        DEBUGGING & MAINTENANCE
+        /train - Retrain ML model
+        /scheduler_status - Scheduler info  
+        /debug_portfolio - Portfolio analysis
+        /debug_positions - Protected positions
+        /debug_regime <symbol> - Regime analysis
+
+        QUICK EXAMPLES
+        /regime BTC/USDC
+        /portfolio_value
+        /debug_portfolio
+            """
     
-    await update.message.reply_text("\n".join(part1), parse_mode='Markdown')
-    
-    # Part 2: Advanced commands
-    part2 = [
-        "📋 *ORDER MANAGEMENT*",
-        "/limit_order <symbol> <side> <amount> <price>",
-        "/pending_orders - View pending orders", 
-        "/cancel_order <symbol|all> - Cancel orders",
-        "",
-        "🛡️ *RISK & PROTECTION*",
-        "/protect <symbol> <sl%> <tp%> - Add stop loss",
-        "/risk - Risk exposure",
-        "",
-        "⚙️ *SETTINGS*", 
-        "/mode <paper|live|status> - Trading mode",
-        "/set_interval <timeframe> - Set interval",
-        "/config - Configuration",
-        "/api_status - Test API"
-    ]
-    
-    await update.message.reply_text("\n".join(part2), parse_mode='Markdown')
-    
-    # Part 3: Debugging
-    part3 = [
-        "🔧 *DEBUGGING & MAINTENANCE*",
-        "/train - Retrain ML model", 
-        "/scheduler_status - Scheduler info",
-        "/debug_portfolio - Portfolio analysis",
-        "/debug_positions - Protected positions",
-        "/debug_regime <symbol> - Regime analysis",
-        "",
-        "💡 *QUICK EXAMPLES*", 
-        "/regime BTC/USDC",
-        "/portfolio_value",
-        "/debug_portfolio"
-    ]
-    
-    await update.message.reply_text("\n".join(part3), parse_mode='Markdown')
+    await update.message.reply_text(help_text)
 
 async def limit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Place a manual limit order: /limit_order BTC/USDC buy 0.001 35000.50"""
