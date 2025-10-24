@@ -4,10 +4,10 @@ import os
 import pandas as pd
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import debug_portfolio
+from debug_portfolio import check_portfolio_structure, debug_stop_losses, simple_debug
 from regime_switcher import train_model, predict_regime
 from data_feed import fetch_ohlcv
-from trade_engine import execute_trade
+from trade_engine import execute_trade, check_portfolio_health
 from scheduler import start_schedulers
 import schedule
 
@@ -681,6 +681,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         /debug_portfolio - Portfolio analysis
         /debug_positions - Protected positions
         /debug_regime <symbol> - Regime analysis
+        /check_portfolio_health - Health check
 
         QUICK EXAMPLES
         /regime BTC/USDC
@@ -981,7 +982,10 @@ def start_telegram_bot():
         ("scheduler_status", scheduler_status),
         ("portfolio", portfolio),  # New portfolio overview
         ("portfolio_value", portfolio_value),  # New detailed portfolio value
-        ("debug_portfolio", debug_portfolio),
+        ("debug_portfolio", check_portfolio_structure),
+        ("debug_stop_losses", debug_stop_losses),
+        ("debug_portfolio_simple", simple_debug),
+        ("check_portfolio_health", check_portfolio_health),
         ("limit_order", limit_order),
         ("pending_orders", pending_orders),
         ("cancel_order", cancel_order),
