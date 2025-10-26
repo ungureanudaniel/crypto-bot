@@ -1,10 +1,295 @@
 {
-  "cash_balance": 1000,
+  "cash_balance": 203.20004196578088,
   "holdings": {},
   "positions": {
+    "BTC/USDC": {
+      "side": "long",
+      "amount": 8.856269477150648e-05,
+      "entry_price": 112914.36,
+      "stop_loss": 107268.64199999999,
+      "take_profit": 124205.79600000002,
+      "entry_time": "2025-10-26T11:37:32.060419",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (95% confidence)"
+    },
+    "ETH/USDC": {
+      "side": "long",
+      "amount": 0.002489494333910896,
+      "entry_price": 4016.88,
+      "stop_loss": 3816.036,
+      "take_profit": 4418.568,
+      "entry_time": "2025-10-26T11:37:36.983426",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (95% confidence)"
+    },
+    "BNB/USDC": {
+      "side": "long",
+      "amount": 0.008832751843836946,
+      "entry_price": 1132.15,
+      "stop_loss": 1075.5425,
+      "take_profit": 1245.3650000000002,
+      "entry_time": "2025-10-26T11:37:43.163325",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (86% confidence)"
+    },
+    "SOL/USDC": {
+      "side": "long",
+      "amount": 0.05091649694501018,
+      "entry_price": 196.4,
+      "stop_loss": 186.57999999999998,
+      "take_profit": 216.04000000000002,
+      "entry_time": "2025-10-26T11:37:48.316446",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (86% confidence)"
+    },
+    "TRX/USDC": {
+      "side": "long",
+      "amount": 322.25579053373616,
+      "entry_price": 0.2979,
+      "stop_loss": 0.283005,
+      "take_profit": 0.32769000000000004,
+      "entry_time": "2025-10-26T11:37:52.742540",
+      "risk_pct": 0.006,
+      "regime_type": "RANGEBOUND",
+      "original_regime_prediction": "Range-Bound \ud83d\udcca (77% confidence)"
+    },
+    "ADA/USDC": {
+      "side": "long",
+      "amount": 129.5352323838081,
+      "entry_price": 0.667,
+      "stop_loss": 0.63365,
+      "take_profit": 0.7337000000000001,
+      "entry_time": "2025-10-26T11:37:57.504195",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (93% confidence)"
+    },
+    "AVAX/USDC": {
+      "side": "long",
+      "amount": 0.4985044865403789,
+      "entry_price": 20.06,
+      "stop_loss": 19.057,
+      "take_profit": 22.066,
+      "entry_time": "2025-10-26T11:38:02.105414",
+      "risk_pct": 0.006,
+      "regime_type": "RANGEBOUND",
+      "original_regime_prediction": "Range-Bound \ud83d\udcca (90% confidence)"
+    },
+    "DOT/USDC": {
+      "side": "long",
+      "amount": 9.450404867853152,
+      "entry_price": 3.122,
+      "stop_loss": 2.9658999999999995,
+      "take_profit": 3.4342,
+      "entry_time": "2025-10-26T11:38:06.821166",
+      "risk_pct": 0.006,
+      "regime_type": "RANGEBOUND",
+      "original_regime_prediction": "Range-Bound \ud83d\udcca (87% confidence)"
+    },
+    "MATIC/USDC": {
+      "side": "long",
+      "amount": 194.6968704833982,
+      "entry_price": 0.3791,
+      "stop_loss": 0.360145,
+      "take_profit": 0.41701000000000005,
+      "entry_time": "2025-10-26T11:38:07.708564",
+      "risk_pct": 0.006,
+      "regime_type": "RANGEBOUND",
+      "original_regime_prediction": "Range-Bound \ud83d\udcca (85% confidence)"
+    },
+    "ATOM/USDC": {
+      "side": "long",
+      "amount": 20.7524602437459,
+      "entry_price": 3.201,
+      "stop_loss": 3.04095,
+      "take_profit": 3.5211000000000006,
+      "entry_time": "2025-10-26T11:38:12.698129",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (86% confidence)"
+    },
+    "LTC/USDC": {
+      "side": "long",
+      "amount": 0.1016260162601626,
+      "entry_price": 98.4,
+      "stop_loss": 93.48,
+      "take_profit": 108.24000000000001,
+      "entry_time": "2025-10-26T11:38:17.496832",
+      "risk_pct": 0.006,
+      "regime_type": "RANGEBOUND",
+      "original_regime_prediction": "Range-Bound \ud83d\udcca (60% confidence)"
+    },
+    "LINK/USDC": {
+      "side": "long",
+      "amount": 0.7098872444898872,
+      "entry_price": 18.2,
+      "stop_loss": 17.29,
+      "take_profit": 20.02,
+      "entry_time": "2025-10-26T11:38:22.169126",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (86% confidence)"
+    },
+    "UNI/USDC": {
+      "side": "long",
+      "amount": 5.648111658004442,
+      "entry_price": 6.381,
+      "stop_loss": 6.0619499999999995,
+      "take_profit": 7.019100000000001,
+      "entry_time": "2025-10-26T11:38:28.178045",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (91% confidence)"
+    },
+    "AAVE/USDC": {
+      "side": "long",
+      "amount": 0.04278440936122877,
+      "entry_price": 233.73,
+      "stop_loss": 222.04349999999997,
+      "take_profit": 257.103,
+      "entry_time": "2025-10-26T11:38:33.679009",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (91% confidence)"
+    },
+    "MKR/USDC": {
+      "side": "long",
+      "amount": 0.00550145788633988,
+      "entry_price": 1817.7,
+      "stop_loss": 1726.815,
+      "take_profit": 1999.4700000000003,
+      "entry_time": "2025-10-26T11:38:36.171710",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (60% confidence)"
+    },
+    "COMP/USDC": {
+      "side": "long",
+      "amount": 0.26034886748242647,
+      "entry_price": 38.41,
+      "stop_loss": 36.48949999999999,
+      "take_profit": 42.251,
+      "entry_time": "2025-10-26T11:38:41.624597",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (92% confidence)"
+    },
+    "SNX/USDC": {
+      "side": "long",
+      "amount": 40.97399990520397,
+      "entry_price": 1.242,
+      "stop_loss": 1.1799,
+      "take_profit": 1.3662,
+      "entry_time": "2025-10-26T11:38:44.255138",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (85% confidence)"
+    },
+    "CRV/USDC": {
+      "side": "long",
+      "amount": 82.83728901073793,
+      "entry_price": 0.5529,
+      "stop_loss": 0.5252549999999999,
+      "take_profit": 0.60819,
+      "entry_time": "2025-10-26T11:38:49.662271",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (85% confidence)"
+    },
+    "XRP/USDC": {
+      "side": "long",
+      "amount": 7.098834937041593,
+      "entry_price": 2.6397,
+      "stop_loss": 2.5077149999999997,
+      "take_profit": 2.90367,
+      "entry_time": "2025-10-26T11:38:55.065983",
+      "risk_pct": 0.006,
+      "regime_type": "RANGEBOUND",
+      "original_regime_prediction": "Range-Bound \ud83d\udcca (93% confidence)"
+    },
+    "DOGE/USDC": {
+      "side": "long",
+      "amount": 196.0868330823404,
+      "entry_price": 0.20066,
+      "stop_loss": 0.190627,
+      "take_profit": 0.22072600000000003,
+      "entry_time": "2025-10-26T11:39:00.476919",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (92% confidence)"
+    },
+    "ETC/USDC": {
+      "side": "long",
+      "amount": 0.6165228113440198,
+      "entry_price": 16.22,
+      "stop_loss": 15.408999999999999,
+      "take_profit": 17.842,
+      "entry_time": "2025-10-26T11:39:05.874389",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (93% confidence)"
+    },
+    "XLM/USDC": {
+      "side": "long",
+      "amount": 104.50077599050162,
+      "entry_price": 0.3293,
+      "stop_loss": 0.312835,
+      "take_profit": 0.36223,
+      "entry_time": "2025-10-26T11:39:11.301586",
+      "risk_pct": 0.006,
+      "regime_type": "RANGEBOUND",
+      "original_regime_prediction": "Range-Bound \ud83d\udcca (87% confidence)"
+    },
+    "ALGO/USDC": {
+      "side": "long",
+      "amount": 164.21471357531797,
+      "entry_price": 0.1886,
+      "stop_loss": 0.17916999999999997,
+      "take_profit": 0.20746,
+      "entry_time": "2025-10-26T11:39:16.730338",
+      "risk_pct": 0.006,
+      "regime_type": "RANGEBOUND",
+      "original_regime_prediction": "Range-Bound \ud83d\udcca (88% confidence)"
+    },
+    "FIL/USDC": {
+      "side": "long",
+      "amount": 17.24864200635796,
+      "entry_price": 1.616,
+      "stop_loss": 1.5352000000000001,
+      "take_profit": 1.7776000000000003,
+      "entry_time": "2025-10-26T11:39:22.710476",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (80% confidence)"
+    },
+    "ARB/USDC": {
+      "side": "long",
+      "amount": 76.7638461874144,
+      "entry_price": 0.3268,
+      "stop_loss": 0.31045999999999996,
+      "take_profit": 0.35948,
+      "entry_time": "2025-10-26T11:39:29.256597",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (85% confidence)"
+    },
+    "OP/USDC": {
+      "side": "long",
+      "amount": 49.40433794451274,
+      "entry_price": 0.457,
+      "stop_loss": 0.43415,
+      "take_profit": 0.5027,
+      "entry_time": "2025-10-26T11:39:34.676500",
+      "risk_pct": 0.02,
+      "regime_type": "TRENDING",
+      "original_regime_prediction": "Trending \ud83d\udcc8 (85% confidence)"
+    }
   },
-  "trade_history": [
-  ],
+  "trade_history": [],
   "pending_orders": [],
   "initial_balance": 1000.0
 }

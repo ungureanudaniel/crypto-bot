@@ -820,16 +820,63 @@ async def limit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             # Ask if user wants stop loss protection
             await update.message.reply_text(
-                f"✅ Limit order placed!\n"
-                f"Would you like to add stop loss protection?\n"
-                f"Use: /protect {symbol} {stop_loss_pct}% {take_profit_pct}%\n"
-                f"Example: /protect BTC/USDC 5 10"
+                "✅ Limit order placed!\n"
+                "Would you like to add stop loss protection?\n"
+                f"Usage: /protect {symbol} <stop_loss_pct> <take_profit_pct>\n"
+                "Example: /protect BTC/USDC 5 10"
             )
         else:
             await update.message.reply_text(f"❌ Failed to place order: {message}")
 
     except ValueError as e:
         await update.message.reply_text("❌ Invalid amount or price format")
+
+async def check_portfolio_health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check portfolio health and risk exposure"""
+    from trade_engine import check_portfolio_health
+    
+    health_report = check_portfolio_health()
+    
+    # Ensure we received a dict; some implementations may return False/None on error
+    if not isinstance(health_report, dict):
+        logging.error("check_portfolio_health returned unexpected value: %s", repr(health_report))
+        await update.message.reply_text("❌ Failed to compute portfolio health. See logs for details.")
+        return
+
+    # Safely extract values with defaults to avoid KeyError / type issues
+    total_value = health_report.get('total_value', 0)
+    cash_balance = health_report.get('cash_balance', 0)
+    holdings_value = health_report.get('holdings_value', 0)
+    positions_value = health_report.get('positions_value', 0)
+    max_drawdown = health_report.get('max_drawdown', 0)
+    risk_exposure = health_report.get('risk_exposure', 0)
+    issues = health_report.get('issues', [])
+
+    msg_lines = [
+        "🩺 *Portfolio Health Check*",
+        f"",
+        f"• Total Value: `${total_value:,.2f}`",
+        f"• Cash Balance: `${cash_balance:,.2f}`",
+        f"• Holdings Value: `${holdings_value:,.2f}`",
+        f"• Positions Value: `${positions_value:,.2f}`",
+        f"• Max Drawdown: {max_drawdown:.1f}%",
+        f"• Risk Exposure: {risk_exposure:.1f}%",
+        f"",
+    ]
+    
+    if issues:
+        msg_lines.append("⚠️ *Issues Found:*")
+        # Normalize issues into a list if it's not already a list to avoid iterating strings/invalid types
+        if isinstance(issues, list):
+            for issue in issues:
+                msg_lines.append(f"• {issue}")
+        else:
+            # If issues is a single string or another truthy value, append it as one item
+            msg_lines.append(f"• {issues}")
+    else:
+        msg_lines.append("✅ No issues detected. Portfolio is healthy!")
+    
+    await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
 
 async def protect_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add stop loss protection to existing position"""
