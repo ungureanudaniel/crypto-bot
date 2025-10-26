@@ -258,11 +258,13 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
 
 async def train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Retrain the ML model for regime prediction"""
     await update.message.reply_text("📚 Retraining ML model...")
     train_model()
     await update.message.reply_text("✅ Model retrained successfully!")
 
 async def regime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Predict market regime for a given coin"""
     if not context.args:
         await update.message.reply_text("Usage: `/regime BTC/USDC`", parse_mode='Markdown')
         return
@@ -277,6 +279,7 @@ async def regime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"📊 Current regime for *{symbol}*: `{current_regime}`", parse_mode='Markdown')
 
 async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Execute trade for a given coin based on predicted regime"""
     if not context.args:
         await update.message.reply_text("Usage: `/trade BTC/USDC`", parse_mode='Markdown')
         return
@@ -295,6 +298,46 @@ async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.bot_data["portfolio"] = load_portfolio()
 
     await update.message.reply_text(f"🚀 Executed trade for {symbol} based on regime: `{regime}`", parse_mode='Markdown')
+
+async def close_position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Close a protected position manually"""
+    if not context.args:
+        await update.message.reply_text("Usage: `/close_position SYMBOL`", parse_mode='Markdown')
+        return
+    
+    symbol = context.args[0].upper()
+    
+    from trade_engine import load_portfolio, close_position
+    from data_feed import get_current_prices
+    
+    try:
+        portfolio = load_portfolio()
+        positions = portfolio.get('positions', {})
+        
+        if symbol not in positions:
+            await update.message.reply_text(f"❌ No protected position found for {symbol}")
+            return
+        
+        # Get current price
+        current_prices = get_current_prices()
+        current_price = current_prices.get(symbol, positions[symbol]['entry_price'])
+        
+        # Close the position
+        success = close_position(symbol, current_price)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ *Position Closed!*\n"
+                f"Symbol: `{symbol}`\n"
+                f"Price: `${current_price:.2f}`\n"
+                f"Amount: `{positions[symbol]['amount']:.6f}`",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(f"❌ Failed to close position for {symbol}")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def latest_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show recent trades from portfolio"""
@@ -663,6 +706,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ORDER MANAGEMENT
         /limit_order <symbol> <side> <amount> <price>
         /pending_orders - View pending orders
+        /close_position <symbol> - Close position
         /cancel_order <symbol|all> - Cancel orders
 
         RISK & PROTECTION
@@ -976,7 +1020,7 @@ def start_telegram_bot():
         ("set_interval", set_interval),
         ("get_interval", get_interval),
         ("regime", regime),
-        ("trade", trade),
+        ("close_position", close_position_cmd),
         ("scan", scan_opportunities),
         ("quick_scan", quick_scan),
         ("scheduler_status", scheduler_status),
