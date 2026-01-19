@@ -3,15 +3,15 @@ import logging
 import ccxt
 import pandas as pd
 from datetime import datetime, timedelta
-from strategy_tools import generate_trade_signal
+from modules.strategy_tools import generate_trade_signal
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-TRADING_FEE = 0.001  # 0.1%
+TRADING_FEE = 0.00075  # 0.075% on binance
 MAX_POSITION_SIZE = 0.1  # Max 10% of portfolio per trade
-MAX_DRAWDOWN = 0.15  # Max 15% portfolio drawdown
-DAILY_LOSS_LIMIT = 0.05  # Max 5% daily loss
+MAX_DRAWDOWN = 0.05  # Max 5% portfolio drawdown
+DAILY_LOSS_LIMIT = 0.03  # Max 3% daily loss
 
 # -------------------------------------------------------------------
 # Portfolio handling
@@ -575,7 +575,7 @@ def add_stop_loss_to_manual_buy(symbol, entry_price, amount, stop_loss_pct=0.05,
 def send_telegram_message(message):
     """Send telegram notification using notifier.py"""
     try:
-        from notifier import send_telegram_message as send_telegram
+        from services.notifier import send_telegram_message as send_telegram
         return send_telegram(message)
     except ImportError as e:
         logging.error(f"Failed to import notifier: {e}")

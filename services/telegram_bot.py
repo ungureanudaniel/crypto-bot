@@ -4,11 +4,11 @@ import os
 import pandas as pd
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from debug_portfolio import check_portfolio_structure, debug_stop_losses, simple_debug
-from regime_switcher import train_model, predict_regime
-from data_feed import fetch_ohlcv
-from trade_engine import execute_trade, check_portfolio_health
-from scheduler import start_schedulers
+from debug.debug_portfolio import check_portfolio_structure, debug_stop_losses, simple_debug
+from modules.regime_switcher import train_model, predict_regime
+from modules.data_feed import fetch_ohlcv
+from modules.papertrade_engine import *
+from services.scheduler import start_schedulers
 import schedule
 
 # -------------------------------------------------------------------
@@ -39,9 +39,16 @@ def load_portfolio():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.bot_data["run_bot"] = True
     context.bot_data["portfolio"] = load_portfolio()
+    
+    # Store scheduler thread in bot_data
+    if 'scheduler_thread' not in context.bot_data:
+        from services.scheduler import start_schedulers
+        scheduler_thread = start_schedulers(context.bot_data)
+        context.bot_data['scheduler_thread'] = scheduler_thread
+        logging.info("✅ Scheduler started in background thread")
+    
     await update.message.reply_text("🤖 Binance AI AutoTrader is now *running*!")
-    start_schedulers(context.bot_data)
-    logging.info("Scheduler started via Telegram /start command.")
+    logging.info("Bot started via Telegram /start command.")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.bot_data["run_bot"] = False
@@ -49,30 +56,32 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logging.info("Trading bot manually stopped via Telegram.")
 
 async def trading_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Switch between paper trading and live trading using your config"""
+    """Switch between paper trading and live trading"""
     if not context.args:
         # Show current mode
-        with open("config.json") as f:
-            config = json.load(f)
         
-        current_mode = 'live' if config.get('live_trading', False) else 'paper'
+        current_mode = 'live' if CONFIG.get('live_trading', False) else 'paper'
         mode_display = "📝 PAPER TRADING" if current_mode == 'paper' else "🚀 LIVE TRADING"
         
-        # Check if API keys are configured for live trading
-        api_configured = bool(config.get('binance_api_key') and config.get('binance_api_secret'))
-        api_status = "✅ Configured" if api_configured else "❌ Not Configured"
+        # Check API keys
+        has_api_key = bool(CONFIG.get('binance_api_key'))
+        has_api_secret = bool(CONFIG.get('binance_api_secret'))
+        api_status = "✅ Configured" if (has_api_key and has_api_secret) else "❌ Not Configured"
         
+        # Get portfolio info
+        from modules.portfolio import load_portfolio
         portfolio = load_portfolio()
         
         await update.message.reply_text(
-            f"🤖 *Trading Mode*: {mode_display}\n"
-            f"💰 Starting Balance: `${config.get('starting_balance', 1000):,.2f}`\n"
-            f"📈 Position Size: {config.get('position_size_pct', 10)}%\n"
+            f"🤖 *Trading Mode*\n\n"
+            f"{mode_display}\n\n"
+            f"💰 Starting Balance: `${CONFIG.get('starting_balance', 1000):,.2f}`\n"
+            f"📈 Position Size: {CONFIG.get('position_size_pct', 10)}%\n"
             f"🔑 Binance API: {api_status}\n"
-            f"💼 Current Balance: `${portfolio['cash_balance']:,.2f}`\n\n"
+            f"💼 Current Cash: `${portfolio['cash_balance']:,.2f}`\n\n"
             "Usage:\n"
             "`/mode paper` - Enable paper trading (simulation)\n"
-            "`/mode live` - Enable live trading (real orders)\n"
+            "`/mode live` - Enable live trading (requires API keys)\n"
             "`/mode status` - Check current mode & API status",
             parse_mode='Markdown'
         )
@@ -81,14 +90,12 @@ async def trading_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command = context.args[0].lower()
     
     if command == 'paper':
-        # Update config
-        with open("config.json", "r") as f:
-            config = json.load(f)
+        import json
+        # Update CONFIG        
+        CONFIG['live_trading'] = False
         
-        config['live_trading'] = False
-        
-        with open("config.json", "w") as f:
-            json.dump(config, f, indent=2)
+        with open("CONFIG.json", "w") as f:
+            json.dump(CONFIG, f, indent=2)
         
         await update.message.reply_text(
             "📝 *PAPER TRADING MODE ENABLED*\n\n"
@@ -99,14 +106,12 @@ async def trading_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
     elif command == 'live':
-        # Check if API keys are configured
-        with open("config.json", "r") as f:
-            config = json.load(f)
-        
-        if not config.get('binance_api_key') or not config.get('binance_api_secret'):
+        # Check if API keys are CONFIGured
+
+        if not CONFIG.get('binance_api_key') or not CONFIG.get('binance_api_secret'):
             await update.message.reply_text(
                 "❌ *Cannot Enable Live Trading*\n\n"
-                "Binance API keys are not configured in config.json\n\n"
+                "Binance API keys are not CONFIGured in CONFIG.json\n\n"
                 "Add your keys:\n"
                 "```json\n"
                 "{\n"
@@ -130,10 +135,10 @@ async def trading_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        config['live_trading'] = True
-        
-        with open("config.json", "w") as f:
-            json.dump(config, f, indent=2)
+        CONFIG['live_trading'] = True
+        import json
+        with open("CONFIG.json", "w") as f:
+            json.dump(CONFIG, f, indent=2)
         
         await update.message.reply_text(
             "🚀 *LIVE TRADING MODE ENABLED*\n\n"
@@ -145,23 +150,25 @@ async def trading_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
     elif command == 'status':
-        with open("config.json") as f:
-            config = json.load(f)
+        import json
+        with open("CONFIG.json") as f:
+            CONFIG = json.load(f)
         
-        current_mode = 'live' if config.get('live_trading', False) else 'paper'
+        current_mode = 'live' if CONFIG.get('live_trading', False) else 'paper'
         mode_display = "📝 PAPER TRADING" if current_mode == 'paper' else "🚀 LIVE TRADING"
-        api_configured = bool(config.get('binance_api_key') and config.get('binance_api_secret'))
-        api_status = "✅ Configured" if api_configured else "❌ Not Configured"
         
-        portfolio = load_portfolio()
+        # Test data feed
+        from modules.data_feed import data_feed
+        test_symbol = CONFIG.get('coins', ['BTC/USDT'])[0]
+        current_price = data_feed.get_price(test_symbol)
+        
+        connection_status = "✅ Connected" if current_price else "❌ Disconnected"
         
         await update.message.reply_text(
             f"*Trading Mode*: {mode_display}\n"
-            f"*Binance API*: {api_status}\n"
-            f"*Portfolio Balance*: `${portfolio['cash_balance']:,.2f}`\n"
-            f"*Holdings*: {len(portfolio.get('holdings', {}))} coins\n"
-            f"*Open Positions*: {len(portfolio.get('positions', {}))}\n"
-            f"*Coins Monitored*: {len(config.get('coins', []))}",
+            f"*Data Feed*: {connection_status}\n"
+            f"*Test Symbol*: {test_symbol} ${current_price:.2f if current_price else 'N/A'}\n"
+            f"*Coins Monitored*: {len(CONFIG.get('coins', []))}",
             parse_mode='Markdown'
         )
         
@@ -169,58 +176,121 @@ async def trading_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Unknown command. Use `/mode paper` or `/mode live`")
 
 async def api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check Binance API connection status"""
-    from trade_engine import get_exchange
-    
-    await update.message.reply_text("🔗 Testing Binance API connection...")
+    """Check system and Binance API connection status"""
+    await update.message.reply_text("🔗 Checking system and Binance API status...")
     
     try:
-        exchange = get_exchange()
-        if exchange:
-            # Test connection
-            markets = exchange.load_markets()
-            balance = exchange.fetch_balance()
-            
-            total_balance = balance.get('total', {})
-            usdc_balance = total_balance.get('USDC', 0)
-            
-            await update.message.reply_text(
-                "✅ *Binance API Connection Successful!*\n"
-                f"💰 USDC Balance: `${usdc_balance:.2f}`\n"
-                f"📈 Markets loaded: {len(markets)}\n"
-                f"🔐 Testnet: {exchange.sandbox}",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text("❌ Failed to create exchange connection - check API keys")
-            
+        # Import what we need
+        import json
+        from modules.data_feed import data_feed
+        from modules.papertrade_engine import paper_engine
+        from modules.portfolio import load_portfolio
+        
+        # Load CONFIG to check API keys
+        with open("CONFIG.json", "r") as f:
+            CONFIG = json.load(f)
+        
+        # Check if API keys are CONFIGured
+        has_api_key = bool(CONFIG.get('binance_api_key'))
+        has_api_secret = bool(CONFIG.get('binance_api_secret'))
+        
+        # Test data feed connection
+        await update.message.reply_text("📡 Testing Binance data feed...")
+        
+        # Try to get a price to test connection
+        test_symbol = CONFIG.get('coins', ['BTC/USDT'])[0]
+        current_price = data_feed.get_price(test_symbol)
+        
+        # Get portfolio info
+        portfolio = load_portfolio()
+        cash_balance = portfolio.get('cash_balance', 0)
+        
+        # Build status message
+        status_lines = [
+            "📊 *SYSTEM STATUS REPORT*",
+            "",
+            "🔑 *Binance API Configuration:*",
+            f"   API Key: {'✅ Configured' if has_api_key else '❌ Missing'}",
+            f"   API Secret: {'✅ Configured' if has_api_secret else '❌ Missing'}",
+            f"   Trading Mode: {'🚀 LIVE' if CONFIG.get('live_trading') else '📝 PAPER'}",
+            "",
+            "📡 *Data Feed Status:*",
+            f"   Connection: {'✅ Connected' if current_price else '❌ Failed'}",
+            f"   Test Symbol: {test_symbol}",
+            f"   Current Price: ${current_price:.2f}" if current_price else "   Price: N/A",
+            "",
+            "💰 *Portfolio Status:*",
+            f"   Cash Balance: ${cash_balance:,.2f}",
+            f"   Starting Balance: ${portfolio.get('initial_balance', cash_balance):,.2f}",
+            f"   Positions: {len(portfolio.get('positions', {}))}",
+            "",
+            "⚙️ *System Configuration:*",
+            f"   Coins Monitored: {len(CONFIG.get('coins', []))}",
+            f"   Trading Timeframe: {CONFIG.get('trading_timeframe', '15m')}",
+            f"   Max Positions: {CONFIG.get('max_positions', 3)}",
+            f"   Risk per Trade: {CONFIG.get('risk_per_trade', 0.02)*100:.1f}%",
+        ]
+        
+        # Add warnings if needed
+        if not has_api_key or not has_api_secret:
+            status_lines.extend([
+                "",
+                "⚠️ *Warnings:*",
+                "   • Binance API keys not fully CONFIGured",
+                "   • Data feed uses public endpoints (rate limited)",
+                "   • Live trading will not work",
+            ])
+        
+        if CONFIG.get('live_trading') and (not has_api_key or not has_api_secret):
+            status_lines.extend([
+                "",
+                "❌ *Critical Issue:*",
+                "   • Live trading enabled but API keys missing!",
+                "   • Switch to paper trading with `/mode paper`",
+            ])
+        
+        await update.message.reply_text("\n".join(status_lines), parse_mode='Markdown')
+        
     except Exception as e:
-        await update.message.reply_text(
-            f"❌ *Binance API Connection Failed*\n\n"
-            f"Error: {str(e)}\n\n"
-            "Please check your API keys in config.json",
-            parse_mode='Markdown'
+        error_message = (
+            f"❌ *Error Checking System Status*\n\n"
+            f"Error: {str(e)[:100]}\n\n"
+            f"Check your CONFIGuration and network connection."
         )
+        await update.message.reply_text(error_message, parse_mode='Markdown')
+        logging.error(f"Error in api_status: {e}")
 
-async def config_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current configuration"""
-    with open("config.json") as f:
-        config = json.load(f)
+async def CONFIG_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current CONFIGuration"""
+    import json
+    with open("CONFIG.json") as f:
+        CONFIG = json.load(f)
     
+    from modules.portfolio import load_portfolio
     portfolio = load_portfolio()
+    
+    from modules.data_feed import data_feed
+    test_symbol = CONFIG.get('coins', ['BTC/USDT'])[0]
+    current_price = data_feed.get_price(test_symbol)
     
     info_lines = [
         "⚙️ *Bot Configuration*",
-        f"💰 Starting Balance: `${config.get('starting_balance', 1000):,.2f}`",
-        f"📈 Position Size: {config.get('position_size_pct', 10)}%",
-        f"⏰ Timeframe: {config.get('timeframe', '1h')}",
-        f"📊 Coins Monitored: {len(config.get('coins', []))}",
+        f"💰 Starting Balance: `${CONFIG.get('starting_balance', 1000):,.2f}`",
+        f"📈 Risk per Trade: {CONFIG.get('risk_per_trade', 0.02)*100:.1f}%",
+        f"⏰ Timeframe: {CONFIG.get('trading_timeframe', '15m')}",
+        f"📊 Coins Monitored: {len(CONFIG.get('coins', []))}",
+        f"📈 Max Positions: {CONFIG.get('max_positions', 3)}",
+        f"🔐 Trading Mode: {'🚀 LIVE' if CONFIG.get('live_trading') else '📝 PAPER'}",
         "",
         "💼 *Current Portfolio*",
-        f"💰 Balance: `${portfolio['cash_balance']:,.2f}`",
+        f"💰 Cash: `${portfolio['cash_balance']:,.2f}`",
         f"📈 Holdings: {len(portfolio.get('holdings', {}))} coins",
-        f"📋 Open Positions: {len(portfolio.get('positions', {}))}",
-        f"📜 Trade History: {len(portfolio.get('trade_history', []))} trades"
+        f"📋 Positions: {len(portfolio.get('positions', {}))}",
+        f"📜 Trade History: {len(portfolio.get('trade_history', []))} trades",
+        "",
+        "📡 *Data Feed Status*",
+        f"🔗 Connection: {'✅ Connected' if current_price else '❌ Disconnected'}",
+        f"💵 {test_symbol}: ${current_price:.2f}" if current_price else f"💵 {test_symbol}: N/A",
     ]
     
     await update.message.reply_text("\n".join(info_lines), parse_mode='Markdown')
@@ -231,7 +301,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show cash balance and unprotected holdings only"""
-    from trade_engine import load_portfolio
+    from modules.portfolio import load_portfolio
     
     portfolio = load_portfolio()
     cash = portfolio.get('cash_balance', 0)
@@ -279,25 +349,33 @@ async def regime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"📊 Current regime for *{symbol}*: `{current_regime}`", parse_mode='Markdown')
 
 async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Execute trade for a given coin based on predicted regime"""
+    """Execute manual trade for a given coin"""
     if not context.args:
         await update.message.reply_text("Usage: `/trade BTC/USDC`", parse_mode='Markdown')
         return
 
     symbol = context.args[0].upper()
-    df = fetch_ohlcv(symbol, context.bot_data.get("trading_interval", "1h"))
+    
+    # Get price and regime
+    from modules.papertrade_engine import paper_engine
+    from modules.data_feed import fetch_ohlcv
+    from modules.regime_switcher import predict_regime
+    
+    df = fetch_ohlcv(symbol, context.bot_data.get("trading_interval", "15m"))
     if df.empty:
         await update.message.reply_text(f"❌ Could not fetch market data for {symbol}.")
         return
 
     regime = predict_regime(df.iloc[-1])
     price = df.iloc[-1]['close']
-    execute_trade(symbol, regime, price)
 
-    # Refresh portfolio after trade
-    context.bot_data["portfolio"] = load_portfolio()
-
-    await update.message.reply_text(f"🚀 Executed trade for {symbol} based on regime: `{regime}`", parse_mode='Markdown')
+    # Execute manual trade
+    success = paper_engine.execute_trade(symbol, regime, price)
+    
+    if success:
+        await update.message.reply_text(f"✅ Manual trade executed for {symbol} (Regime: {regime})")
+    else:
+        await update.message.reply_text(f"❌ Failed to execute trade for {symbol}")
 
 async def close_position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Close a protected position manually"""
@@ -307,10 +385,11 @@ async def close_position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     symbol = context.args[0].upper()
     
-    from trade_engine import load_portfolio, close_position
-    from data_feed import get_current_prices
-    
     try:
+        # Import what we need
+        from modules.portfolio import load_portfolio
+        from modules.papertrade_engine import paper_engine
+        
         portfolio = load_portfolio()
         positions = portfolio.get('positions', {})
         
@@ -318,12 +397,12 @@ async def close_position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"❌ No protected position found for {symbol}")
             return
         
-        # Get current price
-        current_prices = get_current_prices()
-        current_price = current_prices.get(symbol, positions[symbol]['entry_price'])
+        # Get current price using paper_engine
+        current_prices = paper_engine.get_current_prices()
+        current_price = float(current_prices.get(symbol) or positions[symbol]['entry_price'])
         
-        # Close the position
-        success = close_position(symbol, current_price)
+        # Close the position using paper_engine
+        success = paper_engine.close_position(symbol, current_price, "manual_close")
         
         if success:
             await update.message.reply_text(
@@ -341,7 +420,7 @@ async def close_position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def latest_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show recent trades from portfolio"""
-    from trade_engine import load_portfolio
+    from modules.portfolio import load_portfolio
 
     portfolio = load_portfolio()
     trade_history = portfolio.get("trade_history", [])
@@ -364,7 +443,7 @@ async def latest_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def coin_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show current price of a coin in USDC"""
-    from data_feed import fetch_ohlcv
+    from modules.data_feed import fetch_ohlcv
 
     if not context.args:
         await update.message.reply_text("Usage: `/price BTC/USDC`", parse_mode="Markdown")
@@ -410,12 +489,12 @@ async def scheduler_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def portfolio_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show total portfolio value including cash, holdings, and positions"""
-    from trade_engine import load_portfolio
-    from data_feed import get_current_prices
+    from modules.portfolio import load_portfolio
+    from modules.papertrade_engine import paper_engine
     
     portfolio = load_portfolio()
-    current_prices = get_current_prices()
-    
+    current_prices = paper_engine.get_current_prices()
+
     cash = portfolio.get('cash_balance', 0)
     holdings = portfolio.get('holdings', {})
     positions = portfolio.get('positions', {})
@@ -513,17 +592,18 @@ async def portfolio_value(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def scan_opportunities(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Scan all coins for trading opportunities"""
-    from regime_switcher import predict_regime
-    from data_feed import fetch_ohlcv
-    from trade_engine import load_config
+    from modules.regime_switcher import predict_regime
+    from modules.papertrade_engine import paper_engine
     
     await update.message.reply_text("🔍 Scanning all coins for trading opportunities...")
     
-    config = load_config()
-    coins = config.get('coins', [])
+    # Load CONFIG
+    with open('CONFIG.json', 'r') as f:
+        CONFIG = json.load(f)
+    coins = CONFIG.get('coins', [])
     
     if not coins:
-        await update.message.reply_text("❌ No coins configured in config.json")
+        await update.message.reply_text("❌ No coins CONFIGured in CONFIG.json")
         return
     
     opportunities = {
@@ -637,11 +717,10 @@ async def scan_opportunities(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show portfolio overview with total value"""
-    from trade_engine import load_portfolio
-    from data_feed import get_current_prices
+    from modules.papertrade_engine import load_portfolio, paper_engine
     
     portfolio = load_portfolio()
-    current_prices = get_current_prices()
+    current_prices = paper_engine.get_current_prices()
     
     cash = portfolio.get('cash_balance', 0)
     holdings = portfolio.get('holdings', {})
@@ -716,7 +795,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         SETTINGS & CONFIG
         /mode <paper|live|status> - Trading mode
         /set_interval <timeframe> - Set interval
-        /config - Configuration
+        /CONFIG - Configuration
         /api_status - Test API
 
         DEBUGGING & MAINTENANCE
@@ -763,7 +842,8 @@ async def limit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Amount and price must be positive")
             return
 
-        # Load current portfolio
+        # Load current portfolio - FIXED IMPORT
+        from modules.portfolio import load_portfolio
         portfolio = load_portfolio()
         context.bot_data["portfolio"] = portfolio
         
@@ -787,56 +867,72 @@ async def limit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-        # Execute the limit order
-        from trade_engine import execute_limit_order
-        success, message = execute_limit_order(symbol, side, amount, price)
+        # This will:
+        # 1. Add the limit order to pending orders
+        # 2. Let scheduler check and execute it
         
-        if success:
-            # Refresh portfolio
-            context.bot_data["portfolio"] = load_portfolio()
-            
-            # Add to pending orders
-            if 'pending_orders' not in context.bot_data:
-                context.bot_data['pending_orders'] = []
-            
-            order_id = f"{symbol}_{side}_{amount}_{price}"
-            context.bot_data['pending_orders'].append({
-                'id': order_id,
-                'symbol': symbol,
-                'side': side,
-                'amount': amount,
-                'price': price,
-                'timestamp': pd.Timestamp.now().isoformat()
-            })
-            
-            await update.message.reply_text(
-                f"✅ *Limit Order Placed!*\n"
-                f"Symbol: `{symbol}`\n"
-                f"Side: `{side.upper()}`\n"
-                f"Amount: `{amount}`\n"
-                f"Price: `${price:.2f}`\n"
-                f"Total: `${amount * price:.2f}`",
-                parse_mode='Markdown'
-            )
-            # Ask if user wants stop loss protection
-            await update.message.reply_text(
-                "✅ Limit order placed!\n"
-                "Would you like to add stop loss protection?\n"
-                f"Usage: /protect {symbol} <stop_loss_pct> <take_profit_pct>\n"
-                "Example: /protect BTC/USDC 5 10"
-            )
-        else:
-            await update.message.reply_text(f"❌ Failed to place order: {message}")
+        from modules.portfolio import save_portfolio
+        import datetime
+        
+        # Get existing pending orders
+        pending_orders = portfolio.get('pending_orders', [])
+        
+        # Create order ID
+        from datetime import datetime
+        order_id = f"limit_{symbol}_{side}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # Add to pending orders
+        pending_orders.append({
+            'id': order_id,
+            'symbol': symbol,
+            'side': side,
+            'amount': amount,
+            'price': price,
+            'timestamp': datetime.now().isoformat(),
+            'status': 'pending',
+            'type': 'limit'
+        })
+        
+        # Update portfolio
+        portfolio['pending_orders'] = pending_orders
+        save_portfolio(portfolio)
+        
+        # Update bot_data
+        context.bot_data["portfolio"] = portfolio
+        
+        await update.message.reply_text(
+            f"✅ *Limit Order Placed!*\n"
+            f"Symbol: `{symbol}`\n"
+            f"Side: `{side.upper()}`\n"
+            f"Amount: `{amount}`\n"
+            f"Price: `${price:.2f}`\n"
+            f"Total: `${amount * price:.2f}`\n"
+            f"Order ID: `{order_id}`",
+            parse_mode='Markdown'
+        )
+        
+        # Ask if user wants stop loss protection
+        await update.message.reply_text(
+            "💡 *Note:* This is a limit order and will execute when price reaches your specified level.\n"
+            "Use `/pending_orders` to view all pending orders.\n"
+            "Use `/cancel_order {order_id}` to cancel this order.\n\n"
+            "Would you like to add stop loss protection when order executes?\n"
+            f"Usage: `/protect {symbol} <stop_loss_pct> <take_profit_pct>`\n"
+            "Example: `/protect BTC/USDC 5 10`"
+        )
 
     except ValueError as e:
-        await update.message.reply_text("❌ Invalid amount or price format")
+        await update.message.reply_text(f"❌ Invalid amount or price format: {str(e)}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error placing limit order: {str(e)}")
+
 
 async def check_portfolio_health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check portfolio health and risk exposure"""
-    from trade_engine import check_portfolio_health
-    
-    health_report = check_portfolio_health()
-    
+    from modules.papertrade_engine import paper_engine
+
+    health_report = paper_engine.check_portfolio_health()
+
     # Ensure we received a dict; some implementations may return False/None on error
     if not isinstance(health_report, dict):
         logging.error("check_portfolio_health returned unexpected value: %s", repr(health_report))
@@ -879,44 +975,142 @@ async def check_portfolio_health_cmd(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text("\n".join(msg_lines), parse_mode='Markdown')
 
 async def protect_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add stop loss protection to existing position"""
+    """Add stop loss protection to existing position or holdings"""
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
-            "Usage: /protect SYMBOL STOP_LOSS% TAKE_PROFIT%\n"
-            "Example: /protect BTC/USDC 5 10"
+            "Usage: `/protect SYMBOL STOP_LOSS% TAKE_PROFIT%`\n"
+            "*Example:* `/protect BTC/USDC 5 10`\n\n"
+            "This adds protection to:\n"
+            "1. Existing positions (moves to protected positions)\n"
+            "2. Holdings (creates new protected position)\n\n"
+            "Stop Loss %: Percentage below current price\n"
+            "Take Profit %: Percentage above current price",
+            parse_mode='Markdown'
         )
         return
     
-    symbol = context.args[0].upper()
-    stop_loss_pct = float(context.args[1]) / 100
-    take_profit_pct = float(context.args[2]) / 100
-    
-    from trade_engine import add_stop_loss_to_manual_buy, load_portfolio
-    
-    portfolio = load_portfolio()
-    
-    # Check if we have this in holdings
-    base_currency = symbol.split('/')[0]
-    if base_currency in portfolio.get('holdings', {}):
-        amount = portfolio['holdings'][base_currency]
-        current_price = get_current_price(symbol)  # You'll need to implement this
+    try:
+        symbol = context.args[0].upper()
+        stop_loss_pct = float(context.args[1]) / 100
+        take_profit_pct = float(context.args[2]) / 100
         
-        success = add_stop_loss_to_manual_buy(symbol, current_price, amount, stop_loss_pct, take_profit_pct)
-        if success:
+        # Validate percentages
+        if stop_loss_pct <= 0 or take_profit_pct <= 0:
+            await update.message.reply_text("❌ Stop loss and take profit percentages must be positive")
+            return
+        
+        # Use correct imports
+        from modules.portfolio import load_portfolio, save_portfolio
+        from modules.papertrade_engine import paper_engine
+        
+        portfolio = load_portfolio()
+        current_prices = paper_engine.get_current_prices()
+        
+        if symbol not in current_prices:
+            await update.message.reply_text(f"❌ Could not get current price for {symbol}")
+            return
+        
+        current_price = current_prices[symbol]
+        
+        # Calculate stop loss and take profit prices
+        stop_loss_price = current_price * (1 - stop_loss_pct)
+        take_profit_price = current_price * (1 + take_profit_pct)
+        
+        base_currency = symbol.split('/')[0]
+        success = False
+        
+        # Check if we have this in holdings (unprotected)
+        if base_currency in portfolio.get('holdings', {}):
+            amount = portfolio['holdings'][base_currency]
+            
+            # Remove from holdings
+            del portfolio['holdings'][base_currency]
+            
+            # Add to positions with protection
+            positions = portfolio.get('positions', {})
+            positions[symbol] = {
+                'side': 'long',
+                'amount': amount,
+                'entry_price': current_price,
+                'stop_loss': stop_loss_price,
+                'take_profit': take_profit_price,
+                'entry_time': datetime.now().isoformat(),
+                'protected_at': datetime.now().isoformat(),
+                'protection_source': 'holdings'
+            }
+            
+            portfolio['positions'] = positions
+            save_portfolio(portfolio)
+            success = True
+            
             await update.message.reply_text(
-                f"✅ Protection added to {symbol}:\n"
-                f"Amount: {amount}\n"
-                f"Stop Loss: {stop_loss_pct*100}%\n"
-                f"Take Profit: {take_profit_pct*100}%"
+                f"✅ *Holdings Now Protected!*\n\n"
+                f"*Symbol:* `{symbol}`\n"
+                f"*Amount:* `{amount:.6f}`\n"
+                f"*Current Price:* `${current_price:.2f}`\n"
+                f"*Stop Loss:* `${stop_loss_price:.2f}` ({stop_loss_pct*100:.1f}%)\n"
+                f"*Take Profit:* `${take_profit_price:.2f}` ({take_profit_pct*100:.1f}%)",
+                parse_mode='Markdown'
             )
+            
+        # Check if we have this in positions (already protected)
+        elif symbol in portfolio.get('positions', {}):
+            # Update existing position protection
+            positions = portfolio.get('positions', {})
+            position = positions[symbol]
+            
+            position['stop_loss'] = stop_loss_price
+            position['take_profit'] = take_profit_price
+            position['protection_updated'] = datetime.now().isoformat()
+            
+            portfolio['positions'] = positions
+            save_portfolio(portfolio)
+            success = True
+            
+            await update.message.reply_text(
+                f"✅ *Position Protection Updated!*\n\n"
+                f"*Symbol:* `{symbol}`\n"
+                f"*Amount:* `{position['amount']:.6f}`\n"
+                f"*Entry Price:* `${position['entry_price']:.2f}`\n"
+                f"*New Stop Loss:* `${stop_loss_price:.2f}` ({stop_loss_pct*100:.1f}%)\n"
+                f"*New Take Profit:* `${take_profit_price:.2f}` ({take_profit_pct*100:.1f}%)",
+                parse_mode='Markdown'
+            )
+            
         else:
-            await update.message.reply_text("❌ Failed to add protection")
-    else:
-        await update.message.reply_text(f"❌ No {symbol} found in holdings")        
+            await update.message.reply_text(
+                f"❌ *No {symbol} Found*\n\n"
+                f"To use protection, you need to have:\n"
+                f"• Unprotected holdings in `/balance`\n"
+                f"• OR an existing protected position\n\n"
+                f"*Check:*\n"
+                f"`/balance` - Shows unprotected holdings\n"
+                f"`/portfolio_value` - Shows protected positions",
+                parse_mode='Markdown'
+            )
+            return
+        
+        if success:
+            # Send notification
+            try:
+                from services.notifier import notifier
+                notifier.send_message(
+                    f"🛡️ Protection added to {symbol}\n"
+                    f"Stop Loss: {stop_loss_pct*100:.1f}% (${stop_loss_price:.2f})\n"
+                    f"Take Profit: {take_profit_pct*100:.1f}% (${take_profit_price:.2f})"
+                )
+            except Exception as e:
+                logging.warning(f"Could not send notification: {e}")
+                
+    except ValueError as e:
+        await update.message.reply_text("❌ Invalid percentage format. Use numbers like '5' for 5%")
+    except Exception as e:
+        logging.error(f"Error in protect_position: {e}")
+        await update.message.reply_text(f"❌ Error adding protection: {str(e)}")
 
 async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all pending limit orders"""
-    from trade_engine import load_portfolio
+    from modules.portfolio import load_portfolio
     
     portfolio = load_portfolio()
     pending_orders = portfolio.get('pending_orders', [])
@@ -939,7 +1133,7 @@ async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel a pending limit order: /cancel_order BTC/USDC or /cancel_order all"""
-    from trade_engine import load_portfolio, save_portfolio
+    from modules.portfolio import load_portfolio, save_portfolio
     
     if not context.args:
         await update.message.reply_text(
@@ -975,15 +1169,15 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def quick_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Quick scan for top opportunities only"""
-    from regime_switcher import predict_regime
-    from data_feed import fetch_ohlcv
-    from trade_engine import load_config
+    from modules.regime_switcher import predict_regime
+    from modules.data_feed import fetch_ohlcv
     
     await update.message.reply_text("⚡ Quick scanning for top opportunities...")
     
-    config = load_config()
+    with open('CONFIG.json', 'r') as f:
+        CONFIG = json.load(f)
     # Scan only top 10 coins for speed
-    coins = config.get('coins', [])[:10]
+    coins = CONFIG.get('coins', [])[:10]
     
     top_opportunities = []
     
@@ -1041,56 +1235,70 @@ async def quick_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def check_orders_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually trigger limit order check"""
-    from scheduler import manual_limit_order_check
+    from services.scheduler import limit_order_check_job
     await update.message.reply_text("🔍 Checking pending orders...")
-    manual_limit_order_check()
+    limit_order_check_job(context.bot_data)
     await update.message.reply_text("✅ Order check completed")
 
 # -------------------------------------------------------------------
 # START TELEGRAM BOT
 # -------------------------------------------------------------------
 def start_telegram_bot():
-    application = ApplicationBuilder().token(CONFIG['telegram_token']).build()
-    application.bot_data["run_bot"] = False
-    application.bot_data["trading_interval"] = "1h"
-    application.bot_data["portfolio"] = load_portfolio()
+    """Start Telegram bot - RUNS IN MAIN THREAD, BLOCKS FOREVER"""
+    logger.info("🤖 Starting Telegram bot...")
+    
+    # Check token
+    if 'telegram_token' not in CONFIG or not CONFIG['telegram_token']:
+        logger.error("❌ Telegram token not found in CONFIG.json")
+        return False
+    
+    try:
+        # Create application
+        application = ApplicationBuilder().token(CONFIG['telegram_token']).build()
+        application.bot_data["run_bot"] = False
+        application.bot_data["trading_interval"] = "1h"
+        application.bot_data["portfolio"] = load_portfolio()
 
-    # Register commands
-    handlers = [
-        ("start", start),
-        ("stop", stop),
-        ("status", status),
-        ("balance", balance),
-        ("latest_trades", latest_trades),
-        ("price", coin_price),
-        ("train", train),
-        ("set_interval", set_interval),
-        ("get_interval", get_interval),
-        ("regime", regime),
-        ("close_position", close_position_cmd),
-        ("scan", scan_opportunities),
-        ("quick_scan", quick_scan),
-        ("scheduler_status", scheduler_status),
-        ("portfolio", portfolio),  # New portfolio overview
-        ("portfolio_value", portfolio_value),  # New detailed portfolio value
-        ("debug_portfolio", check_portfolio_structure),
-        ("debug_stop_losses", debug_stop_losses),
-        ("debug_portfolio_simple", simple_debug),
-        ("check_portfolio_health", check_portfolio_health),
-        ("limit_order", limit_order),
-        ("pending_orders", pending_orders),
-        ("cancel_order", cancel_order),
-        ("check_orders_now", check_orders_now),
-        ("mode", trading_mode),
-        ("api_status", api_status),
-        ("config", config_info),
-        ("help", help_command),
-    ]
-    for cmd, func in handlers:
-        application.add_handler(CommandHandler(cmd, func))
+        # Register commands
+        handlers = [
+            ("start", start),
+            ("stop", stop),
+            ("status", status),
+            ("balance", balance),
+            ("latest_trades", latest_trades),
+            ("price", coin_price),
+            ("train", train),
+            ("set_interval", set_interval),
+            ("get_interval", get_interval),
+            ("regime", regime),
+            ("close_position", close_position_cmd),
+            ("scan", scan_opportunities),
+            ("quick_scan", quick_scan),
+            ("scheduler_status", scheduler_status),
+            ("portfolio", portfolio),
+            ("portfolio_value", portfolio_value),
+            ("check_portfolio_health", check_portfolio_health_cmd),
+            ("limit_order", limit_order),
+            ("pending_orders", pending_orders),
+            ("cancel_order", cancel_order),
+            ("check_orders_now", check_orders_now),
+            ("mode", trading_mode),
+            ("api_status", api_status),
+            ("CONFIG", CONFIG_info),
+            ("help", help_command),
+        ]
+        
+        for cmd, func in handlers:
+            application.add_handler(CommandHandler(cmd, func))
 
-    logging.info("🚀 Starting Telegram bot...")
-    application.run_polling()
-    logging.info("✅ Telegram bot started and polling for commands.")
-
-    return application
+        logger.info("✅ Telegram bot setup complete")
+        logger.info("📱 Bot is now running and listening for commands...")
+        
+        # Run the bot - THIS BLOCKS FOREVER
+        application.run_polling()
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Telegram bot error: {e}")
+        return False

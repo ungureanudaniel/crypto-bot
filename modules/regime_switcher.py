@@ -1,6 +1,8 @@
+from asyncio.log import logger
 import pandas as pd
 import numpy as np
 import json
+import time
 import logging
 from ta.trend import MACD, ADXIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -9,7 +11,7 @@ from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 from sklearn.preprocessing import StandardScaler
-from data_feed import fetch_ohlcv
+from .data_feed import fetch_ohlcv
 
 logging.basicConfig(level=logging.INFO)
 
@@ -123,28 +125,54 @@ def add_features(df, required_features=None):
 # ---------------------------
 def train_model():
     """
-    Train an XGBoost classifier with better regularization
+    Train an XGBoost classifier - WITH DEBUGGING
     """
     global model, feature_columns_used, scaler
-    logging.info("Training XGBoost regime classifier with regularization...")
+    
+    logger.info("=" * 60)
+    logger.info("🔄 STARTING MODEL TRAINING")
+    logger.info("=" * 60)
+    
+    start_time = time.time()
     
     with open("config.json") as f:
         config = json.load(f)
     
-    all_features, all_labels = [], []
+    all_features = []
+    all_labels = []
     
-    for coin in config['coins']:
+    coins = config['coins']
+    logger.info(f"📊 Will process {len(coins)} coins")
+    
+    for coin_idx, coin in enumerate(coins):
+        coin_start = time.time()
+        logger.info(f"🔍 [{coin_idx+1}/{len(coins)}] Processing {coin}...")
+        
         try:
+            # STEP 1: Fetch data
+            logger.info(f"   ↳ Fetching OHLCV data...")
             df = fetch_ohlcv(coin, "1h")
-            if df.empty:
-                continue
-                
-            df_with_features = add_features(df)
-            if df_with_features.empty:
-                continue
-                
-            df_labeled = label_regime(df_with_features)
+            logger.info(f"   ↳ Got {len(df)} candles")
             
+            if df.empty:
+                logger.warning(f"   ↳ No data, skipping")
+                continue
+                
+            # STEP 2: Add features
+            logger.info(f"   ↳ Adding features...")
+            df_with_features = add_features(df)
+            logger.info(f"   ↳ Features added, shape: {df_with_features.shape}")
+            
+            if df_with_features.empty:
+                logger.warning(f"   ↳ No features, skipping")
+                continue
+                
+            # STEP 3: Label regimes
+            logger.info(f"   ↳ Labeling regimes...")
+            df_labeled = label_regime(df_with_features)
+            logger.info(f"   ↳ Labeled, shape: {df_labeled.shape}")
+            
+            # STEP 4: Prepare features
             desired_features = [
                 'rsi', 'macd', 'macd_signal', 'macd_histogram', 'adx', 
                 'bb_width', 'bb_position', 'atr_pct', 'volatility', 'volatility_5',
@@ -153,88 +181,106 @@ def train_model():
             ]
             
             available_features = [col for col in desired_features if col in df_labeled.columns]
+            logger.info(f"   ↳ Available features: {len(available_features)}")
+            
+            if len(available_features) < 5:
+                logger.warning(f"   ↳ Insufficient features ({len(available_features)}), skipping")
+                continue
+                
             features = df_labeled[available_features]
             labels = df_labeled['regime']
+            
+            # STEP 5: Check for NaN
+            nan_count = features.isna().sum().sum()
+            logger.info(f"   ↳ NaN values: {nan_count}")
+            
+            if nan_count > len(features) * 0.5:  # More than 50% NaN
+                logger.warning(f"   ↳ Too many NaN values, skipping")
+                continue
             
             all_features.append(features)
             all_labels.append(labels)
             
+            coin_time = time.time() - coin_start
+            logger.info(f"   ✅ Processed in {coin_time:.1f}s | Samples: {len(features)}")
+            
         except Exception as e:
-            logging.error(f"Error processing {coin}: {e}")
+            logger.error(f"   ❌ Error processing {coin}: {str(e)[:100]}")
+            import traceback
+            logger.error(traceback.format_exc())
             continue
     
+    logger.info(f"📊 Total coins processed: {len(all_features)}/{len(coins)}")
+    
     if not all_features:
-        logging.error("❌ No data processed for training!")
+        logger.error("❌ NO DATA PROCESSED - Training failed!")
         return False
     
     try:
+        # STEP 6: Concatenate
+        concat_start = time.time()
+        logger.info("📦 Concatenating data...")
         X = pd.concat(all_features, ignore_index=True)
         y = pd.concat(all_labels, ignore_index=True)
+        concat_time = time.time() - concat_start
+        logger.info(f"   ✅ Concatenated in {concat_time:.1f}s | Total: {len(X)} samples")
         
-        if len(X) == 0:
-            return False
-        
-        # Store feature columns
-        feature_columns_used = X.columns.tolist()
-        logging.info(f"🔧 Features used for training: {len(feature_columns_used)}")
-        
-        # Remove NaN values
+        # STEP 7: Clean NaN
+        logger.info("🧹 Cleaning NaN values...")
         nan_mask = X.isna().any(axis=1) | y.isna()
-        X = X[~nan_mask]
-        y = y[~nan_mask]
+        X_clean = X[~nan_mask]
+        y_clean = y[~nan_mask]
+        logger.info(f"   ✅ Cleaned: {len(X_clean)}/{len(X)} samples remaining")
         
-        if len(X) == 0:
+        if len(X_clean) == 0:
+            logger.error("❌ No clean data after NaN removal!")
             return False
         
-        # Initialize and fit scaler
+        # STEP 8: Scale features
+        logger.info("⚖️ Scaling features...")
         scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
+        X_scaled = scaler.fit_transform(X_clean)
+        X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns)
         
-        class_dist = y.value_counts()
-        logging.info(f"Class distribution: {dict(class_dist)}")
-        
+        # STEP 9: Split data
+        logger.info("✂️ Splitting data...")
         X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y, test_size=0.2, random_state=42, stratify=y
+            X_scaled, y_clean, test_size=0.2, random_state=42, stratify=y_clean
         )
+        logger.info(f"   ✅ Split: Train={len(X_train)}, Test={len(X_test)}")
         
-        # Model with STRONG regularization to prevent overfitting
+        # STEP 10: Train model
+        logger.info("🧠 Training XGBoost model...")
         model = XGBClassifier(
             n_estimators=100,
-            max_depth=3,  # Reduced from 4
-            learning_rate=0.05,  # Reduced from 0.1
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=1.0,  # L1 regularization
-            reg_lambda=1.0,  # L2 regularization
-            random_state=42
+            max_depth=3,
+            learning_rate=0.05,
+            random_state=42,
+            n_jobs=-1
         )
         
+        train_start = time.time()
         model.fit(X_train, y_train)
+        train_time = time.time() - train_start
+        logger.info(f"   ✅ Model trained in {train_time:.1f}s")
         
+        # STEP 11: Evaluate
+        logger.info("📊 Evaluating model...")
         y_pred = model.predict(X_test)
-        logging.info("✅ Model training completed!")
         
-        # Calculate confidence statistics
-        y_proba = model.predict_proba(X_test)
-        max_probs = y_proba.max(axis=1)
-        avg_confidence = max_probs.mean()
-        high_confidence_ratio = (max_probs > 0.9).mean()
-        
-        logging.info(f"📊 Confidence stats - Avg: {avg_confidence:.3f}, >90%: {high_confidence_ratio:.3f}")
-        logging.info("\n" + str(classification_report(y_test, y_pred)))
-        
-        feature_importance = pd.DataFrame({
-            'feature': X.columns,
-            'importance': model.feature_importances_
-        }).sort_values('importance', ascending=False)
-        
-        logging.info("📊 Feature importance:\n" + str(feature_importance.head(8)))
+        total_time = time.time() - start_time
+        logger.info("=" * 60)
+        logger.info(f"✅ TRAINING COMPLETED in {total_time:.1f} seconds")
+        logger.info("=" * 60)
+        logger.info("\n" + str(classification_report(y_test, y_pred)))
         
         return True
         
     except Exception as e:
-        logging.error(f"❌ Model training failed: {e}")
+        total_time = time.time() - start_time
+        logger.error(f"❌ TRAINING FAILED after {total_time:.1f}s: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 

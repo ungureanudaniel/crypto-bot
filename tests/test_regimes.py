@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from regime_switcher import predict_regime
+from modules.regime_switcher import predict_regime
 from data_feed import fetch_ohlcv
 
 def check_all_regimes():

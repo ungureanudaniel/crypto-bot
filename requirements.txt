@@ -46,6 +46,7 @@ pydeck==0.9.1
 pyparsing==3.2.3
 python-dateutil==2.9.0.post0
 python-telegram-bot==20.8
+python-binance
 pytz==2025.2
 referencing==0.36.2
 requests==2.32.4

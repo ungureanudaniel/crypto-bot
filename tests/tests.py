@@ -3,7 +3,7 @@ import time
 import sys
 import os
 from data_feed import fetch_ohlcv
-from strategy_tools import check_breakout, calculate_position_size, generate_trade_signal
+from modules.strategy_tools import check_breakout, calculate_position_size, generate_trade_signal
 import pandas as pd
 from unittest.mock import Mock, patch, MagicMock, mock_open
 import pytest
@@ -14,7 +14,7 @@ from trade_engine import execute_limit_order
 # Add the current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from scheduler import start_schedulers, weekly_trading_job, intraday_trading_job, data_refresh_job, limit_order_check_job
+from services.scheduler import start_schedulers, weekly_trading_job, intraday_trading_job, data_refresh_job, limit_order_check_job
 
 # Set up logging to see what's happening
 logging.basicConfig(
@@ -105,7 +105,7 @@ def test_scheduler():
 
 def test_regime_detection():
     """Test regime detection functionality"""
-    from regime_switcher import train_model, predict_regime, model
+    from modules.regime_switcher import train_model, predict_regime, model
     from data_feed import fetch_ohlcv
     
     print("🧪 Testing Fixed Regime Detection...")
@@ -124,7 +124,7 @@ def test_regime_detection():
         print("❌ Model training failed")
 
 def test_feature_alignment():
-    from regime_switcher import train_model, predict_regime, feature_columns_used, model
+    from modules.regime_switcher import train_model, predict_regime, feature_columns_used, model
     from data_feed import fetch_ohlcv
     
     print("🧪 Testing Feature Alignment...")
@@ -186,7 +186,7 @@ def run_basic_tests():
     print("✅ Basic tests completed!")
 
 def test_breakout_detection():
-    from regime_switcher import train_model, predict_regime
+    from modules.regime_switcher import train_model, predict_regime
     from data_feed import fetch_ohlcv
     
     print("🧪 Testing Breakout Detection...")
@@ -332,7 +332,7 @@ def test_breakout_scenarios():
 
 def debug_regime_model():
     """Debug the regime model to see why confidence is so high"""
-    from regime_switcher import model, train_model, predict_regime
+    from modules.regime_switcher import model, train_model, predict_regime
     
     print("🐛 Debugging Regime Model...")
     print("=" * 50)
@@ -357,7 +357,7 @@ def debug_regime_model():
             print(f"   Prediction: {prediction}")
             
             # Check feature distribution
-            from regime_switcher import add_features
+            from modules.regime_switcher import add_features
             df_features = add_features(df)
             if not df_features.empty:
                 feature_stats = df_features[['rsi', 'macd', 'adx', 'volatility']].describe()

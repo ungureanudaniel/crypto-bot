@@ -1,0 +1,304 @@
+# services/scheduler.py - Updated for papertrade_engine
+import schedule
+import time
+import threading
+import json
+import logging
+from logging.handlers import RotatingFileHandler
+from datetime import datetime, timedelta
+
+from modules.regime_switcher import train_model, predict_regime
+from modules.data_feed import fetch_ohlcv
+from modules.papertrade_engine import paper_engine
+from modules.portfolio import load_portfolio, save_portfolio
+
+# -------------------------------------------------------------------
+# CONFIG & LOGGING
+# -------------------------------------------------------------------
+with open("config.json") as f:
+    CONFIG = json.load(f)
+
+logging.basicConfig(
+    handlers=[RotatingFileHandler("trading_bot.log", maxBytes=5_000_000, backupCount=3)],
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# -------------------------------------------------------------------
+# JOBS
+# -------------------------------------------------------------------
+def get_current_prices():
+    """Fetch current prices for all configured coins"""
+    current_prices = {}
+    interval = "1m"  # Use 1-minute data for latest prices
+    
+    for coin in CONFIG['coins']:
+        try:
+            df = fetch_ohlcv(coin, interval)
+            if not df.empty:
+                current_prices[coin] = df.iloc[-1]['close']
+                logging.debug(f"Current price for {coin}: ${current_prices[coin]:.2f}")
+            else:
+                logging.warning(f"Could not fetch current price for {coin}")
+        except Exception as e:
+            logging.error(f"Error fetching price for {coin}: {e}")
+    
+    return current_prices
+
+def check_pending_orders(current_prices):
+    """Check and execute pending limit orders - placeholder function"""
+    # This function needs to be implemented based on your portfolio structure
+    # For now, it's a placeholder
+    portfolio = load_portfolio()
+    pending_orders = portfolio.get('pending_orders', [])
+    
+    if pending_orders:
+        logging.info(f"Found {len(pending_orders)} pending orders")
+        # Add your limit order execution logic here
+    return False
+
+def limit_order_check_job(bot_data):
+    """Check and execute pending limit orders"""
+    if not bot_data.get("run_bot", True):
+        return
+        
+    logging.info("Checking pending limit orders...")
+    try:
+        current_prices = get_current_prices()
+        check_pending_orders(current_prices)
+        logging.info("Limit order check completed")
+    except Exception as e:
+        logging.error(f"Error in limit order check job: {e}")
+
+def intraday_trading_job(bot_data):
+    if not bot_data.get("run_bot", True):
+        return
+        
+    logging.info("🚀 Running 15m trading job...")
+    
+    try:
+        # Check stop losses
+        paper_engine.check_stop_losses()
+        
+        # Check portfolio health
+        if not paper_engine.check_portfolio_health():
+            logging.warning("Portfolio health check failed, skipping trades")
+            return
+        
+        # Scan for signals
+        signals = paper_engine.scan_and_trade()
+        
+        if signals:
+            logging.info(f"Found {len(signals)} trading signals")
+            
+            # Execute signals
+            for signal_data in signals[:2]:  # Max 2 at a time
+                paper_engine.execute_signal(signal_data=signal_data)
+        else:
+            logging.info("No trading signals found")
+            
+    except Exception as e:
+        logging.error(f"Error in trading job: {e}")
+
+def data_refresh_job(bot_data):
+    """Refresh data feed"""
+    if not bot_data.get("run_bot", True):
+        return
+        
+    interval = bot_data.get("trading_interval", "1h")
+    logging.info("Refreshing data feed...")
+    for coin in CONFIG['coins']:
+        try:
+            fetch_ohlcv(coin, interval)
+        except Exception as e:
+            logging.error(f"Error refreshing data for {coin}: {e}")
+
+def portfolio_health_check(bot_data):
+    """Regular portfolio health check and cleanup"""
+    if not bot_data.get("run_bot", True):
+        return
+        
+    logging.info("Running portfolio health check...")
+    try:
+        portfolio = load_portfolio()
+        
+        # Log current portfolio status
+        cash = portfolio.get('cash_balance', 0)
+        holdings = portfolio.get('holdings', {})
+        positions = portfolio.get('positions', {})
+        pending_orders = portfolio.get('pending_orders', [])
+        
+        logging.info(f"Portfolio Health - Cash: ${cash:.2f}, "
+                    f"Holdings: {len(holdings)}, "
+                    f"Positions: {len(positions)}, "
+                    f"Pending Orders: {len(pending_orders)}")
+        
+        # Clean up expired pending orders (older than 7 days)
+        if pending_orders:
+            week_ago = datetime.now() - timedelta(days=7)
+            
+            initial_count = len(pending_orders)
+            portfolio['pending_orders'] = [
+                order for order in pending_orders 
+                if datetime.fromisoformat(order['timestamp']) > week_ago
+            ]
+            
+            if len(portfolio['pending_orders']) < initial_count:
+                save_portfolio(portfolio)
+                logging.info(f"Cleaned up {initial_count - len(portfolio['pending_orders'])} expired pending orders")
+                
+    except Exception as e:
+        logging.error(f"Error in portfolio health check: {e}")
+
+def risk_management_job(bot_data):
+    """Check stop losses and portfolio health"""
+    if not bot_data.get("run_bot", True):
+        return
+        
+    logging.info("Running risk management job...")
+    try:
+        # Check stop losses using papertrade_engine
+        positions_closed = paper_engine.check_stop_losses()
+        
+        if positions_closed:
+            logging.info("Stop losses/take profits executed in risk management job")
+            
+        # Check portfolio value and drawdown
+        current_prices = get_current_prices()
+        portfolio = load_portfolio()
+        
+        # Calculate portfolio value
+        total_value = portfolio.get('cash_balance', 0)
+        for symbol, position in portfolio.get('positions', {}).items():
+            current_price = current_prices.get(symbol, position['entry_price'])
+            total_value += position['amount'] * current_price
+        
+        initial_balance = portfolio.get('initial_balance', total_value)
+        drawdown = (initial_balance - total_value) / initial_balance
+        max_drawdown = CONFIG.get('max_drawdown', 0.05)
+        
+        if drawdown > max_drawdown:
+            logging.warning(f"⚠️ Portfolio drawdown {drawdown:.1%} exceeds limit {max_drawdown:.1%}")
+            
+    except Exception as e:
+        logging.error(f"Error in risk management job: {e}")
+
+def send_daily_report(bot_data):
+    """Send daily portfolio report"""
+    if not bot_data.get("run_bot", True):
+        return
+        
+    try:
+        from services.notifier import notifier
+        
+        portfolio = load_portfolio()
+        current_prices = get_current_prices()
+        
+        # Calculate portfolio value
+        cash = portfolio.get('cash_balance', 0)
+        total_value = cash
+        
+        positions_summary = []
+        for symbol, position in portfolio.get('positions', {}).items():
+            current_price = current_prices.get(symbol, position['entry_price'])
+            position_value = position['amount'] * current_price
+            total_value += position_value
+            pnl_pct = (current_price / position['entry_price'] - 1) * 100
+            positions_summary.append(f"{symbol}: ${position_value:.2f} ({pnl_pct:+.1f}%)")
+        
+        initial_balance = portfolio.get('initial_balance', total_value)
+        total_return = ((total_value - initial_balance) / initial_balance) * 100
+        
+        message = (
+            f"📊 Daily Portfolio Report\n\n"
+            f"💰 Total Value: ${total_value:,.2f}\n"
+            f"📈 Total Return: {total_return:+.1f}%\n"
+            f"💵 Cash: ${cash:,.2f}\n"
+            f"📦 Positions: {len(portfolio.get('positions', {}))}\n"
+        )
+        
+        if positions_summary:
+            message += f"\nActive Positions:\n" + "\n".join(positions_summary)
+        
+        notifier.send_message(message)
+        logging.info("Daily report sent")
+        
+    except Exception as e:
+        logging.error(f"Error sending daily report: {e}")
+
+# -------------------------------------------------------------------
+# SCHEDULER
+# -------------------------------------------------------------------
+def start_schedulers(bot_data):
+    """Start scheduler in a background thread"""
+    logging.info("🟢 Starting scheduler in background thread...")
+    
+    # Setup all jobs
+    schedule.every(15).minutes.do(intraday_trading_job, bot_data=bot_data)
+    schedule.every(5).minutes.do(limit_order_check_job, bot_data=bot_data)
+    schedule.every().sunday.at("02:00").do(train_model)
+    schedule.every(5).minutes.do(risk_management_job, bot_data=bot_data)
+    schedule.every().day.at("06:00").do(portfolio_health_check, bot_data=bot_data)
+    schedule.every().day.at("20:00").do(send_daily_report, bot_data=bot_data)
+    schedule.every().hour.do(data_refresh_job, bot_data=bot_data)
+    
+    # Create and start scheduler thread
+    scheduler_thread = threading.Thread(
+        target=_scheduler_loop,
+        args=(bot_data,),
+        daemon=True,  # Daemon thread will exit when main program exits
+        name="SchedulerThread"
+    )
+    scheduler_thread.start()
+    
+    logging.info("✅ Scheduler started in background thread")
+    return scheduler_thread
+
+def _scheduler_loop(bot_data):
+    """Main scheduler loop to run in background thread"""
+    logging.info("📡 Scheduler loop running in background")
+    
+    while True:
+        try:
+            if bot_data.get("run_bot", True):
+                schedule.run_pending()
+            time.sleep(1)
+        except KeyboardInterrupt:
+            logging.info("Scheduler loop interrupted")
+            break
+        except Exception as e:
+            logging.error(f"🔥 Scheduler loop error: {e}")
+            time.sleep(5)
+
+def stop_schedulers():
+    """Stop all scheduled jobs"""
+    logging.info("🛑 Stopping all scheduled jobs")
+    schedule.clear()
+
+def check_scheduler_status():
+    """Check if scheduler is running"""
+    jobs = schedule.get_jobs()
+    return {
+        'running': len(jobs) > 0,
+        'jobs_count': len(jobs),
+        'jobs': [str(job) for job in jobs]
+    }
+
+if __name__ == "__main__":
+    # For direct testing
+    bot_data = {
+        "run_bot": True,
+        "trading_interval": "15m"
+    }
+    
+    print("🚀 Starting scheduler in test mode...")
+    start_schedulers(bot_data)
+    
+    # Run once immediately
+    
+    # Keep the main thread alive
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n🛑 Scheduler stopped")

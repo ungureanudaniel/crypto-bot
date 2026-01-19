@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from regime_switcher import predict_regime
+from modules.regime_switcher import predict_regime
 from data_feed import fetch_ohlcv
 from trade_engine import execute_trade
 
@@ -55,7 +55,7 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from trade_engine import execute_trade
-from regime_switcher import predict_regime
+from modules.regime_switcher import predict_regime
 from data_feed import fetch_ohlcv
 
 def test_eth_trade():
