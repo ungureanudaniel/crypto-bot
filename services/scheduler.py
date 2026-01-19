@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 from modules.regime_switcher import train_model, predict_regime
 from modules.data_feed import fetch_ohlcv
-from modules.papertrade_engine import paper_engine
+from modules.trade_engine import paper_engine
 from modules.portfolio import load_portfolio, save_portfolio
 
 # -------------------------------------------------------------------
@@ -52,7 +52,7 @@ def get_current_prices():
 def check_pending_orders(current_prices):
     """Check and execute pending limit orders"""
     from modules.portfolio import load_portfolio, save_portfolio
-    from modules.papertrade_engine import paper_engine
+    from modules.trade_engine import paper_engine
     from datetime import datetime
     
     portfolio = load_portfolio()

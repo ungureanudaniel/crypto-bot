@@ -13,18 +13,25 @@ from services.notifier import notifier
 logger = logging.getLogger(__name__)
 
 # Load config
-with open('config.json', 'r') as f:
-    config = json.load(f)
+try:
+    from config_loader import config
+    CONFIG = config.config  # Get the dictionary
+except ImportError:
+    # Fallback for backward compatibility
+    import json
+    with open("config.json", "r") as f:
+        CONFIG = json.load(f)
+
 
 class PaperTradeEngine:
     """Complete paper trading engine"""
     
     def __init__(self):
         self.data_feed = data_feed
-        self.symbols = config.get('coins', ['BTC/USDT', 'ETH/USDT'])
-        self.timeframe = config.get('trading_timeframe', '15m')
-        self.max_positions = config.get('max_positions', 3)
-        self.risk_per_trade = config.get('risk_per_trade', 0.02)
+        self.symbols = CONFIG.get('coins', ['BTC/USDC', 'ETH/USDC'])
+        self.timeframe = CONFIG.get('trading_timeframe', '15m')
+        self.max_positions = CONFIG.get('max_positions', 3)
+        self.risk_per_trade = CONFIG.get('risk_per_trade', 0.02)
         
         logger.info("📊 Paper Trade Engine initialized")
     

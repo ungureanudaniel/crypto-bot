@@ -3,7 +3,9 @@ venv/
 myvenv/
 .env/
 .env
-
+generate_ed25519.py
+ed25519_prv_key.pem
+ed25519_pub_key.pem
 # logs
 logs/
 config.json

@@ -1,18 +1,34 @@
 # services/notifier.py - Telegram notifications
-import json
+import sys
+import os
 import asyncio
 import logging
 from telegram import Bot
 
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load config
-def load_config():
-    """Load and return config"""
-    with open("config.json", "r") as f:
-        return json.load(f)
-
-CONFIG = load_config()
+# -------------------------------------------------------------------
+# CONFIG LOADING
+# -------------------------------------------------------------------
+try:
+    # Add parent directory to path
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from config_loader import config
+    CONFIG = config.config
+    logger.info(f"✅ Config loaded: {CONFIG.get('trading_mode', 'paper')}")
+except ImportError:
+    logger.warning("⚠️ Could not import config_loader, using defaults")
+    CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
+print(CONFIG)
+logging.info("🔧 Configuration loaded for data feed. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 class Notifier:
     """Handles Telegram notifications"""

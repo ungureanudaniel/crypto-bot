@@ -212,7 +212,7 @@ if __name__ == "__main__":
     from data_feed import fetch_ohlcv
     
     symbol = "BTC/USDC"
-    df = fetch_ohlcv(symbol, timeframe='15m')
+    df = fetch_ohlcv(symbol, interval='15m')
     
     # Assume equity of $10,000 for position sizing
     equity = 10000
