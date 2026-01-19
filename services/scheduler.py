@@ -15,8 +15,12 @@ from modules.portfolio import load_portfolio, save_portfolio
 # -------------------------------------------------------------------
 # CONFIG & LOGGING
 # -------------------------------------------------------------------
-with open("config.json") as f:
-    CONFIG = json.load(f)
+def load_config():
+    """Load and return config"""
+    with open("config.json", "r") as f:
+        return json.load(f)
+
+CONFIG = load_config()
 
 logging.basicConfig(
     handlers=[RotatingFileHandler("trading_bot.log", maxBytes=5_000_000, backupCount=3)],
@@ -46,15 +50,146 @@ def get_current_prices():
     return current_prices
 
 def check_pending_orders(current_prices):
-    """Check and execute pending limit orders - placeholder function"""
-    # This function needs to be implemented based on your portfolio structure
-    # For now, it's a placeholder
+    """Check and execute pending limit orders"""
+    from modules.portfolio import load_portfolio, save_portfolio
+    from modules.papertrade_engine import paper_engine
+    from datetime import datetime
+    
     portfolio = load_portfolio()
     pending_orders = portfolio.get('pending_orders', [])
     
-    if pending_orders:
-        logging.info(f"Found {len(pending_orders)} pending orders")
-        # Add your limit order execution logic here
+    if not pending_orders:
+        logging.debug("No pending orders to check")
+        return False
+    
+    logging.info(f"🔍 Checking {len(pending_orders)} pending orders...")
+    
+    executed_orders = []
+    
+    for order in list(pending_orders):
+        symbol = order['symbol']
+        
+        # Get current price for this symbol
+        current_price = current_prices.get(symbol)
+        
+        if not current_price:
+            logging.warning(f"No current price available for {symbol}")
+            continue
+        
+        should_execute = False
+        trigger_reason = ""
+        
+        # Check if limit order conditions are met
+        if order.get('type') == 'limit':
+            if order['side'] == 'buy' and current_price <= order['price']:
+                should_execute = True
+                trigger_reason = f"Price ${current_price:.2f} <= limit ${order['price']:.2f}"
+            elif order['side'] == 'sell' and current_price >= order['price']:
+                should_execute = True
+                trigger_reason = f"Price ${current_price:.2f} >= limit ${order['price']:.2f}"
+        
+        if should_execute:
+            logging.info(f"🚀 Executing {order['side']} order for {symbol}: {trigger_reason}")
+            
+            try:
+                if order['side'] == 'buy':
+                    # Check if we have enough cash
+                    cost = order['amount'] * current_price
+                    if portfolio.get('cash_balance', 0) >= cost:
+                        # Execute buy order using paper_engine
+                        success = paper_engine.open_position(
+                            symbol=symbol,
+                            side='long',
+                            entry_price=current_price,
+                            units=order['amount'],
+                            stop_loss=current_price * 0.95,  # 5% stop loss
+                            take_profit=current_price * 1.10  # 10% take profit
+                        )
+                        
+                        if success:
+                            # Mark order as executed
+                            order['status'] = 'executed'
+                            order['executed_at'] = datetime.now().isoformat()
+                            order['executed_price'] = current_price
+                            order['trigger_reason'] = trigger_reason
+                            executed_orders.append(order)
+                            logging.info(f"✅ Buy order executed for {symbol}")
+                        else:
+                            logging.warning(f"Failed to execute buy order for {symbol}")
+                    else:
+                        logging.warning(f"Insufficient funds for {symbol}: ${portfolio.get('cash_balance', 0):.2f} available, need ${cost:.2f}")
+                
+                elif order['side'] == 'sell':
+                    # Check if we have enough holdings
+                    coin = symbol.split('/')[0]
+                    current_holdings = portfolio.get('holdings', {}).get(coin, 0)
+                    
+                    if current_holdings >= order['amount']:
+                        # Execute sell - this is simplified, you might need to adjust
+                        from modules.portfolio import update_position
+                        
+                        # Sell from holdings
+                        pnl = update_position(coin, "sell", order['amount'], current_price)
+                        
+                        if pnl is not None:
+                            # Mark order as executed
+                            order['status'] = 'executed'
+                            order['executed_at'] = datetime.now().isoformat()
+                            order['executed_price'] = current_price
+                            order['trigger_reason'] = trigger_reason
+                            executed_orders.append(order)
+                            
+                            # Record trade
+                            trade_history = portfolio.get('trade_history', [])
+                            trade_history.append({
+                                'symbol': symbol,
+                                'action': 'sell_limit',
+                                'side': 'sell',
+                                'amount': order['amount'],
+                                'price': current_price,
+                                'timestamp': datetime.now().isoformat(),
+                                'pnl': pnl
+                            })
+                            portfolio['trade_history'] = trade_history
+                            
+                            logging.info(f"✅ Sell order executed for {symbol}")
+                    else:
+                        logging.warning(f"Insufficient holdings for {symbol}: have {current_holdings}, need {order['amount']}")
+            
+            except Exception as e:
+                logging.error(f"Error executing order for {symbol}: {e}")
+    
+    # Update portfolio to remove executed orders
+    if executed_orders:
+        # Keep only orders that weren't executed
+        remaining_orders = [
+            order for order in pending_orders 
+            if order.get('status') != 'executed'
+        ]
+        
+        portfolio['pending_orders'] = remaining_orders
+        save_portfolio(portfolio)
+        
+        logging.info(f"🎯 Executed {len(executed_orders)} orders, {len(remaining_orders)} remaining")
+        
+        # Send notifications
+        try:
+            from services.notifier import notifier
+            for order in executed_orders:
+                notifier.send_message(
+                    f"✅ Limit Order Executed!\n"
+                    f"Symbol: {order['symbol']}\n"
+                    f"Side: {order['side'].upper()}\n"
+                    f"Amount: {order['amount']}\n"
+                    f"Limit Price: ${order['price']:.2f}\n"
+                    f"Executed at: ${order['executed_price']:.2f}\n"
+                    f"Reason: {order.get('trigger_reason', 'Price triggered')}"
+                )
+        except Exception as e:
+            logging.warning(f"Could not send notifications: {e}")
+        
+        return True
+    
     return False
 
 def limit_order_check_job(bot_data):

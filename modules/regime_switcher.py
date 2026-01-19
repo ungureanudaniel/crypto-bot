@@ -308,7 +308,7 @@ def predict_regime(df):
             return "Feature engineering failed"
         
         # Ensure feature alignment
-        if feature_columns_used:
+        if feature_columns_used is not None:
             missing_features = [col for col in feature_columns_used if col not in df_with_features.columns]
             for feature in missing_features:
                 df_with_features[feature] = 0

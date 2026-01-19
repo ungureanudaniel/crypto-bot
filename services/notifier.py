@@ -7,15 +7,19 @@ from telegram import Bot
 logger = logging.getLogger(__name__)
 
 # Load config
-with open("config.json") as f:
-    config = json.load(f)
+def load_config():
+    """Load and return config"""
+    with open("config.json", "r") as f:
+        return json.load(f)
+
+CONFIG = load_config()
 
 class Notifier:
     """Handles Telegram notifications"""
     
     def __init__(self):
-        self.bot = Bot(token=config['telegram_token'])
-        self.chat_id = config['telegram_chat_id']
+        self.bot = Bot(token=CONFIG['telegram_token'])
+        self.chat_id = CONFIG['telegram_chat_id']
         logger.info("📱 Notifier initialized")
     
     def send_message(self, message: str) -> bool:
@@ -24,11 +28,8 @@ class Notifier:
             async def send_async():
                 await self.bot.send_message(chat_id=self.chat_id, text=message)
             
-            # Create and run event loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(send_async())
-            loop.close()
+            # Run event loop
+            asyncio.run(send_async())
             
             logger.info(f"Message sent: {message[:50]}...")
             return True

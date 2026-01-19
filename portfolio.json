@@ -2,7 +2,28 @@
   "cash_balance": 1000.0,
   "holdings": {},
   "positions": {},
-  "pending_orders": [],
+  "pending_orders": [
+    {
+      "id": "limit_SOL/USDC_buy_20260119_203732",
+      "symbol": "SOL/USDC",
+      "side": "buy",
+      "amount": 1.0,
+      "price": 133.87,
+      "timestamp": "2026-01-19T20:37:32.357327",
+      "status": "pending",
+      "type": "limit"
+    },
+    {
+      "id": "limit_SOL/USDC_buy_20260119_203818",
+      "symbol": "SOL/USDC",
+      "side": "buy",
+      "amount": 1.0,
+      "price": 134.2,
+      "timestamp": "2026-01-19T20:38:18.461808",
+      "status": "pending",
+      "type": "limit"
+    }
+  ],
   "initial_balance": 1000.0,
   "performance_metrics": {
     "total_trades": 0,

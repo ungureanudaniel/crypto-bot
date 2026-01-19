@@ -5,6 +5,7 @@ import pandas as pd
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from debug.debug_portfolio import check_portfolio_structure, debug_stop_losses, simple_debug
+from debug.debug_trading import debug_order_details, debug_scheduler, force_order_check, force_order_check
 from modules.regime_switcher import train_model, predict_regime
 from modules.data_feed import fetch_ohlcv
 from modules.papertrade_engine import *
@@ -19,8 +20,10 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-with open("config.json") as f:
-    CONFIG = json.load(f)
+def load_config():
+    """Load and return config"""
+    with open("config.json", "r") as f:
+        return json.load(f)
 
 PORTFOLIO_FILE = "portfolio.json"
 
@@ -57,6 +60,8 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def trading_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Switch between paper trading and live trading"""
+    CONFIG = load_config()
+
     if not context.args:
         # Show current mode
         
@@ -459,7 +464,7 @@ async def coin_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"💵 Current price of {symbol}: ${current_price:.2f}")
 
 async def set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 1:
+    if not context.args or len(context.args) != 1:
         await update.message.reply_text("Usage: /set_interval <interval>\nExamples: 1m, 1h, 1d, 1w")
         return
 
@@ -484,7 +489,19 @@ async def scheduler_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     msg = ["📆 *Scheduler Jobs:*"]
     for job in jobs:
-        msg.append(f"- {job.job_func.__name__}: next run at {job.next_run}")
+        # Extract function name safely - job_func can be partial or None
+        func_name = "Unknown"
+        if job.job_func is not None:
+            # Check if it's a functools.partial object first
+            if hasattr(job.job_func, 'func'):
+                # It's a partial object, get the underlying function
+                underlying_func = job.job_func.func
+                func_name = getattr(underlying_func, '__name__', str(job.job_func))
+            else:
+                # It's a regular function or callable
+                func_name = getattr(job.job_func, '__name__', str(job.job_func))
+        
+        msg.append(f"- {func_name}: next run at {job.next_run}")
     await update.message.reply_text("\n".join(msg), parse_mode='Markdown')
 
 async def portfolio_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -947,6 +964,10 @@ async def check_portfolio_health_cmd(update: Update, context: ContextTypes.DEFAU
     max_drawdown = health_report.get('max_drawdown', 0)
     risk_exposure = health_report.get('risk_exposure', 0)
     issues = health_report.get('issues', [])
+    
+    # Ensure issues is a list
+    if not isinstance(issues, list):
+        issues = [issues] if issues else []
 
     msg_lines = [
         "🩺 *Portfolio Health Check*",
@@ -962,13 +983,8 @@ async def check_portfolio_health_cmd(update: Update, context: ContextTypes.DEFAU
     
     if issues:
         msg_lines.append("⚠️ *Issues Found:*")
-        # Normalize issues into a list if it's not already a list to avoid iterating strings/invalid types
-        if isinstance(issues, list):
-            for issue in issues:
-                msg_lines.append(f"• {issue}")
-        else:
-            # If issues is a single string or another truthy value, append it as one item
-            msg_lines.append(f"• {issues}")
+        for issue in issues:
+            msg_lines.append(f"• {issue}")
     else:
         msg_lines.append("✅ No issues detected. Portfolio is healthy!")
     
@@ -1246,6 +1262,7 @@ async def check_orders_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def start_telegram_bot():
     """Start Telegram bot - RUNS IN MAIN THREAD, BLOCKS FOREVER"""
     logger.info("🤖 Starting Telegram bot...")
+    CONFIG = load_config()
     
     # Check token
     if 'telegram_token' not in CONFIG or not CONFIG['telegram_token']:
@@ -1285,6 +1302,9 @@ def start_telegram_bot():
             ("mode", trading_mode),
             ("api_status", api_status),
             ("CONFIG", CONFIG_info),
+            ("debug_order_details", debug_order_details),
+            ("debug_scheduler", debug_scheduler),
+            ("force_order_check", force_order_check),
             ("help", help_command),
         ]
         
