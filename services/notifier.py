@@ -21,7 +21,6 @@ try:
 except ImportError:
     logger.warning("⚠️ Could not import config_loader, using defaults")
     CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
-print(CONFIG)
 logging.info("🔧 Configuration loaded for data feed. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
 # Setup logging
 logging.basicConfig(

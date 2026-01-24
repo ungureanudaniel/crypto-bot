@@ -1,4 +1,4 @@
-# config_loader.py - Hybrid loader
+# config_loader.py - FIXED VERSION
 import os
 import json
 from typing import Dict, Any
@@ -23,32 +23,42 @@ class Config:
                 file_config = json.load(f)
         
         # 2. Load from environment variables (secrets)
+        trading_mode = os.getenv('TRADING_MODE', 'paper').lower()
+        
         env_config = {
-            # Binance API (mainnet)
-            'binance_api_key': os.getenv('BINANCE_LIVE_API_KEY', ''),
-            'binance_api_secret': os.getenv('BINANCE_LIVE_API_SECRET', ''),
-            
-            # Binance Testnet
-            'binance_testnet_api_key': os.getenv('BINANCE_TESTNET_API_KEY', ''),
-            'binance_testnet_private_key': os.getenv('BINANCE_TESTNET_PRIVATE_KEY', ''),
+            # Trading mode
+            'trading_mode': trading_mode,
             
             # Telegram
             'telegram_token': os.getenv('TELEGRAM_TOKEN', ''),
             'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID', ''),
             
-            # Trading mode from env (overrides config.json)
-            'trading_mode': os.getenv('TRADING_MODE', 'paper'),
+            # Binance API keys
+            'binance_api_key': '',  # Will be set based on mode
+            'binance_api_secret': '',  # Will be set based on mode
+            'binance_testnet_api_key': os.getenv('BINANCE_TESTNET_API_KEY', ''),
+            'binance_testnet_private_key': os.getenv('BINANCE_TESTNET_PRIVATE_KEY', ''),
         }
         
-        # 3. Merge: env_config overrides file_config for overlapping keys
+        # 3. Set the main API keys based on trading mode
+        if trading_mode == 'live':
+            env_config['binance_api_key'] = os.getenv('BINANCE_LIVE_API_KEY', '')
+            env_config['binance_api_secret'] = os.getenv('BINANCE_LIVE_API_SECRET', '')
+        elif trading_mode == 'testnet':
+            # For testnet, use testnet keys as the main API keys
+            env_config['binance_api_key'] = os.getenv('BINANCE_TESTNET_API_KEY', '')
+            env_config['binance_api_secret'] = os.getenv('BINANCE_TESTNET_PRIVATE_KEY', '')
+        # For paper mode, both remain empty
+        
+        # 4. Merge: env_config overrides file_config for overlapping keys
         merged_config = {**file_config, **env_config}
         
-        # 4. Set derived values
+        # 5. Set derived values
         trading_mode = merged_config['trading_mode'].lower()
         merged_config['live_trading'] = trading_mode == 'live'
         merged_config['testnet'] = trading_mode == 'testnet'
         
-        # 5. Set API URLs based on mode
+        # 6. Set API URLs based on mode
         if merged_config['testnet']:
             merged_config['binance_api_url'] = merged_config.get('binance_testnet_api_url', 
                                                                'https://testnet.binance.vision')
@@ -76,6 +86,7 @@ config = Config()
 if __name__ == "__main__":
     # Test loading
     CONFIG = config.config
-    print("Configuration Loaded:")
-    for k, v in CONFIG.items():
-        print(f"  {k}: {v}")
+    print("\n📋 Configuration Summary:")
+    print(f"Trading mode: {CONFIG.get('trading_mode')}")
+    print(f"Testnet flag: {CONFIG.get('testnet')}")
+    print(f"binance_api_url: {CONFIG.get('binance_api_url')}")

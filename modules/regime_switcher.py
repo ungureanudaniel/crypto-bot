@@ -29,7 +29,6 @@ try:
 except ImportError:
     logger.warning("⚠️ Could not import config_loader, using defaults")
     CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
-print(CONFIG)
 logging.info("🔧 Configuration loaded for data feed. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
 # Setup logging
 logging.basicConfig(
@@ -199,7 +198,7 @@ def add_features(df, required_features=None):
 # Model Training - FIXED
 # ---------------------------
 def train_model():
-    """Train an XGBoost classifier - FIXED VERSION"""
+    """Train an XGBoost classifier - IMPROVED VERSION"""
     global model, feature_columns_used, scaler
     
     logger.info("=" * 60)
@@ -209,28 +208,28 @@ def train_model():
     start_time = time.time()
     
     # Load config properly
+    config = CONFIG
     
     all_features = []
     all_labels = []
     
     coins = config.get('coins', ['BTC/USDC', 'ETH/USDC', 'SOL/USDC', 'ADA/USDC', 'BNB/USDC'])
-    logger.info(f"📊 Will process {len(coins)} coins")
     
-    # Filter to first few coins for faster testing
-    test_coins = coins[:3]  # Just test with 3 coins
-    logger.info(f"🧪 Testing with: {test_coins}")
+    # Use fewer coins but more data per coin
+    coins = coins[:2]  # Just 2 coins for better data
+    logger.info(f"🧪 Training with: {coins}")
     
-    for coin_idx, coin in enumerate(test_coins):
+    for coin_idx, coin in enumerate(coins):
         coin_start = time.time()
-        logger.info(f"🔍 [{coin_idx+1}/{len(test_coins)}] Processing {coin}...")
+        logger.info(f"🔍 [{coin_idx+1}/{len(coins)}] Processing {coin}...")
         
         try:
-            # STEP 1: Fetch data
+            # STEP 1: Fetch more data for better regime detection
             logger.info(f"   ↳ Fetching OHLCV data...")
-            df = fetch_data_for_regime(coin, "1h", limit=200)
+            df = fetch_data_for_regime(coin, "4h", limit=500)  # Use 4h timeframe, more data
             logger.info(f"   ↳ Got {len(df)} candles")
             
-            if df.empty or len(df) < 50:
+            if df.empty or len(df) < 100:  # Require more data
                 logger.warning(f"   ↳ Insufficient data ({len(df)}), skipping")
                 continue
                 
@@ -243,14 +242,32 @@ def train_model():
                 logger.warning(f"   ↳ No features, skipping")
                 continue
                 
-            # STEP 3: Label regimes
+            # STEP 3: Label regimes with better balancing
             logger.info(f"   ↳ Labeling regimes...")
             df_labeled = label_regime(df_with_features)
             logger.info(f"   ↳ Labeled, shape: {df_labeled.shape}")
             
-            # STEP 4: Use global feature columns
+            # Check regime distribution
+            regime_counts = df_labeled['regime'].value_counts().sort_index()
+            logger.info(f"   ↳ Regime distribution: {regime_counts.to_dict()}")
+            
+            # Ensure we have enough samples for each regime
+            min_samples_per_class = 10
+            valid_regimes = []
+            for regime in [0, 1, 2]:
+                count = regime_counts.get(regime, 0)
+                if count >= min_samples_per_class:
+                    valid_regimes.append(regime)
+                else:
+                    logger.warning(f"   ↳ Regime {regime} has only {count} samples")
+            
+            if len(valid_regimes) < 2:
+                logger.warning(f"   ↳ Not enough regimes ({len(valid_regimes)}), skipping")
+                continue
+                
+            # Get available features
             if feature_columns_used is None:
-                # Define default features if not set
+                # Define default features
                 feature_columns_used = [
                     'rsi', 'macd', 'macd_signal', 'macd_histogram', 'adx', 
                     'bb_width', 'bb_position', 'atr_pct', 'volatility', 'volatility_5',
@@ -258,24 +275,15 @@ def train_model():
                     'volume_ratio', 'volume_volatility', 'momentum'
                 ]
             
-            # Get available features
             available_features = [col for col in feature_columns_used if col in df_labeled.columns]
             logger.info(f"   ↳ Available features: {len(available_features)}")
             
-            if len(available_features) < 5:
+            if len(available_features) < 8:  # Reduced requirement
                 logger.warning(f"   ↳ Insufficient features ({len(available_features)}), skipping")
                 continue
                 
             features = df_labeled[available_features]
             labels = df_labeled['regime']
-            
-            # STEP 5: Check for NaN
-            nan_count = features.isna().sum().sum()
-            logger.info(f"   ↳ NaN values: {nan_count}")
-            
-            if nan_count > len(features) * 0.5:  # More than 50% NaN
-                logger.warning(f"   ↳ Too many NaN values, skipping")
-                continue
             
             all_features.append(features)
             all_labels.append(labels)
@@ -287,7 +295,7 @@ def train_model():
             logger.error(f"   ❌ Error processing {coin}: {str(e)[:100]}")
             continue
     
-    logger.info(f"📊 Total coins processed: {len(all_features)}/{len(test_coins)}")
+    logger.info(f"📊 Total coins processed: {len(all_features)}/{len(coins)}")
     
     if not all_features:
         logger.error("❌ NO DATA PROCESSED - Training failed!")
@@ -300,7 +308,11 @@ def train_model():
         X = pd.concat(all_features, ignore_index=True)
         y = pd.concat(all_labels, ignore_index=True)
         concat_time = time.time() - concat_start
+        
+        # Check final distribution
+        y_distribution = y.value_counts().sort_index()
         logger.info(f"   ✅ Concatenated in {concat_time:.1f}s | Total: {len(X)} samples")
+        logger.info(f"   📊 Final class distribution: {y_distribution.to_dict()}")
         
         # STEP 7: Clean NaN
         logger.info("🧹 Cleaning NaN values...")
@@ -309,8 +321,8 @@ def train_model():
         y_clean = y[~nan_mask]
         logger.info(f"   ✅ Cleaned: {len(X_clean)}/{len(X)} samples remaining")
         
-        if len(X_clean) == 0:
-            logger.error("❌ No clean data after NaN removal!")
+        if len(X_clean) < 100:  # Need minimum samples
+            logger.error("❌ Not enough clean data after NaN removal!")
             return False
         
         # STEP 8: Scale features
@@ -319,21 +331,30 @@ def train_model():
         X_scaled = scaler.fit_transform(X_clean)
         X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns)
         
-        # STEP 9: Split data
+        # STEP 9: Split data with stratification
         logger.info("✂️ Splitting data...")
         X_train, X_test, y_train, y_test = train_test_split(
             X_scaled, y_clean, test_size=0.2, random_state=42, stratify=y_clean
         )
         logger.info(f"   ✅ Split: Train={len(X_train)}, Test={len(X_test)}")
         
-        # STEP 10: Train model
+        # STEP 10: Train model with balanced class weights
         logger.info("🧠 Training XGBoost model...")
+        
+        # Calculate class weights if imbalanced
+        class_counts = y_train.value_counts()
+        total_samples = len(y_train)
+        class_weights = {cls: total_samples / (len(class_counts) * count) 
+                        for cls, count in class_counts.items()}
+        
         model = XGBClassifier(
-            n_estimators=50,  # Reduced for faster testing
-            max_depth=3,
-            learning_rate=0.05,
+            n_estimators=100,  # Increased
+            max_depth=4,       # Slightly deeper
+            learning_rate=0.1,
             random_state=42,
-            n_jobs=-1
+            n_jobs=-1,
+            scale_pos_weight=None,  # For binary, not needed for multi-class
+            # For multi-class, use sample_weight parameter if needed
         )
         
         train_start = time.time()
@@ -345,20 +366,31 @@ def train_model():
         logger.info("📊 Evaluating model...")
         y_pred = model.predict(X_test)
         
+        # Suppress warnings with zero_division
+        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+        
         total_time = time.time() - start_time
         logger.info("=" * 60)
         logger.info(f"✅ TRAINING COMPLETED in {total_time:.1f} seconds")
         logger.info("=" * 60)
         
-        # Save classification report
-        report = classification_report(y_test, y_pred, output_dict=True)
+        # Log detailed results
         logger.info(f"Accuracy: {report['accuracy']:.3f}")
+        for regime in ['0', '1', '2']:
+            if regime in report:
+                prec = report[regime]['precision']
+                rec = report[regime]['recall']
+                f1 = report[regime]['f1-score']
+                support = report[regime]['support']
+                logger.info(f"Regime {regime}: Precision={prec:.2f}, Recall={rec:.2f}, F1={f1:.2f}, Support={support}")
         
         return True
         
     except Exception as e:
         total_time = time.time() - start_time
         logger.error(f"❌ TRAINING FAILED after {total_time:.1f}s: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 # ---------------------------

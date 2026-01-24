@@ -157,7 +157,6 @@ def generate_trade_signal(df, equity, risk_pct=0.01):
         df_with_signals = check_breakout(df)
         last_row = df_with_signals.iloc[-1]
         
-        # Example BTC dominance check (you'll want to fetch this dynamically)
         # For now, using neutral to not block trades
         dominance = "neutral"
         

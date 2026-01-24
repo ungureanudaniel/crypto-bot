@@ -1,152 +1,48 @@
-# main.py - FIXED VERSION
-import logging
-import time
-import signal
+# main.py - SIMPLE LAUNCHER WITH EVENT LOOP FIX
 import sys
 import os
-import threading
-from datetime import datetime
+import asyncio
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# -------------------------------------------------------------------
+# SETUP PATHS
+# -------------------------------------------------------------------
+project_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.join(project_root, 'modules'))
 
-from modules.regime_switcher import train_model
-from services.scheduler import start_schedulers
-from services.telegram_bot import start_telegram_bot
-from services.notifier import notifier
+# -------------------------------------------------------------------
+# FIX EVENT LOOP FOR WINDOWS
+# -------------------------------------------------------------------
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+print("\n" + "=" * 60)
+print("🚀 BINANCE AI TRADING BOT")
+print("=" * 60)
+print("\nStarting... Press Ctrl+C to stop\n")
 
+# Train model (optional)
+try:
+    from modules.regime_switcher import train_model
+    print("🔄 Training model...")
+    train_model()
+    print("✅ Model trained")
+except Exception as e:
+    print(f"⚠️ Could not train model: {e}")
 
-class TradingSystem:
-    def __init__(self):
-        self.running = False
-        self.telegram_thread = None
-        self.scheduler_thread = None
-        logger.info("🚀 Trading System Initializing...")
+# Start bot
+print("\n🤖 Starting Telegram bot...")
+print("📱 Use /start in Telegram")
+print("🛑 Press Ctrl+C to stop\n")
 
-    def start(self):
-        """Start system"""
-        logger.info("=" * 60)
-        logger.info("🚀 STARTING TRADING SYSTEM")
-        logger.info("=" * 60)
+try:
+    from services.telegram_bot import run_telegram_bot
+    run_telegram_bot()
+except KeyboardInterrupt:
+    print("\n🛑 Bot stopped by user")
+except Exception as e:
+    print(f"❌ Error: {e}")
+    import traceback
+    traceback.print_exc()
 
-        self.running = True
-
-        try:
-            # 1️⃣ Startup notification
-            logger.info("📢 Sending startup notification...")
-            notifier.send_message("🚀 Trading System Starting...")
-
-            # 2️⃣ Train model
-            logger.info("🔄 Training regime detection model...")
-            train_model()
-
-            # 3️⃣ Start scheduler in background thread
-            logger.info("⏰ Starting scheduler...")
-            bot_data = {
-                "run_bot": True,
-                "trading_interval": "15m",
-            }
-
-            self.scheduler_thread = threading.Thread(
-                target=start_schedulers,
-                args=(bot_data,),
-                daemon=True,
-                name="SchedulerThread"
-            )
-            self.scheduler_thread.start()
-            logger.info("✅ Scheduler started")
-
-            # 4️⃣ Start Telegram bot in its own thread
-            logger.info("🤖 Starting Telegram bot...")
-            logger.info("💡 Use /start command in Telegram to begin")
-            
-            self.telegram_thread = threading.Thread(
-                target=start_telegram_bot,
-                daemon=True,
-                name="TelegramBotThread"
-            )
-            self.telegram_thread.start()
-            logger.info("✅ Telegram bot started")
-
-            # Wait for threads (with timeout)
-            self.wait_for_threads()
-
-        except KeyboardInterrupt:
-            logger.info("\n🛑 Received Ctrl+C")
-            self.stop()
-        except Exception as e:
-            logger.error(f"❌ System error: {e}")
-            self.stop()
-
-    def wait_for_threads(self):
-        """Wait for threads with proper handling"""
-        try:
-            # Keep main thread alive, checking threads periodically
-            while self.running:
-                # Check if Telegram thread is alive
-                if self.telegram_thread and not self.telegram_thread.is_alive():
-                    logger.warning("⚠️ Telegram thread died, restarting...")
-                    self.telegram_thread = threading.Thread(
-                        target=start_telegram_bot,
-                        daemon=True,
-                        name="TelegramBotThreadRestart"
-                    )
-                    self.telegram_thread.start()
-                
-                # Check if scheduler thread is alive
-                if self.scheduler_thread and not self.scheduler_thread.is_alive():
-                    logger.error("❌ Scheduler thread died!")
-                    self.running = False
-                    break
-                
-                time.sleep(5)
-                
-        except KeyboardInterrupt:
-            logger.info("\n🛑 Shutdown requested")
-
-    def stop(self):
-        """Stop the system gracefully"""
-        logger.info("🛑 Stopping trading system...")
-        self.running = False
-        
-        try:
-            notifier.send_message("🛑 Trading System Stopped")
-        except:
-            pass
-        
-        # Give threads time to cleanup
-        time.sleep(2)
-        
-        logger.info("✅ Trading system stopped")
-        sys.exit(0)
-
-
-def signal_handler(sig, frame):
-    """Handle Ctrl+C"""
-    print("\n🛑 Received shutdown signal")
-    sys.exit(0)
-
-
-if __name__ == "__main__":
-    start_telegram_bot() # Ensure bot starts in main thread
-    # Handle Ctrl+C gracefully 
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    print("\n" + "=" * 60)
-    print("🚀 BINANCE AI TRADING SYSTEM")
-    print("=" * 60)
-    print("Starting in 3 seconds... Press Ctrl+C to stop")
-    print("\nInitializing components...")
-
-    time.sleep(3)
-
-    # Start the system
-    system = TradingSystem()
-    system.start()
+print("\n✅ System stopped")

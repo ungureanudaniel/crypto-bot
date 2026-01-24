@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes
 
 from modules.regime_switcher import predict_regime
 from modules.data_feed import fetch_ohlcv
-from modules.papertrade_engine import paper_engine
+from modules.trade_engine import paper_engine
 
 async def debug_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Detailed debug of a specific order"""
@@ -19,7 +19,7 @@ async def debug_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = context.args[0].upper()
     
     from modules.portfolio import load_portfolio
-    from modules.papertrade_engine import paper_engine
+    from modules.trade_engine import paper_engine
     
     portfolio = load_portfolio()
     pending_orders = portfolio.get('pending_orders', [])
@@ -72,7 +72,7 @@ async def debug_scheduler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Get portfolio info
         from modules.portfolio import load_portfolio
-        from modules.papertrade_engine import paper_engine
+        from modules.trade_engine import paper_engine
         
         portfolio = load_portfolio()
         pending_orders = portfolio.get('pending_orders', [])
@@ -111,7 +111,7 @@ async def force_order_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     
     from modules.portfolio import load_portfolio, save_portfolio
-    from modules.papertrade_engine import paper_engine
+    from modules.trade_engine import paper_engine
     from datetime import datetime
     
     portfolio = load_portfolio()
@@ -469,7 +469,7 @@ if __name__ == "__main__":
         print("\nTesting trade execution for strongest signal...")
         strongest = max(actionable, key=lambda x: x['confidence'])
         
-        from modules.papertrade_engine import paper_engine
+        from modules.trade_engine import paper_engine
         from modules.portfolio import load_portfolio
         
         portfolio = load_portfolio()

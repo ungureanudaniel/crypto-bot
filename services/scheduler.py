@@ -1,439 +1,373 @@
-# services/scheduler.py - Updated for papertrade_engine
-import schedule
-import time
-import threading
-import json
+# services/scheduler.py - WITH PATH FIXES
 import logging
-from logging.handlers import RotatingFileHandler
-from datetime import datetime, timedelta
-
-from modules.regime_switcher import train_model, predict_regime
-from modules.data_feed import fetch_ohlcv
-from modules.trade_engine import paper_engine
-from modules.portfolio import load_portfolio, save_portfolio
+import time
+import sys
+import os
+from datetime import datetime
 
 # -------------------------------------------------------------------
-# CONFIG & LOGGING
+# CRITICAL: SETUP PATHS FIRST
 # -------------------------------------------------------------------
-def load_config():
-    """Load and return config"""
-    with open("config.json", "r") as f:
-        return json.load(f)
+# Get the absolute path to the project root
+current_file_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_file_dir)  # Go up one level from services/
 
-CONFIG = load_config()
+# Add project root to Python path
+sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.join(project_root, 'modules'))
 
+# Now we can import modules
+try:
+    from config_loader import config
+    CONFIG = config.config
+except ImportError:
+    CONFIG = {'trading_mode': 'paper', 'coins': ['BTC/USDC', 'ETH/USDC']}
+
+# -------------------------------------------------------------------
+# LOGGING
+# -------------------------------------------------------------------
 logging.basicConfig(
-    handlers=[RotatingFileHandler("trading_bot.log", maxBytes=5_000_000, backupCount=3)],
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
-# JOBS
+# HELPER FUNCTIONS WITH PROPER IMPORTS
 # -------------------------------------------------------------------
-def get_current_prices():
-    """Fetch current prices for all configured coins"""
-    current_prices = {}
-    interval = "1m"  # Use 1-minute data for latest prices
-    
-    for coin in CONFIG['coins']:
-        try:
-            df = fetch_ohlcv(coin, interval)
-            if not df.empty:
-                current_prices[coin] = df.iloc[-1]['close']
-                logging.debug(f"Current price for {coin}: ${current_prices[coin]:.2f}")
-            else:
-                logging.warning(f"Could not fetch current price for {coin}")
-        except Exception as e:
-            logging.error(f"Error fetching price for {coin}: {e}")
-    
-    return current_prices
+def _import_modules():
+    """Import required modules with proper error handling"""
+    try:
+        from modules.data_feed import fetch_ohlcv
+        from modules.regime_switcher import predict_regime
+        from modules.trade_engine import trading_engine
+        from modules.portfolio import load_portfolio, save_portfolio
+        return fetch_ohlcv, predict_regime, trading_engine, load_portfolio, save_portfolio
+    except ImportError as e:
+        logger.error(f"Failed to import modules: {e}")
+        logger.error(f"Python path: {sys.path}")
+        logger.error(f"Project root: {project_root}")
+        return None, None, None, None, None
 
-def check_pending_orders(current_prices):
-    """Check and execute pending limit orders"""
-    from modules.portfolio import load_portfolio, save_portfolio
-    from modules.trade_engine import paper_engine
-    from datetime import datetime
+# -------------------------------------------------------------------
+# REAL SCHEDULER JOBS
+# -------------------------------------------------------------------
+def check_stop_losses_and_take_profits():
+    """Check and execute stop losses"""
+    logger.info("🛡️ Checking stop losses...")
     
-    portfolio = load_portfolio()
-    pending_orders = portfolio.get('pending_orders', [])
+    # Import inside function to ensure path is set
+    fetch_ohlcv, predict_regime, trading_engine, load_portfolio, save_portfolio = _import_modules()
     
-    if not pending_orders:
-        logging.debug("No pending orders to check")
-        return False
+    if not fetch_ohlcv or not trading_engine or not load_portfolio:
+        logger.error("❌ Cannot import required modules")
+        return
     
-    logging.info(f"🔍 Checking {len(pending_orders)} pending orders...")
+    try:
+        portfolio = load_portfolio()
+        positions = portfolio.get('positions', {})
+        
+        if not positions:
+            logger.info("📭 No active positions")
+            return
+        
+        positions_closed = 0
+        
+        for symbol, position in positions.items():
+            try:
+                # Get current price
+                df = fetch_ohlcv(symbol, "1m", limit=1)
+                if df.empty:
+                    continue
+                
+                current_price = df.iloc[-1]['close']
+                entry_price = position.get('entry_price', 0)
+                
+                if entry_price == 0:
+                    continue
+                
+                # Check stop loss (5% loss)
+                stop_loss_price = entry_price * 0.95
+                if current_price <= stop_loss_price:
+                    logger.info(f"🛑 STOP LOSS: {symbol} at ${current_price:.2f}")
+                    success = trading_engine.close_position(symbol, current_price, "stop_loss")
+                    if success:
+                        positions_closed += 1
+                
+                # Check take profit (10% gain)
+                take_profit_price = entry_price * 1.10
+                if current_price >= take_profit_price:
+                    logger.info(f"🎯 TAKE PROFIT: {symbol} at ${current_price:.2f}")
+                    success = trading_engine.close_position(symbol, current_price, "take_profit")
+                    if success:
+                        positions_closed += 1
+                        
+            except Exception as e:
+                logger.warning(f"Error checking {symbol}: {e}")
+        
+        if positions_closed > 0:
+            logger.info(f"✅ Closed {positions_closed} positions")
+            
+    except Exception as e:
+        logger.error(f"❌ Error in stop loss check: {e}")
+
+def scan_for_trading_signals():
+    """Scan for trading opportunities"""
+    logger.info("🔍 Scanning for signals...")
     
-    executed_orders = []
+    fetch_ohlcv, predict_regime, trading_engine, load_portfolio, save_portfolio = _import_modules()
     
-    for order in list(pending_orders):
-        symbol = order['symbol']
+    if not fetch_ohlcv or not predict_regime or not load_portfolio:
+        logger.error("❌ Cannot import required modules")
+        return
+    
+    try:
+        signals_found = 0
         
-        # Get current price for this symbol
-        current_price = current_prices.get(symbol)
+        for symbol in CONFIG.get('coins', ['BTC/USDC']):
+            try:
+                # Get data
+                df = fetch_ohlcv(symbol, "15m", limit=50)
+                if df.empty:
+                    continue
+                
+                # Predict regime
+                regime = predict_regime(df)
+                
+                # Simple signal logic
+                if regime == "Bullish":
+                    logger.info(f"📈 Bullish: {symbol}")
+                    
+                    # Get current price
+                    current_price = df.iloc[-1]['close']
+                    
+                    # Check portfolio
+                    portfolio = load_portfolio()
+                    cash = portfolio.get('cash_balance', 0)
+                    positions = len(portfolio.get('positions', {}))
+                    
+                    # Simple entry logic
+                    if cash > 100 and positions < 3:
+                        position_size = cash * 0.02
+                        units = position_size / current_price
+                        
+                        logger.info(f"   Signal to BUY {units:.6f} at ${current_price:.2f}")
+                        signals_found += 1
+                        
+            except Exception as e:
+                logger.warning(f"Error analyzing {symbol}: {e}")
         
-        if not current_price:
-            logging.warning(f"No current price available for {symbol}")
-            continue
+        if signals_found > 0:
+            logger.info(f"🎯 Found {signals_found} signals")
+        else:
+            logger.info("📭 No signals found")
+            
+    except Exception as e:
+        logger.error(f"❌ Error scanning signals: {e}")
+
+def update_portfolio_summary():
+    """Update portfolio summary"""
+    logger.info("📊 Updating portfolio...")
+    
+    fetch_ohlcv, predict_regime, trading_engine, load_portfolio, save_portfolio = _import_modules()
+    
+    if not fetch_ohlcv or not load_portfolio:
+        logger.error("❌ Cannot import required modules")
+        return
+    
+    try:
+        portfolio = load_portfolio()
+        cash = portfolio.get('cash_balance', 0)
+        positions = portfolio.get('positions', {})
         
-        should_execute = False
-        trigger_reason = ""
+        # Calculate total value
+        total_value = cash
         
-        # Check if limit order conditions are met
-        if order.get('type') == 'limit':
-            if order['side'] == 'buy' and current_price <= order['price']:
-                should_execute = True
-                trigger_reason = f"Price ${current_price:.2f} <= limit ${order['price']:.2f}"
-            elif order['side'] == 'sell' and current_price >= order['price']:
-                should_execute = True
-                trigger_reason = f"Price ${current_price:.2f} >= limit ${order['price']:.2f}"
+        for symbol, position in positions.items():
+            try:
+                df = fetch_ohlcv(symbol, "1m", limit=1)
+                if not df.empty:
+                    current_price = df.iloc[-1]['close']
+                    position_value = position.get('amount', 0) * current_price
+                    total_value += position_value
+            except:
+                continue
         
-        if should_execute:
-            logging.info(f"🚀 Executing {order['side']} order for {symbol}: {trigger_reason}")
+        # Log summary
+        logger.info(f"💰 Portfolio: ${cash:,.2f} cash, {len(positions)} positions")
+        logger.info(f"💵 Total Value: ${total_value:,.2f}")
+        
+        # Send notification every 6 hours
+        current_hour = datetime.now().hour
+        if current_hour % 6 == 0:
+            try:
+                from services.notifier import notifier
+                notifier.send_message(
+                    f"📊 Portfolio Update\n"
+                    f"Cash: ${cash:,.2f}\n"
+                    f"Total: ${total_value:,.2f}"
+                )
+            except:
+                pass
+                
+    except Exception as e:
+        logger.error(f"❌ Error updating portfolio: {e}")
+
+def check_manual_stops():
+    """Check stop losses for manual trades"""
+    logger.info("🛡️ Checking manual stop losses...")
+    
+    try:
+        from modules.portfolio import load_portfolio, save_portfolio
+        from modules.data_feed import fetch_ohlcv
+        from modules.trade_engine import trading_engine
+        
+        portfolio = load_portfolio()
+        positions = portfolio.get('positions', {})
+        
+        for symbol, position in positions.items():
+            # Check if position has stop loss
+            if 'stop_loss' not in position:
+                continue
+                
+            # Get current price
+            df = fetch_ohlcv(symbol, "1m", limit=1)
+            if df.empty:
+                continue
+                
+            current_price = df.iloc[-1]['close']
+            stop_loss = position['stop_loss']
+            side = position.get('side', 'long')
+            
+            # Check stop loss
+            if (side == 'long' and current_price <= stop_loss) or \
+               (side == 'short' and current_price >= stop_loss):
+                
+                logger.info(f"🛑 Manual stop loss triggered: {symbol}")
+                
+                # Close position
+                success = trading_engine.close_position(symbol, current_price, "stop_loss")
+                
+                if success:
+                    # Send notification
+                    try:
+                        from services.notifier import notifier
+                        notifier.send_message(
+                            f"🛑 Stop Loss Executed\n"
+                            f"Symbol: {symbol}\n"
+                            f"Price: ${current_price:.2f}\n"
+                            f"Stop: ${stop_loss:.2f}"
+                        )
+                    except:
+                        pass
+                        
+    except Exception as e:
+        logger.error(f"❌ Check manual stops error: {e}")
+
+def check_pending_orders():
+    """Check pending orders"""
+    logger.info("📋 Checking pending orders...")
+    
+    fetch_ohlcv, predict_regime, trading_engine, load_portfolio, save_portfolio = _import_modules()
+    
+    if not load_portfolio or not fetch_ohlcv or not trading_engine or not save_portfolio:
+        logger.error("❌ Cannot import required modules")
+        return
+    
+    try:
+        portfolio = load_portfolio()
+        pending_orders = portfolio.get('pending_orders', [])
+        
+        if not pending_orders:
+            return
+        
+        orders_executed = 0
+        
+        for order in pending_orders[:]:  # Copy for iteration
+            symbol = order.get('symbol')
+            side = order.get('side', 'buy')
+            limit_price = order.get('price', 0)
+            
+            if not symbol or limit_price == 0:
+                continue
             
             try:
-                if order['side'] == 'buy':
-                    # Check if we have enough cash
-                    cost = order['amount'] * current_price
-                    if portfolio.get('cash_balance', 0) >= cost:
-                        # Execute buy order using paper_engine
-                        success = paper_engine.open_position(
+                df = fetch_ohlcv(symbol, "1m", limit=1)
+                if df.empty:
+                    continue
+                
+                current_price = df.iloc[-1]['close']
+                
+                # Check limit order conditions
+                should_execute = False
+                
+                if side == 'buy' and current_price <= limit_price:
+                    should_execute = True
+                elif side == 'sell' and current_price >= limit_price:
+                    should_execute = True
+                
+                if should_execute:
+                    logger.info(f"✅ Limit order triggered: {symbol} at ${current_price:.2f}")
+                    
+                    if side == 'buy':
+                        success = trading_engine.open_position(
                             symbol=symbol,
                             side='long',
                             entry_price=current_price,
-                            units=order['amount'],
-                            stop_loss=current_price * 0.95,  # 5% stop loss
-                            take_profit=current_price * 1.10  # 10% take profit
+                            units=order.get('amount', 0)
                         )
-                        
-                        if success:
-                            # Mark order as executed
-                            order['status'] = 'executed'
-                            order['executed_at'] = datetime.now().isoformat()
-                            order['executed_price'] = current_price
-                            order['trigger_reason'] = trigger_reason
-                            executed_orders.append(order)
-                            logging.info(f"✅ Buy order executed for {symbol}")
-                        else:
-                            logging.warning(f"Failed to execute buy order for {symbol}")
                     else:
-                        logging.warning(f"Insufficient funds for {symbol}: ${portfolio.get('cash_balance', 0):.2f} available, need ${cost:.2f}")
-                
-                elif order['side'] == 'sell':
-                    # Check if we have enough holdings
-                    coin = symbol.split('/')[0]
-                    current_holdings = portfolio.get('holdings', {}).get(coin, 0)
+                        success = trading_engine.close_position(symbol, current_price, "limit_order")
                     
-                    if current_holdings >= order['amount']:
-                        # Execute sell - this is simplified, you might need to adjust
-                        from modules.portfolio import update_position
+                    if success:
+                        pending_orders.remove(order)
+                        orders_executed += 1
                         
-                        # Sell from holdings
-                        pnl = update_position(coin, "sell", order['amount'], current_price)
-                        
-                        if pnl is not None:
-                            # Mark order as executed
-                            order['status'] = 'executed'
-                            order['executed_at'] = datetime.now().isoformat()
-                            order['executed_price'] = current_price
-                            order['trigger_reason'] = trigger_reason
-                            executed_orders.append(order)
-                            
-                            # Record trade
-                            trade_history = portfolio.get('trade_history', [])
-                            trade_history.append({
-                                'symbol': symbol,
-                                'action': 'sell_limit',
-                                'side': 'sell',
-                                'amount': order['amount'],
-                                'price': current_price,
-                                'timestamp': datetime.now().isoformat(),
-                                'pnl': pnl
-                            })
-                            portfolio['trade_history'] = trade_history
-                            
-                            logging.info(f"✅ Sell order executed for {symbol}")
-                    else:
-                        logging.warning(f"Insufficient holdings for {symbol}: have {current_holdings}, need {order['amount']}")
-            
             except Exception as e:
-                logging.error(f"Error executing order for {symbol}: {e}")
-    
-    # Update portfolio to remove executed orders
-    if executed_orders:
-        # Keep only orders that weren't executed
-        remaining_orders = [
-            order for order in pending_orders 
-            if order.get('status') != 'executed'
-        ]
+                logger.warning(f"Error processing order {symbol}: {e}")
         
-        portfolio['pending_orders'] = remaining_orders
-        save_portfolio(portfolio)
-        
-        logging.info(f"🎯 Executed {len(executed_orders)} orders, {len(remaining_orders)} remaining")
-        
-        # Send notifications
-        try:
-            from services.notifier import notifier
-            for order in executed_orders:
-                notifier.send_message(
-                    f"✅ Limit Order Executed!\n"
-                    f"Symbol: {order['symbol']}\n"
-                    f"Side: {order['side'].upper()}\n"
-                    f"Amount: {order['amount']}\n"
-                    f"Limit Price: ${order['price']:.2f}\n"
-                    f"Executed at: ${order['executed_price']:.2f}\n"
-                    f"Reason: {order.get('trigger_reason', 'Price triggered')}"
-                )
-        except Exception as e:
-            logging.warning(f"Could not send notifications: {e}")
-        
-        return True
-    
-    return False
-
-def limit_order_check_job(bot_data):
-    """Check and execute pending limit orders"""
-    if not bot_data.get("run_bot", True):
-        return
-        
-    logging.info("Checking pending limit orders...")
-    try:
-        current_prices = get_current_prices()
-        check_pending_orders(current_prices)
-        logging.info("Limit order check completed")
-    except Exception as e:
-        logging.error(f"Error in limit order check job: {e}")
-
-def intraday_trading_job(bot_data):
-    if not bot_data.get("run_bot", True):
-        return
-        
-    logging.info("🚀 Running 15m trading job...")
-    
-    try:
-        # Check stop losses
-        paper_engine.check_stop_losses()
-        
-        # Check portfolio health
-        if not paper_engine.check_portfolio_health():
-            logging.warning("Portfolio health check failed, skipping trades")
-            return
-        
-        # Scan for signals
-        signals = paper_engine.scan_and_trade()
-        
-        if signals:
-            logging.info(f"Found {len(signals)} trading signals")
-            
-            # Execute signals
-            for signal_data in signals[:2]:  # Max 2 at a time
-                paper_engine.execute_signal(signal_data=signal_data)
-        else:
-            logging.info("No trading signals found")
+        if orders_executed > 0:
+            portfolio['pending_orders'] = pending_orders
+            save_portfolio(portfolio)
+            logger.info(f"📝 Executed {orders_executed} orders")
             
     except Exception as e:
-        logging.error(f"Error in trading job: {e}")
-
-def data_refresh_job(bot_data):
-    """Refresh data feed"""
-    if not bot_data.get("run_bot", True):
-        return
-        
-    interval = bot_data.get("trading_interval", "1h")
-    logging.info("Refreshing data feed...")
-    for coin in CONFIG['coins']:
-        try:
-            fetch_ohlcv(coin, interval)
-        except Exception as e:
-            logging.error(f"Error refreshing data for {coin}: {e}")
-
-def portfolio_health_check(bot_data):
-    """Regular portfolio health check and cleanup"""
-    if not bot_data.get("run_bot", True):
-        return
-        
-    logging.info("Running portfolio health check...")
-    try:
-        portfolio = load_portfolio()
-        
-        # Log current portfolio status
-        cash = portfolio.get('cash_balance', 0)
-        holdings = portfolio.get('holdings', {})
-        positions = portfolio.get('positions', {})
-        pending_orders = portfolio.get('pending_orders', [])
-        
-        logging.info(f"Portfolio Health - Cash: ${cash:.2f}, "
-                    f"Holdings: {len(holdings)}, "
-                    f"Positions: {len(positions)}, "
-                    f"Pending Orders: {len(pending_orders)}")
-        
-        # Clean up expired pending orders (older than 7 days)
-        if pending_orders:
-            week_ago = datetime.now() - timedelta(days=7)
-            
-            initial_count = len(pending_orders)
-            portfolio['pending_orders'] = [
-                order for order in pending_orders 
-                if datetime.fromisoformat(order['timestamp']) > week_ago
-            ]
-            
-            if len(portfolio['pending_orders']) < initial_count:
-                save_portfolio(portfolio)
-                logging.info(f"Cleaned up {initial_count - len(portfolio['pending_orders'])} expired pending orders")
-                
-    except Exception as e:
-        logging.error(f"Error in portfolio health check: {e}")
-
-def risk_management_job(bot_data):
-    """Check stop losses and portfolio health"""
-    if not bot_data.get("run_bot", True):
-        return
-        
-    logging.info("Running risk management job...")
-    try:
-        # Check stop losses using papertrade_engine
-        positions_closed = paper_engine.check_stop_losses()
-        
-        if positions_closed:
-            logging.info("Stop losses/take profits executed in risk management job")
-            
-        # Check portfolio value and drawdown
-        current_prices = get_current_prices()
-        portfolio = load_portfolio()
-        
-        # Calculate portfolio value
-        total_value = portfolio.get('cash_balance', 0)
-        for symbol, position in portfolio.get('positions', {}).items():
-            current_price = current_prices.get(symbol, position['entry_price'])
-            total_value += position['amount'] * current_price
-        
-        initial_balance = portfolio.get('initial_balance', total_value)
-        drawdown = (initial_balance - total_value) / initial_balance
-        max_drawdown = CONFIG.get('max_drawdown', 0.05)
-        
-        if drawdown > max_drawdown:
-            logging.warning(f"⚠️ Portfolio drawdown {drawdown:.1%} exceeds limit {max_drawdown:.1%}")
-            
-    except Exception as e:
-        logging.error(f"Error in risk management job: {e}")
-
-def send_daily_report(bot_data):
-    """Send daily portfolio report"""
-    if not bot_data.get("run_bot", True):
-        return
-        
-    try:
-        from services.notifier import notifier
-        
-        portfolio = load_portfolio()
-        current_prices = get_current_prices()
-        
-        # Calculate portfolio value
-        cash = portfolio.get('cash_balance', 0)
-        total_value = cash
-        
-        positions_summary = []
-        for symbol, position in portfolio.get('positions', {}).items():
-            current_price = current_prices.get(symbol, position['entry_price'])
-            position_value = position['amount'] * current_price
-            total_value += position_value
-            pnl_pct = (current_price / position['entry_price'] - 1) * 100
-            positions_summary.append(f"{symbol}: ${position_value:.2f} ({pnl_pct:+.1f}%)")
-        
-        initial_balance = portfolio.get('initial_balance', total_value)
-        total_return = ((total_value - initial_balance) / initial_balance) * 100
-        
-        message = (
-            f"📊 Daily Portfolio Report\n\n"
-            f"💰 Total Value: ${total_value:,.2f}\n"
-            f"📈 Total Return: {total_return:+.1f}%\n"
-            f"💵 Cash: ${cash:,.2f}\n"
-            f"📦 Positions: {len(portfolio.get('positions', {}))}\n"
-        )
-        
-        if positions_summary:
-            message += f"\nActive Positions:\n" + "\n".join(positions_summary)
-        
-        notifier.send_message(message)
-        logging.info("Daily report sent")
-        
-    except Exception as e:
-        logging.error(f"Error sending daily report: {e}")
+        logger.error(f"❌ Error checking orders: {e}")
 
 # -------------------------------------------------------------------
-# SCHEDULER
+# GET JOBS FOR TELEGRAM BOT
 # -------------------------------------------------------------------
-def start_schedulers(bot_data):
-    """Start scheduler in a background thread"""
-    logging.info("🟢 Starting scheduler in background thread...")
-    
-    # Setup all jobs
-    schedule.every(15).minutes.do(intraday_trading_job, bot_data=bot_data)
-    schedule.every(5).minutes.do(limit_order_check_job, bot_data=bot_data)
-    schedule.every().sunday.at("02:00").do(train_model)
-    schedule.every(5).minutes.do(risk_management_job, bot_data=bot_data)
-    schedule.every().day.at("06:00").do(portfolio_health_check, bot_data=bot_data)
-    schedule.every().day.at("20:00").do(send_daily_report, bot_data=bot_data)
-    schedule.every().hour.do(data_refresh_job, bot_data=bot_data)
-    
-    # Create and start scheduler thread
-    scheduler_thread = threading.Thread(
-        target=_scheduler_loop,
-        args=(bot_data,),
-        daemon=True,  # Daemon thread will exit when main program exits
-        name="SchedulerThread"
-    )
-    scheduler_thread.start()
-    
-    logging.info("✅ Scheduler started in background thread")
-    return scheduler_thread
-
-def _scheduler_loop(bot_data):
-    """Main scheduler loop to run in background thread"""
-    logging.info("📡 Scheduler loop running in background")
-    
-    while True:
-        try:
-            if bot_data.get("run_bot", True):
-                schedule.run_pending()
-            time.sleep(1)
-        except KeyboardInterrupt:
-            logging.info("Scheduler loop interrupted")
-            break
-        except Exception as e:
-            logging.error(f"🔥 Scheduler loop error: {e}")
-            time.sleep(5)
-
-def stop_schedulers():
-    """Stop all scheduled jobs"""
-    logging.info("🛑 Stopping all scheduled jobs")
-    schedule.clear()
-
-def check_scheduler_status():
-    """Check if scheduler is running"""
-    jobs = schedule.get_jobs()
+def get_all_jobs():
+    """Return all scheduler jobs"""
     return {
-        'running': len(jobs) > 0,
-        'jobs_count': len(jobs),
-        'jobs': [str(job) for job in jobs]
+        'check_stops': check_stop_losses_and_take_profits,
+        'scan_signals': scan_for_trading_signals,
+        'update_portfolio': update_portfolio_summary,
+        'check_orders': check_pending_orders,
+
     }
+
+def start_schedulers(bot_data=None):
+    """Setup scheduler jobs"""
+    logger.info("⏰ Scheduler jobs defined")
+    return get_all_jobs()
 
 if __name__ == "__main__":
-    # For direct testing
-    bot_data = {
-        "run_bot": True,
-        "trading_interval": "15m"
-    }
+    print(f"🔧 Project root: {project_root}")
+    print(f"🔧 Python path: {sys.path}")
     
-    print("🚀 Starting scheduler in test mode...")
-    start_schedulers(bot_data)
-    
-    # Run once immediately
-    
-    # Keep the main thread alive
+    # Test imports
     try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n🛑 Scheduler stopped")
+        from modules.data_feed import fetch_ohlcv
+        print("✅ Successfully imported modules.data_feed")
+    except ImportError as e:
+        print(f"❌ Failed to import: {e}")
+    
+    # Test jobs
+    print("\n🔄 Testing scheduler jobs...")
+    jobs = get_all_jobs()
+    
+    for job_name, job_func in jobs.items():
+        print(f"\nTesting {job_name}...")
+        job_func()

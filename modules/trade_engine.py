@@ -5,13 +5,23 @@ import logging
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from data_feed import *
-from strategy_tools import generate_trade_signal
-from portfolio import load_portfolio, save_portfolio, update_position, get_summary
-from services.notifier import notifier
+from modules.data_feed import *
+from modules.strategy_tools import generate_trade_signal
+from modules.portfolio import load_portfolio, save_portfolio, update_position, get_summary
+try:
+    from services.notifier import notifier
+    has_notifier = True
+except ImportError:
+    has_notifier = False
+    logger = logging.getLogger(__name__)
+    logger.warning("⚠️ Notifier service not available")
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
@@ -26,15 +36,7 @@ try:
 except ImportError:
     logger.warning("⚠️ Could not import config_loader, using defaults")
     CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
-print(CONFIG)
 logging.info("🔧 Configuration loaded for data feed. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
 # LIVE TRADING SUPPORT
@@ -200,9 +202,19 @@ class TradingEngine:
         return False
     
     def open_position(self, symbol: str, side: str, entry_price: float, 
-                     units: float, stop_loss: float, take_profit: float) -> bool:
-        """Open a new position"""
+                     units: float, stop_loss: float, take_profit: float, auto_stop: bool = True) -> bool:
+        """Open a new position with auto stop loss"""
         portfolio = load_portfolio()
+
+        # If no stop loss provided and auto_stop is True, calculate one
+        if auto_stop and stop_loss is None:
+            # Default 5% stop loss
+            if side == 'long':
+                stop_loss = entry_price * 0.95  # 5% stop
+                take_profit = entry_price * 1.10  # 10% target (2:1)
+            else:  # short
+                stop_loss = entry_price * 1.05  # 5% stop
+                take_profit = entry_price * 0.90  # 10% target (2:1)
         
         # Check if already in position
         if symbol in portfolio.get('positions', {}):

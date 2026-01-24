@@ -1,28 +1,8 @@
 {
   "cash_balance": 1000.0,
   "holdings": {},
-  "positions": {
-    "DOT/USDT": {
-      "side": "long",
-      "amount": 48.543689320388346,
-      "entry_price": 2.06,
-      "stop_loss": 2.0325714285714285,
-      "take_profit": 2.1148571428571428,
-      "entry_time": "2026-01-19T21:18:52.930464"
-    }
-  },
-  "pending_orders": [
-    {
-      "id": "limit_SOL/USDC_buy_20260119_210749",
-      "symbol": "SOL/USDC",
-      "side": "buy",
-      "amount": 1.0,
-      "price": 134.3,
-      "timestamp": "2026-01-19T21:07:49.507844",
-      "status": "pending",
-      "type": "limit"
-    }
-  ],
+  "positions": {},
+  "pending_orders": [],
   "initial_balance": 1000.0,
   "performance_metrics": {
     "total_trades": 0,
@@ -35,16 +15,5 @@
     "avg_loss": 0.0
   },
   "last_updated": "2026-01-17T22:23:49.340411",
-  "trade_history": [
-    {
-      "symbol": "DOT/USDT",
-      "action": "open",
-      "side": "long",
-      "amount": 48.543689320388346,
-      "price": 2.06,
-      "timestamp": "2026-01-19T21:18:52.930464",
-      "stop_loss": 2.0325714285714285,
-      "take_profit": 2.1148571428571428
-    }
-  ]
+  "trade_history": []
 }

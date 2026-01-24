@@ -51,29 +51,79 @@ def update_position(coin, action, amount, price):
     save_portfolio(portfolio)
     return pnl
 
-def get_summary(prices: dict) -> str:
+# portfolio.py
+def get_summary(prices=None):
+    """Get portfolio summary with current values"""
     portfolio = load_portfolio()
+    
+    # Use provided prices or fetch them
+    if prices is None:
+        try:
+            from modules.trade_engine import trading_engine
+            prices = trading_engine.get_current_prices()
+        except ImportError:
+            prices = {}
+    
     cash = portfolio.get('cash_balance', 0)
+    holdings = portfolio.get('holdings', {})
+    positions = portfolio.get('positions', {})
+    
+    # Calculate total value
     total_value = cash
-    holdings_value = {}
+    
+    # Add holdings value
+    holdings_value = 0
+    for coin, amount in holdings.items():
+        symbol = f"{coin}/USDC"  # Adjust based on your quote currency
+        price = prices.get(symbol, 0)
+        value = amount * price
+        holdings_value += value
+    
+    # Add positions value
+    positions_value = 0
+    positions_pnl = 0
+    total_invested = 0
+    
+    for symbol, pos in positions.items():
+        current_price = prices.get(symbol, pos.get('entry_price', 0))
+        entry_price = pos.get('entry_price', 0)
+        amount = pos.get('amount', 0)
+        
+        if entry_price > 0 and amount > 0:
+            invested = amount * entry_price
+            current_value = amount * current_price
+            pnl = current_value - invested
+            pnl_pct = (current_price / entry_price - 1) * 100
+            
+            positions_value += current_value
+            total_invested += invested
+            positions_pnl += pnl
+    
+    total_value = cash + holdings_value + positions_value
+    
+    # Performance metrics
+    initial_balance = portfolio.get('initial_balance', total_value)
+    total_return = total_value - initial_balance
+    total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
+    
+    return {
+        'cash_balance': cash,
+        'holdings_value': holdings_value,
+        'positions_value': positions_value,
+        'total_value': total_value,
+        'total_invested': total_invested,
+        'positions_pnl': positions_pnl,
+        'positions_pnl_pct': (positions_pnl / total_invested * 100) if total_invested > 0 else 0,
+        'total_return': total_return,
+        'total_return_pct': total_return_pct,
+        'active_positions': len(positions),
+        'holdings_count': len(holdings)
+    }
 
-    for coin, pos in portfolio.get('positions', {}).items():
-        current_price = prices.get(coin, pos['current_price'])
-        value = pos['amount'] * current_price
-        total_value += value
-        holdings_value[coin] = {
-            'amount': pos['amount'],
-            'value': value,
-            'entry_price': pos['entry_price'],
-            'current_price': current_price,
-            'pnl': (current_price - pos['entry_price']) * pos['amount']
-        }
-
-    summary = [f"Portfolio Summary:",
-               f"Cash Balance: ${cash:,.2f}",
-               f"Total Value: ${total_value:,.2f}",
-               f"Holdings:"]
-    for coin, details in holdings_value.items():
-        summary.append(f"{coin}: {details['amount']} @ ${details['current_price']:.2f} "
-                       f"(Value: ${details['value']:.2f}, PnL: ${details['pnl']:.2f})")
-    return "\n".join(summary)
+if __name__ == "__main__":
+    # Example usage
+    update_position("BTC", "buy", 0.1, 30000)
+    update_position("ETH", "buy", 1, 2000)
+    update_position("BTC", "sell", 0.05, 35000)
+    prices = {"BTC": 36000, "ETH": 2200}
+    print(get_summary(prices))

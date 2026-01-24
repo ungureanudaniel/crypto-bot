@@ -1,280 +1,494 @@
-# bot.py - SIMPLIFIED VERSION
-
+# services/telegram_bot.py - CLEAN VERSION
 import json
 import sys
 import logging
 import os
 import asyncio
-from modules.trade_engine import trading_engine
+from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # -------------------------------------------------------------------
-# SETUP LOGGING FIRST
+# SETUP PATHS FIRST
+# -------------------------------------------------------------------
+current_file_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_file_dir)
+sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.join(project_root, 'modules'))
+
+# -------------------------------------------------------------------
+# LOGGING
 # -------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
-# SIMPLE CONFIG LOADING - DO THIS ONCE
+# FIX EVENT LOOP FOR WINDOWS
 # -------------------------------------------------------------------
-def load_global_config():
-    """Load config ONCE and make it globally available"""
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# -------------------------------------------------------------------
+# CONFIG
+# -------------------------------------------------------------------
+def get_config():
     try:
-        # Add parent directory to path
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        parent_dir = os.path.dirname(current_dir)
-        sys.path.insert(0, parent_dir)
-        
         from config_loader import config as app_config
-        logger.info(f"✅ Config loaded: trading_mode={app_config.config.get('trading_mode', 'paper')}")
         return app_config.config
-    except ImportError:
-        logger.warning("⚠️ Could not import config_loader, using defaults")
+    except:
         return {
             'trading_mode': 'paper',
-            'testnet': False,
-            'rate_limit_delay': 0.5,
-            'telegram_token': '',
-            'telegram_chat_id': '',
-            'coins': ['BTC/USDC', 'ETH/USDC'],
-            'starting_balance': 1000
+            'telegram_token': os.environ.get('TELEGRAM_TOKEN', ''),
         }
 
-# LOAD CONFIG ONCE - GLOBAL VARIABLE
-CONFIG = load_global_config()
-logger.info(f"📋 Trading mode: {CONFIG.get('trading_mode')}")
+CONFIG = get_config()
 
 # -------------------------------------------------------------------
-# SIMPLIFIED PORTFOLIO LOADING
+# PORTFOLIO
 # -------------------------------------------------------------------
-PORTFOLIO_FILE = "portfolio.json"
+PORTFOLIO_FILE = os.path.join(project_root, "portfolio.json")
 
 def load_portfolio():
-    """Simple portfolio loading"""
     if os.path.exists(PORTFOLIO_FILE):
         try:
             with open(PORTFOLIO_FILE, "r") as f:
                 return json.load(f)
         except:
             pass
-    return {"cash_balance": 10000, "holdings": {}, "positions": {}}
+    return {"cash_balance": 10000}
 
 # -------------------------------------------------------------------
-# COMMAND HANDLERS - USE GLOBAL CONFIG
+# SCHEDULER JOBS - FIXED (async callbacks for run_repeating)
 # -------------------------------------------------------------------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start the bot"""
-    context.bot_data["run_bot"] = True
-    context.bot_data["portfolio"] = load_portfolio()
-    
-    # Get mode from global CONFIG
-    mode = CONFIG.get('trading_mode', 'paper')
-    mode_display = "🚀 LIVE" if mode == 'live' else "🧪 TESTNET" if mode == 'testnet' else "📝 PAPER"
-    
-    await update.message.reply_text(
-        f"🤖 *Binance AI AutoTrader Started!*\n\n"
-        f"*Mode:* {mode_display}\n"
-        f"*Initial Balance:* ${CONFIG.get('starting_balance', 1000):,.2f}\n"
-        f"*Coins Monitored:* {len(CONFIG.get('coins', []))}\n\n"
-        f"Use /help to see all commands",
-        parse_mode='Markdown'
-    )
-
-async def trading_mode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current trading mode - SIMPLIFIED"""
-    mode = CONFIG.get('trading_mode', 'paper')
-    testnet = CONFIG.get('testnet', False)
-    
-    if mode == 'live':
-        message = "🚀 *LIVE TRADING MODE*\nReal orders on Binance"
-    elif mode == 'testnet':
-        message = "🧪 *TESTNET MODE*\nTest orders on Binance Testnet"
-    else:
-        message = "📝 *PAPER TRADING MODE*\nSimulated trades only"
-    
-    await update.message.reply_text(message, parse_mode='Markdown')
-
-async def config_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show config info - USE GLOBAL CONFIG"""
-    info_lines = [
-        "⚙️ *Bot Configuration*",
-        f"Mode: {CONFIG.get('trading_mode', 'paper')}",
-        f"Testnet: {CONFIG.get('testnet', False)}",
-        f"Starting Balance: ${CONFIG.get('starting_balance', 1000):,.2f}",
-        f"Coins: {', '.join(CONFIG.get('coins', ['BTC/USDC']))}",
-        f"Max Positions: {CONFIG.get('max_positions', 3)}",
-        f"Risk per Trade: {CONFIG.get('risk_per_trade', 0.02)*100:.1f}%",
-    ]
-    
-    await update.message.reply_text("\n".join(info_lines), parse_mode='Markdown')
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show bot status"""
-    is_running = context.bot_data.get("run_bot", False)
-    mode = CONFIG.get('trading_mode', 'paper')
-    
-    await update.message.reply_text(
-        f"✅ *Bot Status:* {'Running' if is_running else 'Stopped'}\n"
-        f"*Mode:* {mode.upper()}\n"
-        f"*Balance:* ${load_portfolio().get('cash_balance', 0):,.2f}",
-        parse_mode='Markdown'
-    )
-
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show balance"""
-    portfolio = load_portfolio()
-    cash = portfolio.get('cash_balance', 0)
-    
-    await update.message.reply_text(
-        f"💰 *Cash Balance:* ${cash:,.2f}\n"
-        f"📦 *Holdings:* {len(portfolio.get('holdings', {}))} coins\n"
-        f"🛡️ *Positions:* {len(portfolio.get('positions', {}))}",
-        parse_mode='Markdown'
-    )
-
-# -------------------------------------------------------------------
-# FIXED TRADING COMMANDS
-# -------------------------------------------------------------------
-
-async def regime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Predict market regime - SIMPLIFIED"""
-    if not context.args:
-        await update.message.reply_text("Usage: `/regime BTC/USDC`", parse_mode='Markdown')
-        return
-
-    symbol = context.args[0].upper()
-    
+async def trading_job_callback(context: ContextTypes.DEFAULT_TYPE):
+    """Simple trading job - async"""
+    logger.info("⏰ Running trading job...")
     try:
-        # Import inside function to avoid circular imports
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        
-        from modules.data_feed import fetch_ohlcv
-        from modules.regime_switcher import predict_regime
-        
-        df = fetch_ohlcv(symbol, "1h", limit=100)
-        if df.empty:
-            await update.message.reply_text(f"❌ No data for {symbol}")
-            return
-            
-        regime = predict_regime(df)
-        await update.message.reply_text(f"📊 *{symbol}:* {regime}", parse_mode='Markdown')
-        
+        from modules.trade_engine import trading_engine
+        trading_engine.check_stop_losses()
+        logger.info("✅ Stop losses checked")
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        logger.error(f"❌ Trading job error: {e}")
 
-async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Execute manual trade - SIMPLIFIED"""
-    if not context.args:
-        await update.message.reply_text("Usage: `/trade BTC/USDC`", parse_mode='Markdown')
-        return
+async def portfolio_job_callback(context: ContextTypes.DEFAULT_TYPE):
+    """Simple portfolio job - async"""
+    logger.info("💰 Running portfolio job...")
+    try:
+        portfolio = load_portfolio()
+        cash = portfolio.get('cash_balance', 0)
+        logger.info(f"💰 Cash balance: ${cash:,.2f}")
+    except Exception as e:
+        logger.error(f"❌ Portfolio job error: {e}")
 
-    symbol = context.args[0].upper()
+# -------------------------------------------------------------------
+# TELEGRAM COMMANDS
+# -------------------------------------------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    portfolio = load_portfolio()
+    await update.message.reply_text(
+        f"🤖 *Trading Bot Started!*\n\n"
+        f"💰 Balance: ${portfolio.get('cash_balance', 0):,.2f}\n"
+        f"⏰ Scheduler: Running",
+        parse_mode='Markdown'
+    )
+
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    portfolio = load_portfolio()
+    await update.message.reply_text(
+        f"💰 Cash Balance: ${portfolio.get('cash_balance', 0):,.2f}",
+        parse_mode='Markdown'
+    )
+
+def check_manual_stops(context: ContextTypes.DEFAULT_TYPE):
+    """Check stop losses for manual trades - MUST BE REGULAR FUNCTION (not async)"""
+    logger.info("🛡️ Checking manual stop losses...")
     
     try:
-        # Import inside function
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        
+        from modules.portfolio import load_portfolio, save_portfolio
+        from modules.data_feed import fetch_ohlcv
         from modules.trade_engine import trading_engine
         
-        success = trading_engine.place_limit_order(symbol, side, amount, price)
+        portfolio = load_portfolio()
+        positions = portfolio.get('positions', {})
         
-        if success:
-            await update.message.reply_text(f"✅ Trade executed for {symbol}")
-        else:
-            await update.message.reply_text(f"❌ Failed to execute trade")
+        for symbol, position in positions.items():
+            # Check if position has stop loss
+            if 'stop_loss' not in position:
+                continue
+                
+            # Get current price
+            df = fetch_ohlcv(symbol, "1m", limit=1)
+            if df.empty:
+                continue
+                
+            current_price = df.iloc[-1]['close']
+            stop_loss = position['stop_loss']
+            side = position.get('side', 'long')
             
+            # Check stop loss
+            if (side == 'long' and current_price <= stop_loss) or \
+               (side == 'short' and current_price >= stop_loss):
+                
+                logger.info(f"🛑 Manual stop loss triggered: {symbol}")
+                
+                # Close position
+                success = trading_engine.close_position(symbol, current_price, "stop_loss")
+                
+                if success:
+                    # Send notification
+                    try:
+                        from services.notifier import notifier
+                        notifier.send_message(
+                            f"🛑 Stop Loss Executed\n"
+                            f"Symbol: {symbol}\n"
+                            f"Price: ${current_price:.2f}\n"
+                            f"Stop: ${stop_loss:.2f}"
+                        )
+                    except:
+                        pass
+                        
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Help command"""
-    help_text = """
-🤖 *Binance AI AutoTrader Commands*
-
-*Basic Commands:*
-/start - Start the bot
-/stop - Stop the bot  
-/status - Check bot status
-/help - Show this help
-
-*Portfolio:*
-/balance - Show cash balance
-/portfolio - Portfolio overview
-/portfolio_value - Detailed valuation
-
-*Trading:*
-/regime <symbol> - Market regime
-/trade <symbol> - Execute trade
-/scan - Scan opportunities
-
-*Configuration:*
-/mode - Show trading mode
-/config - Show config
-/api_status - Check API status
-
-*Example:*
-/regime BTC/USDC
-/portfolio
-    """
-    
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+        logger.error(f"❌ Check manual stops error: {e}")
 
 # -------------------------------------------------------------------
-# REGISTER HANDLERS
+# LIMIT ORDER COMMANDS
 # -------------------------------------------------------------------
-def register_handlers(application):
-    """Register all command handlers"""
-    handlers = [
-        ("start", start),
-        ("stop", lambda update, context: update.message.reply_text("Bot stopped")),
-        ("status", status),
-        ("balance", balance),
-        ("regime", regime),
-        ("trade", trade),
-        ("mode", trading_mode_cmd),
-        ("config", config_info),
-        ("help", help_command),
-    ]
-    
-    for cmd, func in handlers:
-        application.add_handler(CommandHandler(cmd, func))
-
-# -------------------------------------------------------------------
-# MAIN FUNCTION
-# -------------------------------------------------------------------
-def main():
-    """Main function to start the bot"""
-    # Check telegram token
-    telegram_token = CONFIG.get('telegram_token')
-    if not telegram_token:
-        logger.error("❌ Telegram token not configured in config.json or .env")
+async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Place a limit buy order"""
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: `/limit_buy SYMBOL AMOUNT PRICE`\n"
+            "Example: `/limit_buy BTC/USDC 0.001 50000`",
+            parse_mode='Markdown'
+        )
         return
     
-    logger.info(f"🤖 Starting Telegram bot with token: {telegram_token[:10]}...")
+    symbol = context.args[0].upper()
     
     try:
-        # Create application
-        application = ApplicationBuilder().token(telegram_token).build()
+        amount = float(context.args[1])
+        price = float(context.args[2])
+    except ValueError:
+        await update.message.reply_text("❌ Amount and price must be numbers", parse_mode='Markdown')
+        return
+    
+    await update.message.reply_text(
+        f"📝 Placing limit BUY order...\n"
+        f"Symbol: {symbol}\n"
+        f"Amount: {amount}\n"
+        f"Limit Price: ${price:.2f}",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        from modules.trade_engine import trading_engine
         
-        # Initialize bot_data
-        application.bot_data["run_bot"] = True
-        application.bot_data["portfolio"] = load_portfolio()
+        success, message = trading_engine.place_limit_order(
+            symbol=symbol,
+            side='buy',
+            amount=amount,
+            price=price
+        )
         
-        # Register handlers
-        register_handlers(application)
+        if success:
+            await update.message.reply_text(
+                f"✅ *Limit BUY Order Placed!*\n\n"
+                f"Symbol: {symbol}\n"
+                f"Amount: {amount}\n"
+                f"Limit Price: ${price:.2f}\n"
+                f"Total: ${amount * price:.2f}\n\n"
+                f"📋 Order ID: {message}",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Failed to place order:\n{message}",
+                parse_mode='Markdown'
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Limit buy error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
+async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Place a limit sell order"""
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: `/limit_sell SYMBOL AMOUNT PRICE`\n"
+            "Example: `/limit_sell BTC/USDC 0.001 52000`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    symbol = context.args[0].upper()
+    
+    try:
+        amount = float(context.args[1])
+        price = float(context.args[2])
+    except ValueError:
+        await update.message.reply_text("❌ Amount and price must be numbers", parse_mode='Markdown')
+        return
+    
+    await update.message.reply_text(
+        f"📝 Placing limit SELL order...\n"
+        f"Symbol: {symbol}\n"
+        f"Amount: {amount}\n"
+        f"Limit Price: ${price:.2f}",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        from modules.trade_engine import trading_engine
         
-        logger.info("✅ Bot setup complete")
-        logger.info("📱 Listening for commands...")
+        success, message = trading_engine.place_limit_order(
+            symbol=symbol,
+            side='sell',
+            amount=amount,
+            price=price
+        )
         
-        # Run bot
-        application.run_polling()
+        if success:
+            await update.message.reply_text(
+                f"✅ *Limit SELL Order Placed!*\n\n"
+                f"Symbol: {symbol}\n"
+                f"Amount: {amount}\n"
+                f"Limit Price: ${price:.2f}\n"
+                f"Total: ${amount * price:.2f}\n\n"
+                f"📋 Order ID: {message}",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Failed to place order:\n{message}",
+                parse_mode='Markdown'
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Limit sell error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
+async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all pending orders"""
+    try:
+        from modules.portfolio import load_portfolio
+        
+        portfolio = load_portfolio()
+        pending_orders = portfolio.get('pending_orders', [])
+        
+        if not pending_orders:
+            await update.message.reply_text("📭 No pending orders", parse_mode='Markdown')
+            return
+        
+        message_lines = [f"📋 *Pending Orders ({len(pending_orders)}):*\n"]
+        
+        for order in pending_orders:
+            symbol = order.get('symbol', 'Unknown')
+            side = order.get('side', 'buy')
+            amount = order.get('amount', 0)
+            price = order.get('price', 0)
+            order_id = order.get('id', 'N/A')
+            timestamp = order.get('timestamp', '')
+            
+            # Format timestamp
+            if timestamp:
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    time_str = dt.strftime("%H:%M")
+                except:
+                    time_str = timestamp[:16]
+            else:
+                time_str = "N/A"
+            
+            # Get emoji
+            side_emoji = "🟢" if side == 'buy' else "🔴"
+            side_text = "BUY" if side == 'buy' else "SELL"
+            
+            message_lines.append(
+                f"{side_emoji} *{symbol} {side_text}*\n"
+                f"   Amount: {amount:.6f}\n"
+                f"   Price: ${price:.2f}\n"
+                f"   Total: ${amount * price:.2f}\n"
+                f"   Time: {time_str}\n"
+                f"   ID: `{order_id[:20]}...`"
+            )
+        
+        full_message = "\n\n".join(message_lines)
+        await update.message.reply_text(full_message, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"❌ Bot error: {e}")
+        logger.error(f"❌ Pending orders error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
+async def cancel_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel all pending orders"""
+    await update.message.reply_text("🗑️ Cancelling ALL pending orders...", parse_mode='Markdown')
+    
+    try:
+        from modules.portfolio import load_portfolio, save_portfolio
+        
+        portfolio = load_portfolio()
+        pending_orders = portfolio.get('pending_orders', [])
+        
+        if not pending_orders:
+            await update.message.reply_text("📭 No orders to cancel", parse_mode='Markdown')
+            return
+        
+        order_count = len(pending_orders)
+        
+        # Clear all pending orders
+        portfolio['pending_orders'] = []
+        save_portfolio(portfolio)
+        
+        await update.message.reply_text(
+            f"✅ *All Orders Cancelled!*\n"
+            f"Cancelled {order_count} pending orders",
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Cancel all orders error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
+async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add stop loss to existing position"""
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: `/set_stop_loss SYMBOL STOP_PRICE [TAKE_PROFIT]`\n"
+            "Example: `/set_stop_loss BTC/USDC 48000 52000`\n"
+            "Example: `/set_stop_loss BTC/USDC 48000` (no take profit)",
+            parse_mode='Markdown'
+        )
+        return
+    
+    symbol = context.args[0].upper()
+    
+    try:
+        stop_price = float(context.args[1])
+        take_profit = float(context.args[2]) if len(context.args) > 2 else None
+    except ValueError:
+        await update.message.reply_text("❌ Invalid prices", parse_mode='Markdown')
+        return
+    
+    await update.message.reply_text(
+        f"🛡️ Setting stop loss for {symbol}...",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        from modules.portfolio import load_portfolio, save_portfolio
+        from modules.data_feed import fetch_ohlcv
+        
+        portfolio = load_portfolio()
+        positions = portfolio.get('positions', {})
+        
+        if symbol not in positions:
+            await update.message.reply_text(f"❌ No position for {symbol}", parse_mode='Markdown')
+            return
+        
+        # Update position with stop loss
+        position = positions[symbol]
+        position['stop_loss'] = stop_price
+        
+        if take_profit:
+            position['take_profit'] = take_profit
+        
+        # Save portfolio
+        save_portfolio(portfolio)
+        
+        # Get current price
+        df = fetch_ohlcv(symbol, "1m", limit=1)
+        current_price = df.iloc[-1]['close'] if not df.empty else 0
+        
+        response = f"✅ *Stop Loss Set!*\n\n*{symbol}*\n"
+        response += f"Current: ${current_price:.2f}\n"
+        response += f"Stop Loss: ${stop_price:.2f}\n"
+        
+        if take_profit:
+            response += f"Take Profit: ${take_profit:.2f}\n"
+        
+        # Calculate distance
+        if current_price > 0:
+            distance_pct = abs(current_price - stop_price) / current_price * 100
+            response += f"Distance: {distance_pct:.1f}%"
+        
+        await update.message.reply_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"❌ Set stop loss error: {e}")
+        await update.message.reply_text(f"❌ *Error:* {str(e)[:80]}", parse_mode='Markdown')
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+🤖 *Trading Bot Commands*
+
+/start - Start bot
+/balance - Check balance
+/limit_buy SYMBOL AMOUNT PRICE - Place limit buy order
+/limit_sell SYMBOL AMOUNT PRICE - Place limit sell order
+/pending_orders - Show pending orders
+/cancel_all_orders - Cancel all pending orders
+/set_stop_loss SYMBOL STOP_PRICE [TAKE_PROFIT] - Set stop loss for position
+/help - Show help
+/stop - Stop bot
+
+*Example:*
+/limit_buy BTC/USDC 0.001 50000
+/balance
+"""
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🛑 Stopping bot...", parse_mode='Markdown')
+    await context.application.stop()
+
+# -------------------------------------------------------------------
+# SINGLE MAIN FUNCTION - KEEP ONLY THIS ONE
+# -------------------------------------------------------------------
+def run_telegram_bot():
+    """Run Telegram bot - SINGLE MAIN FUNCTION"""
+    token = CONFIG.get('telegram_token')
+    if not token:
+        logger.error("❌ No Telegram token")
+        return
+    
+    logger.info("🤖 Starting bot...")
+    
+    # Create application
+    application = ApplicationBuilder().token(token).build()
+    
+    # Setup job queue
+    try:
+        job_queue = application.job_queue
+        if job_queue:
+            # Schedule jobs - callbacks are NOT async
+            job_queue.run_repeating(trading_job_callback, interval=300, first=10)   # 5 min
+            job_queue.run_repeating(portfolio_job_callback, interval=1800, first=15) # 30 min
+            job_queue.run_repeating(check_manual_stops, interval=60, first=10) if asyncio.iscoroutinefunction(check_manual_stops) else None  # Every minute
+            logger.info("✅ Scheduler jobs scheduled")
+    except Exception as e:
+        logger.warning(f"⚠️ Job queue setup failed: {e}")
+        logger.info("ℹ️ Bot will run without scheduler")
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("balance", balance))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("limit_buy", limit_buy))
+    application.add_handler(CommandHandler("limit_sell", limit_sell))
+    application.add_handler(CommandHandler("pending_orders", pending_orders))
+    application.add_handler(CommandHandler("cancel_all_orders", cancel_all_orders))
+    application.add_handler(CommandHandler("set_stop_loss", check_manual_stops))
+    application.add_handler(CommandHandler("stop", stop))
+    
+    logger.info("✅ Bot ready - starting polling...")
+    
+    # Run polling - SIMPLE VERSION
+    application.run_polling(
+        drop_pending_updates=True,
+        poll_interval=1.0
+    )
+    
+    logger.info("✅ Bot stopped")
 
 if __name__ == "__main__":
-    main()
+    run_telegram_bot()
