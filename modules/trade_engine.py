@@ -294,7 +294,7 @@ class TradingEngine:
         return True
     
     def place_limit_order(self, symbol: str, side: str, amount: float, price: float) -> Tuple[bool, str]:
-        """Place a limit order"""
+        """Place a limit order - FIXED VERSION"""
         try:
             portfolio = load_portfolio()
             
@@ -307,18 +307,45 @@ class TradingEngine:
             # Execute REAL limit order if in live/testnet mode
             if self.trading_mode in ['live', 'testnet'] and self.binance_client:
                 try:
+                    # Convert to Binance format
                     binance_symbol = symbol.replace('/', '')
+                    
+                    # For testnet, we might need to adjust the symbol
+                    if self.trading_mode == 'testnet':
+                        # Testnet might use different symbol formats
+                        # Try alternative formats
+                        if 'USDC' in symbol:
+                            binance_symbol = binance_symbol.replace('USDC', 'BUSD')  # Testnet often uses BUSD
+                    
+                    # Validate symbol exists
+                    try:
+                        # Try to get symbol info first
+                        symbol_info = self.binance_client.get_symbol_info(binance_symbol)
+                        if not symbol_info:
+                            return False, f"Symbol {binance_symbol} not found on exchange"
+                    except Exception:
+                        return False, f"Symbol {binance_symbol} not supported"
+                    
+                    # Round quantity to proper step size
+                    step_size = 0.000001  # Default minimum
+                    if symbol_info:
+                        for filter in symbol_info['filters']:
+                            if filter['filterType'] == 'LOT_SIZE':
+                                step_size = float(filter['stepSize'])
+                    
+                    # Round amount to step size
+                    rounded_amount = round(amount / step_size) * step_size
                     
                     if side == 'buy':
                         order = self.binance_client.order_limit_buy(
                             symbol=binance_symbol,
-                            quantity=round(amount, 6),
+                            quantity=rounded_amount,
                             price=str(price)
                         )
                     else:  # sell
                         order = self.binance_client.order_limit_sell(
                             symbol=binance_symbol,
-                            quantity=round(amount, 6),
+                            quantity=rounded_amount,
                             price=str(price)
                         )
                     
@@ -328,9 +355,9 @@ class TradingEngine:
                     pending_orders = portfolio.get('pending_orders', [])
                     pending_orders.append({
                         'id': order['orderId'],
-                        'symbol': symbol,
+                        'symbol': symbol,  # Keep original symbol format
                         'side': side,
-                        'amount': amount,
+                        'amount': rounded_amount,
                         'price': price,
                         'timestamp': datetime.now().isoformat(),
                         'status': 'pending',
@@ -348,40 +375,31 @@ class TradingEngine:
                 except Exception as e:
                     # Return SHORT error message
                     error_msg = str(e)
-                    if len(error_msg) > 200:
-                        error_msg = error_msg[:200] + "..."
-                    return False, f"Live order failed: {error_msg}"
+                    logger.error(f"Binance order error: {error_msg}")
+                    
+                    # Check for common errors
+                    if "Invalid symbol" in error_msg:
+                        return False, f"Symbol {symbol} not valid. Try format: SOLUSDT"
+                    elif "Insufficient balance" in error_msg:
+                        return False, "Insufficient balance"
+                    elif "precision" in error_msg.lower():
+                        return False, "Amount or price precision error"
+                    else:
+                        # Truncate for Telegram
+                        if len(error_msg) > 100:
+                            error_msg = error_msg[:100] + "..."
+                        return False, f"Exchange error: {error_msg}"
             
-            # Paper trading limit order
+            # PAPER TRADING - Always fall back to this if not live/testnet
             else:
-                order_id = f"paper_limit_{symbol}_{side}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                
-                pending_orders = portfolio.get('pending_orders', [])
-                pending_orders.append({
-                    'id': order_id,
-                    'symbol': symbol,
-                    'side': side,
-                    'amount': amount,
-                    'price': price,
-                    'timestamp': datetime.now().isoformat(),
-                    'status': 'pending',
-                    'type': 'limit',
-                    'mode': 'paper'
-                })
-                
-                portfolio['pending_orders'] = pending_orders
-                save_portfolio(portfolio)
-                
-                # Return SHORT success message
-                short_id = order_id[:20] + "..." if len(order_id) > 20 else order_id
-                return True, f"Paper order: {short_id}"
+                return self.place_paper_limit_order(symbol, side, amount, price)
                 
         except Exception as e:
             logger.error(f"Error placing limit order: {e}")
             # Return SHORT error message
             error_msg = str(e)
-            if len(error_msg) > 200:
-                error_msg = error_msg[:200] + "..."
+            if len(error_msg) > 100:
+                error_msg = error_msg[:100] + "..."
             return False, error_msg
     
     def scan_and_trade(self) -> List[Dict]:
