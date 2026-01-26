@@ -1,11 +1,8 @@
 services:
-  trading-bot:
+  trader_bot:
     build: .
     container_name: binance_trader_bot
-    restart: unless-stopped  # NOT 'always'
-    stop_grace_period: 30s
-    stop_signal: SIGINT
-    init: true  # Handles signals properly
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import requests; print('healthy')"]
       interval: 60s
@@ -13,16 +10,13 @@ services:
       retries: 3
       start_period: 40s
     volumes:
+      - ./config.json:/app/config.json
       - ./portfolio.json:/app/portfolio.json
       - ./logs:/app/logs
-      - ./config:/app/config
-    environment:
-      - PYTHONUNBUFFERED=1
-      - TZ=UTC
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    command: >
-      sh -c "python3.12 main.py"
+    environment:
+      - TZ=UTC

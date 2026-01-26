@@ -2,11 +2,14 @@
 import json
 import sys
 import logging
+import signal
 import os
 import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+stop_event = None
 
 # -------------------------------------------------------------------
 # SETUP PATHS FIRST
@@ -27,6 +30,12 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------------
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+def signal_handler(signum, frame):
+    """Handle system signals"""
+    logger.info(f"📴 Received signal {signum}")
+    if stop_event:
+        stop_event.set()
 
 # -------------------------------------------------------------------
 # CONFIG
@@ -636,7 +645,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /help - This help
 
     <b>Market Scanning</b>
-    /markets - Quick market overview
     /scan - Scan for trading signals
     /scan_symbol SYMBOL - Detailed analysis
 
@@ -657,15 +665,37 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(help_text, parse_mode='HTML')
 
+async def shutdown(application):
+    """Gracefully shutdown the bot"""
+    logger.info("🛑 Shutting down bot...")
+    if application.updater.running:
+        await application.updater.stop()
+    await application.stop()
+    await application.shutdown()
+    logger.info("✅ Bot shutdown complete")
+
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop the bot gracefully"""
     await update.message.reply_text("🛑 Stopping bot...", parse_mode='Markdown')
-    await context.application.stop()
+    
+    # Send a goodbye message
+    await update.message.reply_text(
+        "Bot is shutting down. Use /start to restart later.",
+        parse_mode='Markdown'
+    )
+    
+    # Stop the application
+    context.application.stop_running = True
+    
+    # This will trigger the shutdown
+    raise SystemExit(0)
 
 # -------------------------------------------------------------------
 # SINGLE MAIN FUNCTION - KEEP ONLY THIS ONE
 # -------------------------------------------------------------------
 def run_telegram_bot():
     """Run Telegram bot - SINGLE MAIN FUNCTION"""
+    global stop_event
     token = CONFIG.get('telegram_token')
     if not token:
         logger.error("❌ No Telegram token")
@@ -673,6 +703,10 @@ def run_telegram_bot():
     
     logger.info("🤖 Starting bot...")
     
+    # Setup signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     # Create application
     application = ApplicationBuilder().token(token).build()
     
@@ -707,14 +741,19 @@ def run_telegram_bot():
     
     logger.info("✅ Bot ready - starting polling...")
     
-    # Run polling
-    application.run_polling(
-        drop_pending_updates=True,
-        poll_interval=1.0
-    )
-    
-    logger.info("✅ Bot stopped")
-
+    try:
+        # Run polling
+        application.run_polling(
+            drop_pending_updates=True,
+            poll_interval=1.0
+        )
+    except (KeyboardInterrupt):
+        logger.info("🛑 Received keyboard interrupt...")
+    except (SystemExit):
+        logger.info("🛑 Received system exit...")
+    finally:
+        logger.info("🛑 Stopping bot...")
+        asyncio.run(shutdown(application))
 
 if __name__ == "__main__":
     run_telegram_bot()
