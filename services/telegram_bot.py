@@ -267,6 +267,212 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Limit sell error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
+async def scan_and_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually trigger scan_and_trade function"""
+    await update.message.reply_text("🔍 Running scan_and_trade...", parse_mode='Markdown')
+    
+    try:
+        from modules.trade_engine import trading_engine
+        
+        # Run the scan
+        signals_found = trading_engine.scan_and_trade()
+        
+        if not signals_found:
+            await update.message.reply_text(
+                "📭 No trading signals found or max positions reached.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Display signals found
+        message_lines = [f"📊 *Found {len(signals_found)} Signal(s):*\n"]
+        
+        for signal_data in signals_found:
+            symbol = signal_data['symbol']
+            signal = signal_data['signal']
+            
+            message_lines.append(
+                f"🔹 *{symbol}*\n"
+                f"   Side: {signal['side'].upper()}\n"
+                f"   Entry: ${signal['entry']:.2f}\n"
+                f"   Stop Loss: ${signal['stop_loss']:.2f}\n"
+                f"   Take Profit: ${signal['take_profit']:.2f}\n"
+                f"   Units: {signal['units']:.6f}\n"
+            )
+        
+        await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+        
+        # Ask if user wants to execute signals
+        if signals_found:
+            if context.user_data is None:
+                context.user_data = {}
+            context.user_data['pending_signals'] = signals_found
+            await update.message.reply_text(
+                "✅ Signals found! Use `/execute_all` to execute all signals or `/execute SYMBOL` to execute specific one.",
+                parse_mode='Markdown'
+            )
+        
+    except Exception as e:
+        logger.error(f"❌ scan_and_trade error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
+async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Execute all pending signals"""
+    if not context.user_data or 'pending_signals' not in context.user_data or not context.user_data['pending_signals']:
+        await update.message.reply_text("❌ No pending signals. Run `/scan_and_trade` first.", parse_mode='Markdown')
+        return
+    
+    signals_found = context.user_data['pending_signals']
+    await update.message.reply_text(f"⚡ Executing {len(signals_found)} signal(s)...", parse_mode='Markdown')
+    
+    try:
+        from modules.trade_engine import trading_engine
+        
+        executed = []
+        failed = []
+        
+        for signal_data in signals_found:
+            symbol = signal_data['symbol']
+            
+            success = trading_engine.execute_signal(signal_data)
+            if success:
+                executed.append(symbol)
+            else:
+                failed.append(symbol)
+        
+        # Build response message
+        message_lines = ["📊 *Execution Results:*\n"]
+        
+        if executed:
+            message_lines.append(f"✅ *Executed:* {', '.join(executed)}")
+        
+        if failed:
+            message_lines.append(f"❌ *Failed:* {', '.join(failed)}")
+        
+        # Clear pending signals
+        context.user_data['pending_signals'] = []
+        
+        await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"❌ Execute all error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
+async def execute_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Execute specific signal by symbol"""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/execute SYMBOL`\nExample: `/execute BTC/USDC`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    symbol = context.args[0].upper()
+    
+    # Check if we have pending signals
+    if not context.user_data or 'pending_signals' not in context.user_data:
+        await update.message.reply_text(
+            "❌ No pending signals. Run `/scan_and_trade` first.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Find the signal for this symbol
+    signal_to_execute = None
+    signals_found = context.user_data['pending_signals']
+    
+    for signal_data in signals_found:
+        if signal_data['symbol'].upper() == symbol:
+            signal_to_execute = signal_data
+            break
+    
+    if not signal_to_execute:
+        await update.message.reply_text(
+            f"❌ No pending signal for {symbol}",
+            parse_mode='Markdown'
+        )
+        return
+    
+    await update.message.reply_text(
+        f"⚡ Executing signal for {symbol}...",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        from modules.trade_engine import trading_engine
+        
+        success = trading_engine.execute_signal(signal_to_execute)
+        
+        if success:
+            # Remove from pending signals
+            if context.user_data:
+                context.user_data['pending_signals'] = [
+                    s for s in signals_found if s['symbol'].upper() != symbol
+                ]
+            
+            await update.message.reply_text(
+                f"✅ *Signal executed for {symbol}!*\n\n"
+                f"Position opened successfully.",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Failed to execute signal for {symbol}",
+                parse_mode='Markdown'
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Execute signal error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show bot status and current positions"""
+    try:
+        from modules.trade_engine import trading_engine
+        
+        # Get portfolio summary
+        summary = trading_engine.get_portfolio_summary()
+        
+        # Load portfolio for positions
+        from modules.portfolio import load_portfolio
+        portfolio = load_portfolio()
+        positions = portfolio.get('positions', {})
+        
+        # Build message
+        message_lines = [
+            f"🤖 *Trading Bot Status*\n",
+            f"Mode: {summary['trading_mode'].upper()}",
+            f"Portfolio Value: ${summary['portfolio_value']:,.2f}",
+            f"Cash: ${summary['cash_balance']:,.2f}",
+            f"Total Return: {summary['total_return_pct']:+.1f}%",
+            f"Win Rate: {summary['win_rate']:.1f}%",
+            f"Active Positions: {summary['active_positions']}/{trading_engine.max_positions}",
+        ]
+        
+        if positions:
+            message_lines.append(f"\n📊 *Active Positions:*")
+            
+            for symbol, position in positions.items():
+                current_prices = trading_engine.get_current_prices()
+                current_price = current_prices.get(symbol, position['entry_price'])
+                
+                pnl_pct = ((current_price - position['entry_price']) / position['entry_price'] * 100) if position['side'] == 'long' else 0
+                
+                message_lines.append(
+                    f"\n🔹 *{symbol}* ({position['side'].upper()})"
+                    f"\n   Entry: ${position['entry_price']:.2f}"
+                    f"\n   Current: ${current_price:.2f}"
+                    f"\n   P&L: {pnl_pct:+.1f}%"
+                    f"\n   Stop: ${position.get('stop_loss', 'N/A')}"
+                    f"\n   Target: ${position.get('take_profit', 'N/A')}"
+                )
+        
+        await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"❌ Status error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
 async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all pending orders"""
     try:
@@ -418,24 +624,38 @@ async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ *Error:* {str(e)[:80]}", parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Help command with HTML formatting"""
     help_text = """
-🤖 *Trading Bot Commands*
+    <b>🤖 Trading Bot Commands</b>
 
-/start - Start bot
-/balance - Check balance
-/limit_buy SYMBOL AMOUNT PRICE - Place limit buy order
-/limit_sell SYMBOL AMOUNT PRICE - Place limit sell order
-/pending_orders - Show pending orders
-/cancel_all_orders - Cancel all pending orders
-/set_stop_loss SYMBOL STOP_PRICE [TAKE_PROFIT] - Set stop loss for position
-/help - Show help
-/stop - Stop bot
+    <b>Basic Commands</b>
+    /start - Start bot
+    /status - Check status  
+    /balance - Show balance
+    /stop - Stop bot
+    /help - This help
 
-*Example:*
-/limit_buy BTC/USDC 0.001 50000
-/balance
-"""
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    <b>Market Scanning</b>
+    /markets - Quick market overview
+    /scan - Scan for trading signals
+    /scan_symbol SYMBOL - Detailed analysis
+
+    <b>Limit Orders</b>
+    /limit_buy SYM AMT PRICE - Limit buy
+    /limit_sell SYMBOL AMOUNT PRICE - Limit sell
+    /pending_orders - Show pending orders
+    /cancel_all_orders - Cancel all
+
+    <b>Portfolio & Trading</b>
+    /trade SYMBOL BUY/SELL - Manual trade
+    /positions - Show positions
+
+    <b>Examples</b>
+    /limit_buy BTC/USDC 0.001 50000
+    /balance
+    """
+    
+    await update.message.reply_text(help_text, parse_mode='HTML')
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛑 Stopping bot...", parse_mode='Markdown')
@@ -460,10 +680,11 @@ def run_telegram_bot():
     try:
         job_queue = application.job_queue
         if job_queue:
-            # Schedule jobs - callbacks are NOT async
+            # Schedule jobs
             job_queue.run_repeating(trading_job_callback, interval=300, first=10)   # 5 min
             job_queue.run_repeating(portfolio_job_callback, interval=1800, first=15) # 30 min
-            job_queue.run_repeating(check_manual_stops, interval=60, first=10) if asyncio.iscoroutinefunction(check_manual_stops) else None  # Every minute
+            # check_manual_stops set to non async
+            # job_queue.run_repeating(check_manual_stops, interval=60, first=10)  # 1 min
             logger.info("✅ Scheduler jobs scheduled")
     except Exception as e:
         logger.warning(f"⚠️ Job queue setup failed: {e}")
@@ -472,23 +693,28 @@ def run_telegram_bot():
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("balance", balance))
+    application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("limit_buy", limit_buy))
     application.add_handler(CommandHandler("limit_sell", limit_sell))
     application.add_handler(CommandHandler("pending_orders", pending_orders))
     application.add_handler(CommandHandler("cancel_all_orders", cancel_all_orders))
-    application.add_handler(CommandHandler("set_stop_loss", check_manual_stops))
+    application.add_handler(CommandHandler("set_stop_loss", set_stop_loss))
     application.add_handler(CommandHandler("stop", stop))
+    application.add_handler(CommandHandler("scan_and_trade", scan_and_trade))
+    application.add_handler(CommandHandler("execute_all", execute_all))
+    application.add_handler(CommandHandler("execute", execute_signal))
     
     logger.info("✅ Bot ready - starting polling...")
     
-    # Run polling - SIMPLE VERSION
+    # Run polling
     application.run_polling(
         drop_pending_updates=True,
         poll_interval=1.0
     )
     
     logger.info("✅ Bot stopped")
+
 
 if __name__ == "__main__":
     run_telegram_bot()
