@@ -342,10 +342,15 @@ class TradingEngine:
                     portfolio['pending_orders'] = pending_orders
                     save_portfolio(portfolio)
                     
-                    return True, f"Live limit order placed: {order['orderId']}"
+                    # Return SHORT success message
+                    return True, f"Order #{order['orderId']}"
                     
                 except Exception as e:
-                    return False, f"Live order failed: {e}"
+                    # Return SHORT error message
+                    error_msg = str(e)
+                    if len(error_msg) > 200:
+                        error_msg = error_msg[:200] + "..."
+                    return False, f"Live order failed: {error_msg}"
             
             # Paper trading limit order
             else:
@@ -367,11 +372,17 @@ class TradingEngine:
                 portfolio['pending_orders'] = pending_orders
                 save_portfolio(portfolio)
                 
-                return True, f"Paper limit order placed: {order_id}"
+                # Return SHORT success message
+                short_id = order_id[:20] + "..." if len(order_id) > 20 else order_id
+                return True, f"Paper order: {short_id}"
                 
         except Exception as e:
             logger.error(f"Error placing limit order: {e}")
-            return False, str(e)
+            # Return SHORT error message
+            error_msg = str(e)
+            if len(error_msg) > 200:
+                error_msg = error_msg[:200] + "..."
+            return False, error_msg
     
     def scan_and_trade(self) -> List[Dict]:
         """Scan for signals"""

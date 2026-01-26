@@ -163,11 +163,11 @@ def check_manual_stops(context: ContextTypes.DEFAULT_TYPE):
 # LIMIT ORDER COMMANDS
 # -------------------------------------------------------------------
 async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Place a limit buy order"""
+    """Place a limit buy order - FIXED VERSION"""
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
             "Usage: `/limit_buy SYMBOL AMOUNT PRICE`\n"
-            "Example: `/limit_buy BTC/USDC 0.001 50000`",
+            "Example: `/limit_buy SOL/USDC 2 122`",
             parse_mode='Markdown'
         )
         return
@@ -200,31 +200,42 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         if success:
-            await update.message.reply_text(
+            # SHORT response to avoid Telegram limits
+            response = (
                 f"✅ *Limit BUY Order Placed!*\n\n"
                 f"Symbol: {symbol}\n"
                 f"Amount: {amount}\n"
-                f"Limit Price: ${price:.2f}\n"
+                f"Price: ${price:.2f}\n"
                 f"Total: ${amount * price:.2f}\n\n"
-                f"📋 Order ID: {message}",
-                parse_mode='Markdown'
             )
+            
+            # Truncate order ID if it's too long
+            if len(message) > 50:
+                response += f"Order ID: `{message[:30]}...`"
+            else:
+                response += f"Order ID: `{message}`"
+            
+            await update.message.reply_text(response, parse_mode='Markdown')
         else:
+            # Truncate error message
+            error_msg = str(message)[:200]
             await update.message.reply_text(
-                f"❌ Failed to place order:\n{message}",
+                f"❌ Failed to place order:\n{error_msg}",
                 parse_mode='Markdown'
             )
             
     except Exception as e:
         logger.error(f"❌ Limit buy error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+        # Truncate error for Telegram
+        error_msg = str(e)[:150]
+        await update.message.reply_text(f"❌ Error: {error_msg}", parse_mode='Markdown')
 
 async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Place a limit sell order"""
+    """Place a limit sell order - FIXED VERSION"""
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
             "Usage: `/limit_sell SYMBOL AMOUNT PRICE`\n"
-            "Example: `/limit_sell BTC/USDC 0.001 52000`",
+            "Example: `/limit_sell SOL/USDC 2 125`",
             parse_mode='Markdown'
         )
         return
@@ -257,24 +268,35 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         if success:
-            await update.message.reply_text(
+            # SHORT response to avoid Telegram limits
+            response = (
                 f"✅ *Limit SELL Order Placed!*\n\n"
                 f"Symbol: {symbol}\n"
                 f"Amount: {amount}\n"
-                f"Limit Price: ${price:.2f}\n"
+                f"Price: ${price:.2f}\n"
                 f"Total: ${amount * price:.2f}\n\n"
-                f"📋 Order ID: {message}",
-                parse_mode='Markdown'
             )
+            
+            # Truncate order ID if it's too long
+            if len(message) > 50:
+                response += f"Order ID: `{message[:30]}...`"
+            else:
+                response += f"Order ID: `{message}`"
+            
+            await update.message.reply_text(response, parse_mode='Markdown')
         else:
+            # Truncate error message
+            error_msg = str(message)[:200]
             await update.message.reply_text(
-                f"❌ Failed to place order:\n{message}",
+                f"❌ Failed to place order:\n{error_msg}",
                 parse_mode='Markdown'
             )
             
     except Exception as e:
         logger.error(f"❌ Limit sell error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+        # Truncate error for Telegram
+        error_msg = str(e)[:150]
+        await update.message.reply_text(f"❌ Error: {error_msg}", parse_mode='Markdown')
 
 async def scan_and_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually trigger scan_and_trade function"""
@@ -649,7 +671,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /scan_symbol SYMBOL - Detailed analysis
 
     <b>Limit Orders</b>
-    /limit_buy SYM AMT PRICE - Limit buy
+    /limit_buy SYMBOL AMOUNT PRICE - Limit buy
     /limit_sell SYMBOL AMOUNT PRICE - Limit sell
     /pending_orders - Show pending orders
     /cancel_all_orders - Cancel all
