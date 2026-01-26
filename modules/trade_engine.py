@@ -314,8 +314,8 @@ class TradingEngine:
                     if self.trading_mode == 'testnet':
                         # Testnet might use different symbol formats
                         # Try alternative formats
-                        if 'USDC' in symbol:
-                            binance_symbol = binance_symbol.replace('USDC', 'BUSD')  # Testnet often uses BUSD
+                        if 'USDT' in symbol:
+                            binance_symbol = binance_symbol.replace('USDT', 'USDC')  # Testnet often uses USDC
                     
                     # Validate symbol exists
                     try:
@@ -390,9 +390,8 @@ class TradingEngine:
                             error_msg = error_msg[:100] + "..."
                         return False, f"Exchange error: {error_msg}"
             
-            # PAPER TRADING - Always fall back to this if not live/testnet
-            else:
-                return self.place_paper_limit_order(symbol, side, amount, price)
+            # If not in live/testnet mode or no binance client, return paper trading message
+            return False, "Paper trading mode - limit orders not supported"
                 
         except Exception as e:
             logger.error(f"Error placing limit order: {e}")
