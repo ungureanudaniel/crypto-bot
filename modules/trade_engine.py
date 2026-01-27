@@ -200,7 +200,7 @@ class TradingEngine:
             return True
         
         return False
-    
+
     def open_position(self, symbol: str, side: str, entry_price: float, 
                      units: float, stop_loss: float, take_profit: float, auto_stop: bool = True) -> bool:
         """Open a new position with auto stop loss"""
@@ -294,7 +294,7 @@ class TradingEngine:
         return True
     
     def place_limit_order(self, symbol: str, side: str, amount: float, price: float) -> Tuple[bool, str]:
-        """Place a limit order - FIXED VERSION"""
+        """Place a limit order"""
         try:
             portfolio = load_portfolio()
             
