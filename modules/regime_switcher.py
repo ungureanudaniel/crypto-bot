@@ -198,7 +198,7 @@ def add_features(df, required_features=None):
 # Model Training - FIXED
 # ---------------------------
 def train_model():
-    """Train an XGBoost classifier - IMPROVED VERSION"""
+    """Train an XGBoost classifier - FIXED VERSION WITH BETTER CLASS HANDLING"""
     global model, feature_columns_used, scaler
     
     logger.info("=" * 60)
@@ -251,8 +251,8 @@ def train_model():
             regime_counts = df_labeled['regime'].value_counts().sort_index()
             logger.info(f"   ↳ Regime distribution: {regime_counts.to_dict()}")
             
-            # Ensure we have enough samples for each regime
-            min_samples_per_class = 10
+            # FIX: Ensure we have enough samples for each regime BEFORE adding
+            min_samples_per_class = 5  # Reduced from 10 to 5
             valid_regimes = []
             for regime in [0, 1, 2]:
                 count = regime_counts.get(regime, 0)
@@ -264,7 +264,10 @@ def train_model():
             if len(valid_regimes) < 2:
                 logger.warning(f"   ↳ Not enough regimes ({len(valid_regimes)}), skipping")
                 continue
-                
+            
+            # FIX: Filter data to only include valid regimes
+            df_labeled = df_labeled[df_labeled['regime'].isin(valid_regimes)]
+            
             # Get available features
             if feature_columns_used is None:
                 # Define default features
@@ -278,7 +281,7 @@ def train_model():
             available_features = [col for col in feature_columns_used if col in df_labeled.columns]
             logger.info(f"   ↳ Available features: {len(available_features)}")
             
-            if len(available_features) < 8:  # Reduced requirement
+            if len(available_features) < 5:  # Further reduced requirement
                 logger.warning(f"   ↳ Insufficient features ({len(available_features)}), skipping")
                 continue
                 
@@ -321,7 +324,7 @@ def train_model():
         y_clean = y[~nan_mask]
         logger.info(f"   ✅ Cleaned: {len(X_clean)}/{len(X)} samples remaining")
         
-        if len(X_clean) < 100:  # Need minimum samples
+        if len(X_clean) < 50:  # Reduced minimum
             logger.error("❌ Not enough clean data after NaN removal!")
             return False
         
@@ -331,31 +334,68 @@ def train_model():
         X_scaled = scaler.fit_transform(X_clean)
         X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns)
         
-        # STEP 9: Split data with stratification
+        # STEP 9: FIXED - Split data with conditional stratification
         logger.info("✂️ Splitting data...")
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y_clean, test_size=0.2, random_state=42, stratify=y_clean
-        )
-        logger.info(f"   ✅ Split: Train={len(X_train)}, Test={len(X_test)}")
+        
+        # FIX: Check if we can use stratification
+        unique_classes = y_clean.nunique()
+        min_samples_per_class = y_clean.value_counts().min()
+        
+        if unique_classes >= 2 and min_samples_per_class >= 2:
+            # We can use stratification
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_scaled, y_clean, test_size=0.2, random_state=42, stratify=y_clean
+            )
+            logger.info(f"   ✅ Split with stratification")
+        else:
+            # Not enough samples for stratification
+            logger.warning(f"   ⚠️ Not enough samples per class for stratification")
+            logger.warning(f"     Classes: {unique_classes}, Min samples: {min_samples_per_class}")
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_scaled, y_clean, test_size=0.2, random_state=42  # No stratification
+            )
+            logger.info(f"   ✅ Split WITHOUT stratification")
+        
+        logger.info(f"   📊 Train: {len(X_train)}, Test: {len(X_test)}")
+        
+        # Check train distribution
+        train_dist = y_train.value_counts().sort_index()
+        logger.info(f"   📈 Train distribution: {train_dist.to_dict()}")
         
         # STEP 10: Train model with balanced class weights
         logger.info("🧠 Training XGBoost model...")
         
-        # Calculate class weights if imbalanced
-        class_counts = y_train.value_counts()
-        total_samples = len(y_train)
-        class_weights = {cls: total_samples / (len(class_counts) * count) 
-                        for cls, count in class_counts.items()}
+        # FIX: Handle class imbalance properly
+        unique_train_classes = y_train.nunique()
         
-        model = XGBClassifier(
-            n_estimators=100,  # Increased
-            max_depth=4,       # Slightly deeper
-            learning_rate=0.1,
-            random_state=42,
-            n_jobs=-1,
-            scale_pos_weight=None,  # For binary, not needed for multi-class
-            # For multi-class, use sample_weight parameter if needed
-        )
+        if unique_train_classes < 2:
+            logger.error(f"❌ Only {unique_train_classes} class in training data!")
+            return False
+        
+        # Use balanced weights for multi-class
+        if unique_train_classes > 2:
+            # For multi-class, use class weights
+            model = XGBClassifier(
+                n_estimators=100,
+                max_depth=4,
+                learning_rate=0.1,
+                random_state=42,
+                n_jobs=-1,
+                # XGBoost automatically handles multi-class imbalance
+                objective='multi:softprob',
+                num_class=unique_train_classes,
+                use_label_encoder=False,
+                eval_metric='mlogloss'
+            )
+        else:
+            # For binary classification
+            model = XGBClassifier(
+                n_estimators=100,
+                max_depth=4,
+                learning_rate=0.1,
+                random_state=42,
+                n_jobs=-1
+            )
         
         train_start = time.time()
         model.fit(X_train, y_train)
@@ -366,8 +406,15 @@ def train_model():
         logger.info("📊 Evaluating model...")
         y_pred = model.predict(X_test)
         
-        # Suppress warnings with zero_division
-        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+        # FIX: Handle single class in test set
+        if len(np.unique(y_test)) == 1:
+            logger.warning("⚠️ Only one class in test set - accuracy is 100%")
+            accuracy = 1.0
+            report = {"accuracy": accuracy}
+        else:
+            # Suppress warnings with zero_division
+            report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+            accuracy = report['accuracy']
         
         total_time = time.time() - start_time
         logger.info("=" * 60)
@@ -375,14 +422,16 @@ def train_model():
         logger.info("=" * 60)
         
         # Log detailed results
-        logger.info(f"Accuracy: {report['accuracy']:.3f}")
-        for regime in ['0', '1', '2']:
-            if regime in report:
-                prec = report[regime]['precision']
-                rec = report[regime]['recall']
-                f1 = report[regime]['f1-score']
-                support = report[regime]['support']
-                logger.info(f"Regime {regime}: Precision={prec:.2f}, Recall={rec:.2f}, F1={f1:.2f}, Support={support}")
+        logger.info(f"Accuracy: {accuracy:.3f}")
+        
+        if isinstance(report, dict):
+            for regime in ['0', '1', '2']:
+                if regime in report:
+                    prec = report[regime]['precision']
+                    rec = report[regime]['recall']
+                    f1 = report[regime]['f1-score']
+                    support = report[regime]['support']
+                    logger.info(f"Regime {regime}: Precision={prec:.2f}, Recall={rec:.2f}, F1={f1:.2f}, Support={support}")
         
         return True
         

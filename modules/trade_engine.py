@@ -54,14 +54,15 @@ def get_real_binance_client():
             logger.warning("⚠️ No API keys for real trading")
             return None
         
-        client = Client(api_key=api_key, api_secret=api_secret)
-        
+        # ✅ FIXED: Use testnet=True parameter
         if trading_mode == 'testnet':
-            client.API_URL = 'https://testnet.binance.vision'
+            client = Client(api_key=api_key, api_secret=api_secret, testnet=True)
             logger.info("✅ Connected to Binance Testnet")
         else:
+            client = Client(api_key=api_key, api_secret=api_secret)
             logger.info("✅ Connected to Binance Live")
         
+        logger.info(f"🌐 API URL: {client.API_URL}")
         return client
     except ImportError:
         logger.error("❌ python-binance not installed for live trading")
@@ -321,6 +322,7 @@ class TradingEngine:
                     try:
                         # Try to get symbol info first
                         symbol_info = self.binance_client.get_symbol_info(binance_symbol)
+                        print(symbol_info)
                         if not symbol_info:
                             return False, f"Symbol {binance_symbol} not found on exchange"
                     except Exception:

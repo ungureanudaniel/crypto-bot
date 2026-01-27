@@ -50,16 +50,17 @@ def init_binance_client():
         if trading_mode == 'paper' or not api_key or not api_secret:
             logger.info("📄 Using PAPER Trading mode - Mock Binance client")
 
-        # Live or Testnet mode with valid API keys
-        logger.info(f"🔐 Using Binance API with {'Testnet' if trading_mode == 'testnet' else 'Live'} mode")
-        client = Client(api_key=api_key, api_secret=api_secret)
-        
-        # Set API URL (config_loader already sets binance_api_url based on mode)
-        client.API_URL = CONFIG.get('binance_api_url', 
-                                   'https://testnet.binance.vision' if trading_mode == 'testnet' 
-                                   else 'https://api.binance.com')
+        # ✅ FIXED: Use testnet=True parameter for testnet
+        if trading_mode == 'testnet':
+            logger.info("🔐 Using Binance Testnet mode")
+            client = Client(api_key=api_key, api_secret=api_secret, testnet=True)
+        else:  # live trading
+            logger.info("🔐 Using Binance Live mode")
+            client = Client(api_key=api_key, api_secret=api_secret)
         
         logger.info(f"✅ Binance client initialized for {trading_mode} mode")
+        logger.info(f"🌐 API URL: {client.API_URL}")
+        
         return client
         
     except ImportError:
