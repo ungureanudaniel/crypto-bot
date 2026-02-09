@@ -3,11 +3,10 @@ import json
 import logging
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Optional
-
-from modules.data_feed import data_feed
-from modules.strategy_tools import generate_trade_signal
-from modules.portfolio import load_portfolio, save_portfolio, update_position, get_summary
+from typing import Dict, List
+from data_feed import data_feed
+from strategy_tools import generate_trade_signal
+from portfolio import load_portfolio, save_portfolio, update_position, get_summary
 from services.notifier import notifier
 
 logger = logging.getLogger(__name__)

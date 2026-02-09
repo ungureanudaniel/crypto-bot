@@ -1,6 +1,5 @@
 # services/scheduler.py - WITH PATH FIXES
 import logging
-import time
 import sys
 import os
 from datetime import datetime
@@ -315,7 +314,9 @@ def check_pending_orders():
                             symbol=symbol,
                             side='long',
                             entry_price=current_price,
-                            units=order.get('amount', 0)
+                            units=order.get('amount', 0),
+                            stop_loss=order.get('stop_loss'),
+                            take_profit=order.get('take_profit')
                         )
                     else:
                         success = trading_engine.close_position(symbol, current_price, "limit_order")

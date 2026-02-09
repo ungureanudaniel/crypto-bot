@@ -82,6 +82,7 @@ def fetch_data_for_regime(symbol, interval="1h", limit=500):
 # ---------------------------
 def add_features(df, required_features=None):
     """Add technical indicators as features - OPTIMIZED VERSION"""
+    from ta.volatility import BollingerBands, AverageTrueRange
     global feature_columns_used
     df = df.copy()
     
@@ -194,6 +195,47 @@ def add_features(df, required_features=None):
         df_fallback['volatility'] = df_fallback['returns'].rolling(window=20, min_periods=1).std()
         return df_fallback.dropna()
 
+def ensure_features(df):
+    """
+    Ensure all required features exist for both regime detection and strategy.
+    """
+    try:
+        # If not enough rows, return original with zeros
+        if len(df) < 20:
+            for col in [
+                'rsi','macd','macd_signal','macd_histogram','adx',
+                'bb_width','bb_position','atr_pct','volatility','volatility_5',
+                'returns','returns_5','returns_10','price_channel_position',
+                'volume_ratio','volume_volatility','momentum'
+            ]:
+                if col not in df.columns:
+                    df[col] = 0
+            return df
+        
+        # Call optimized feature function
+        df = add_features(df)
+        
+        # Fill any remaining missing features with 0
+        for col in [
+            'rsi','macd','macd_signal','macd_histogram','adx',
+            'bb_width','bb_position','atr_pct','volatility','volatility_5',
+            'returns','returns_5','returns_10','price_channel_position',
+            'volume_ratio','volume_volatility','momentum'
+        ]:
+            if col not in df.columns:
+                df[col] = 0
+        df.fillna(0, inplace=True)
+        
+        return df
+    
+    except Exception as e:
+        logging.error(f"Error ensuring features: {e}")
+        # Fallback: minimal columns
+        df['returns'] = df['close'].pct_change()
+        df['volatility'] = df['returns'].rolling(20, min_periods=1).std()
+        df.fillna(0, inplace=True)
+        return df
+
 # ---------------------------
 # Model Training - FIXED
 # ---------------------------
@@ -226,7 +268,9 @@ def train_model():
         try:
             # STEP 1: Fetch more data for better regime detection
             logger.info(f"   ↳ Fetching OHLCV data...")
-            df = fetch_data_for_regime(coin, "4h", limit=500)  # Use 4h timeframe, more data
+            timeframe = "15m" if CONFIG.get('trading_mode') == 'testnet' else "1h"
+
+            df = fetch_data_for_regime(coin, timeframe, limit=500)  # Use 4h timeframe, more data
             logger.info(f"   ↳ Got {len(df)} candles")
             
             if df.empty or len(df) < 100:  # Require more data
@@ -503,9 +547,11 @@ def predict_regime(df):
         
         # Map prediction to label
         regime_map = {
-            0: "Range-Bound 📊",
-            1: "Trending 📈", 
-            2: "Breakout 🚀"
+            0: "Range / Mean-Reversion 📊",
+            1: "Compression (Squeeze) 🧲",
+            2: "Expansion (Volatile Chop) 🌪",
+            3: "Breakout 🚀",
+            4: "True Trend 📈"
         }
         
         regime_label = regime_map.get(prediction, f"Unknown ({prediction})")
@@ -540,62 +586,82 @@ def quick_predict(symbol):
 # Regime Labeling - KEEP SAME
 # ---------------------------
 def label_regime(df):
-    """Label market regimes - BETTER BREAKOUT DETECTION
-    0 = Rangebound, 1 = Trending, 2 = Breakout
     """
+    Realistic market regime labeling based on:
+    - Market structure
+    - Volatility state
+    - Compression vs expansion
+    - Breakouts
+    - True trend (HH/HL or LH/LL structure)
+
+    Regimes:
+    0 = Range / Mean Reversion
+    1 = Compression (squeeze / accumulation)
+    2 = Expansion (volatile chop)
+    3 = Breakout
+    4 = Trend (true structure trend)
+    """
+
     df = df.copy()
-    df['regime'] = 0  # default = rangebound
-    
-    try:
-        # Calculate dynamic thresholds based on recent data
-        recent_volatility = df['volatility'].tail(50)
-        recent_returns = df['returns'].abs().tail(50)
-        
-        high_vol_threshold = recent_volatility.quantile(0.85)  # Top 15% volatility
-        breakout_return_threshold = recent_returns.quantile(0.90)  # Top 10% returns
-        trend_return_threshold = recent_returns.quantile(0.70)  # Top 30% returns
-        
-        # BREAKOUT DETECTION (Class 2)
-        high_volatility = df['volatility'] > high_vol_threshold
-        large_return = df['returns'].abs() > breakout_return_threshold
-        high_atr = df['atr_pct'] > df['atr_pct'].quantile(0.8)
-        volume_spike = df['volume_ratio'] > 2.0
-        price_channel_break = (df['close'] > df['high_20']) | (df['close'] < df['low_20'])
-        
-        breakout_score = (high_volatility.astype(int) + 
-                         large_return.astype(int) + 
-                         high_atr.astype(int) + 
-                         volume_spike.astype(int) + 
-                         price_channel_break.astype(int))
-        
-        df.loc[breakout_score >= 3, 'regime'] = 2
-        
-        # TRENDING DETECTION (Class 1)
-        moderate_adx = df['adx'] > 25
-        consistent_returns = df['returns_5'].abs() > trend_return_threshold
-        bb_squeeze = df['bb_width'] < df['bb_width'].quantile(0.3)
-        macd_trend = df['macd_histogram'].abs() > df['macd_histogram'].abs().quantile(0.7)
-        
-        positive_trend = (df['returns_5'] > 0) & (df['macd'] > df['macd_signal'])
-        negative_trend = (df['returns_5'] < 0) & (df['macd'] < df['macd_signal'])
-        
-        trending_conditions = (
-            (moderate_adx & consistent_returns) |
-            (bb_squeeze & consistent_returns) |
-            (macd_trend & consistent_returns) |
-            ((positive_trend | negative_trend) & consistent_returns)
-        )
-        
-        df.loc[trending_conditions & (df['regime'] != 2), 'regime'] = 1
-        
-        logger.info(f"Regime distribution: {dict(df['regime'].value_counts())}")
-        
-    except Exception as e:
-        logger.error(f"Error labeling regimes: {e}")
-        returns_abs = df['returns'].abs()
-        df.loc[returns_abs > returns_abs.quantile(0.95), 'regime'] = 2
-        df.loc[returns_abs > returns_abs.quantile(0.70), 'regime'] = 1
-    
+
+    # Ensure bb_width exists
+    if 'bb_width' not in df.columns:
+        try:
+            bb = BollingerBands(df['close'], window=20, window_dev=2)
+            df['bb_width'] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg().replace(0, 1e-10)
+        except:
+            df['bb_width'] = 0
+
+    df['regime'] = 0  # default = range
+
+    # ---------- Volatility ----------
+    df['ret'] = df['close'].pct_change()
+    vol = df['ret'].rolling(20).std()
+    vol_ma = vol.rolling(50).mean()
+
+    # ---------- Structure ----------
+    df['hh'] = df['high'] > df['high'].shift(1)
+    df['hl'] = df['low'] > df['low'].shift(1)
+    df['lh'] = df['high'] < df['high'].shift(1)
+    df['ll'] = df['low'] < df['low'].shift(1)
+
+    up_structure = (df['hh'] & df['hl']).rolling(5).sum() >= 3
+    down_structure = (df['lh'] & df['ll']).rolling(5).sum() >= 3
+    structure_trend = up_structure | down_structure
+
+    # ---------- Compression ----------
+    bb_width = df['bb_width']
+    compression = (
+        (bb_width < bb_width.rolling(50).quantile(0.2)) &
+        (vol < vol_ma * 0.7)
+    )
+
+    # ---------- Expansion ----------
+    expansion = (
+        (vol > vol_ma * 1.3)
+    )
+
+    # ---------- Breakout ----------
+    high_20 = df['high'].rolling(20).max()
+    low_20 = df['low'].rolling(20).min()
+
+    breakout = (
+        ((df['close'] > high_20.shift(1)) | (df['close'] < low_20.shift(1))) &
+        (vol > vol_ma) &
+        (df['volume_ratio'] > 1.5)
+    )
+
+    # ---------- True Trend ----------
+    slope = df['close'].rolling(20).mean().diff()
+    trend = structure_trend & (slope.abs() > slope.abs().rolling(50).mean())
+
+    # ---------- Regime Assignment Priority ----------
+    # Priority matters (top overrides below)
+    df.loc[compression, 'regime'] = 1        # Compression
+    df.loc[expansion, 'regime'] = 2          # Expansion
+    df.loc[breakout, 'regime'] = 3           # Breakout
+    df.loc[trend, 'regime'] = 4              # True Trend
+
     return df
 
 # ---------------------------

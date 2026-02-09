@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import logging
+from regime_switcher import ensure_features, label_regime
+from ta.volatility import BollingerBands, AverageTrueRange
 
 # -------------------------------------------------------------------
 # Enhanced Helper functions for breakout strategy
@@ -145,65 +147,63 @@ def dominance_confirmation(dominance_open, dominance_close, dominance_ema):
 # Enhanced Signal Generation
 # -------------------------------------------------------------------
 def generate_trade_signal(df, equity, risk_pct=0.01):
-    """
-    Generate trade signals with proper error handling
-    """
     try:
-        if df.empty or len(df) < 50:
+        if df.empty or len(df) < 20:
             logging.warning("Insufficient data for signal generation")
             return None
-        
-        # Calculate breakout conditions
+
+        # --- Step 1: Add all features required by strategy ---
+        df = ensure_features(df)  # ensures ATR, bb_width, returns, volatility, volume_ratio, etc.
+
+        # --- Step 2: Prepare breakout-specific features ---
+        df['volume_sma'] = df['volume'].rolling(20, min_periods=1).mean()
+        df['volume_ratio'] = df['volume'] / df['volume_sma'].replace(0, 1e-10)
+        df['highest_high'] = df['high'].rolling(20, min_periods=1).max()
+        df['lowest_low'] = df['low'].rolling(20, min_periods=1).min()
+        df['dc_mid'] = (df['highest_high'] + df['lowest_low']) / 2
+        df['atr'] = AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
+
+        # --- Step 3: Check breakout conditions ---
         df_with_signals = check_breakout(df)
         last_row = df_with_signals.iloc[-1]
-        
-        # For now, using neutral to not block trades
-        dominance = "neutral"
-        
+
+        # --- Step 4: Generate trade signal ---
         signal = None
-        
-        # Long signal
-        if last_row['long_condition'] and dominance in ["above", "neutral"]:
+        if last_row['long_condition']:
             tp, sl, units = calculate_position_size(
-                last_row['close'], equity, risk_pct, 
+                last_row['close'], equity, risk_pct,
                 last_row['atr'], 2, 2, "ATR", last_row['dc_mid']
             )
-            
             if units > 0:
                 signal = {
-                    "side": "long", 
-                    "entry": last_row['close'], 
-                    "take_profit": tp, 
-                    "stop_loss": sl, 
+                    "side": "long",
+                    "entry": last_row['close'],
+                    "take_profit": tp,
+                    "stop_loss": sl,
                     "units": units,
                     "signal_type": "breakout_long"
                 }
-                logging.info(f"Generated LONG signal: {last_row['close']:.2f}, units: {units:.6f}")
-        
-        # Short signal  
-        elif last_row['short_condition'] and dominance in ["below", "neutral"]:
+
+        elif last_row['short_condition']:
             tp, sl, units = calculate_position_size(
-                last_row['close'], equity, risk_pct, 
+                last_row['close'], equity, risk_pct,
                 last_row['atr'], 2, 2, "ATR", last_row['dc_mid']
             )
-            
             if units > 0:
                 signal = {
-                    "side": "short", 
-                    "entry": last_row['close'], 
-                    "take_profit": tp, 
-                    "stop_loss": sl, 
+                    "side": "short",
+                    "entry": last_row['close'],
+                    "take_profit": tp,
+                    "stop_loss": sl,
                     "units": units,
                     "signal_type": "breakout_short"
                 }
-                logging.info(f"Generated SHORT signal: {last_row['close']:.2f}, units: {units:.6f}")
-        
+
         return signal
-        
+
     except Exception as e:
         logging.error(f"Error in generate_trade_signal: {e}")
         return None
-
 
 if __name__ == "__main__":
     # Example usage

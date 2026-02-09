@@ -1,7 +1,8 @@
 {
   "cash_balance": 1000.0,
   "holdings": {},
-  "positions": {},
+  "positions": {
+  },
   "pending_orders": [],
   "initial_balance": 1000.0,
   "performance_metrics": {

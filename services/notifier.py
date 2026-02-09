@@ -37,14 +37,10 @@ class Notifier:
         self.chat_id = CONFIG['telegram_chat_id']
         logger.info("📱 Notifier initialized")
     
-    def send_message(self, message: str) -> bool:
-        """Send telegram message synchronously"""
+    async def send_message(self, message: str) -> bool:
+        """Send telegram message asynchronously"""
         try:
-            async def send_async():
-                await self.bot.send_message(chat_id=self.chat_id, text=message)
-            
-            # Run event loop
-            asyncio.run(send_async())
+            await self.bot.send_message(chat_id=self.chat_id, text=message)
             
             logger.info(f"Message sent: {message[:50]}...")
             return True
@@ -52,7 +48,7 @@ class Notifier:
             logger.error(f"Failed to send message: {e}")
             return False
     
-    def send_trade_notification(self, trade_data: dict):
+    async def send_trade_notification(self, trade_data: dict):
         """Send formatted trade notification"""
         symbol = trade_data.get('symbol', 'Unknown')
         side = trade_data.get('side', '').upper()
@@ -78,7 +74,7 @@ class Notifier:
                 f"PnL: ${pnl:.2f}"
             )
         
-        return self.send_message(message)
+        return await self.send_message(message)
 
 # Create singleton instance
 notifier = Notifier()

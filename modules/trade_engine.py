@@ -1,13 +1,14 @@
 # modules/trading_engine.py - UNIVERSAL VERSION
+import asyncio
 import sys
 import os
 import logging
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from modules.data_feed import *
-from modules.strategy_tools import generate_trade_signal
-from modules.portfolio import load_portfolio, save_portfolio, update_position, get_summary
+from data_feed import *
+from strategy_tools import generate_trade_signal
+from portfolio import load_portfolio, save_portfolio, update_position, get_summary
 try:
     from services.notifier import notifier
     has_notifier = True
@@ -187,15 +188,15 @@ class TradingEngine:
             save_portfolio(portfolio)
             
             # Send notification
-            if has_notifier:
-                notifier.send_trade_notification({
+            if hasattr(self, 'notifier') and self.notifier is not None:
+                asyncio.create_task(notifier.send_trade_notification({
                     'symbol': symbol,
                     'side': 'SELL',
                     'price': exit_price,
                     'amount': amount,
                     'pnl': pnl,
                     'mode': self.trading_mode
-                })
+                }))
             
             logger.info(f"✅ Closed {symbol}: PnL ${pnl:.2f} ({self.trading_mode})")
             return True
@@ -280,8 +281,8 @@ class TradingEngine:
         save_portfolio(portfolio)
         
         # Send notification
-        if has_notifier:
-            notifier.send_trade_notification({
+        if hasattr(self, 'notifier') and self.notifier is not None:
+            asyncio.create_task(notifier.send_trade_notification({
                 'symbol': symbol,
                 'side': 'BUY',
                 'price': entry_price,
@@ -289,8 +290,7 @@ class TradingEngine:
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
                 'mode': self.trading_mode
-            })
-        
+            }))
         logger.info(f"✅ Opened {side} position: {symbol} ({self.trading_mode})")
         return True
     
