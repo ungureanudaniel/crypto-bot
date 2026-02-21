@@ -1,129 +1,85 @@
+# portfolio.py - ONLY for trade history, NOT balances
 import json
 import os
+from datetime import datetime
 
 PORTFOLIO_FILE = "portfolio.json"
 
 def load_portfolio():
+    """Load portfolio data (history only)"""
     if os.path.exists(PORTFOLIO_FILE):
-        with open(PORTFOLIO_FILE, "r") as f:
-            return json.load(f)
-    return {"cash_balance": 1000, "positions": {}}
+        try:
+            with open(PORTFOLIO_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    
+    # Default structure
+    return {
+        "initial_balance": None,  # Will be set on first trade/sync
+        "trade_history": [],
+        "performance_metrics": {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "total_pnl": 0.0,
+            "win_rate": 0.0
+        },
+        "last_updated": datetime.now().isoformat()
+    }
 
 def save_portfolio(portfolio):
+    """Save portfolio data"""
+    portfolio["last_updated"] = datetime.now().isoformat()
     with open(PORTFOLIO_FILE, "w") as f:
         json.dump(portfolio, f, indent=2)
 
-def update_position(coin, action, amount, price):
-    """
-    Updates portfolio on buy/sell, returns PnL (for sells only)
-    """
-    portfolio = load_portfolio()
-    pnl = None
-
-    if action == "buy":
-        if coin in portfolio['positions']:
-            old_pos = portfolio['positions'][coin]
-            old_amount = old_pos['amount']
-            old_price = old_pos['entry_price']
-            new_amount = old_amount + amount
-            new_entry_price = (old_price*old_amount + price*amount)/new_amount
-            portfolio['positions'][coin]['amount'] = new_amount
-            portfolio['positions'][coin]['entry_price'] = new_entry_price
-            portfolio['positions'][coin]['current_price'] = price
-        else:
-            portfolio['positions'][coin] = {
-                'amount': amount,
-                'entry_price': price,
-                'current_price': price
-            }
-        portfolio['cash_balance'] -= amount * price
-
-    elif action == "sell":
-        if coin in portfolio['positions'] and portfolio['positions'][coin]['amount'] >= amount:
-            pos = portfolio['positions'][coin]
-            pnl = (price - pos['entry_price']) * amount
-            pos['amount'] -= amount
-            portfolio['cash_balance'] += amount * price
-            pos['current_price'] = price
-            if pos['amount'] == 0:
-                portfolio['positions'].pop(coin)
-
-    save_portfolio(portfolio)
-    return pnl
-
-# portfolio.py
-def get_summary(prices=None):
-    """Get portfolio summary with current values"""
+def add_trade(trade):
+    """Add a trade to history"""
     portfolio = load_portfolio()
     
-    # Use provided prices or fetch them
-    if prices is None:
-        try:
-            from modules.trade_engine import trading_engine
-            prices = trading_engine.get_current_prices()
-        except ImportError:
-            prices = {}
+    # Add timestamp if not present
+    if "timestamp" not in trade:
+        trade["timestamp"] = datetime.now().isoformat()
     
-    cash = portfolio.get('cash_balance', 0)
-    holdings = portfolio.get('holdings', {})
-    positions = portfolio.get('positions', {})
+    # Add to history
+    portfolio["trade_history"].append(trade)
     
-    # Calculate total value
-    total_value = cash
-    
-    # Add holdings value
-    holdings_value = 0
-    for coin, amount in holdings.items():
-        symbol = f"{coin}/USDC"  # Adjust based on your quote currency
-        price = prices.get(symbol, 0)
-        value = amount * price
-        holdings_value += value
-    
-    # Add positions value
-    positions_value = 0
-    positions_pnl = 0
-    total_invested = 0
-    
-    for symbol, pos in positions.items():
-        current_price = prices.get(symbol, pos.get('entry_price', 0))
-        entry_price = pos.get('entry_price', 0)
-        amount = pos.get('amount', 0)
+    # Update metrics if it's a closed trade
+    if trade.get("action") == "close" and "pnl" in trade:
+        metrics = portfolio["performance_metrics"]
+        metrics["total_trades"] = metrics.get("total_trades", 0) + 1
+        metrics["total_pnl"] = metrics.get("total_pnl", 0) + trade["pnl"]
         
-        if entry_price > 0 and amount > 0:
-            invested = amount * entry_price
-            current_value = amount * current_price
-            pnl = current_value - invested
-            pnl_pct = (current_price / entry_price - 1) * 100
-            
-            positions_value += current_value
-            total_invested += invested
-            positions_pnl += pnl
+        if trade["pnl"] > 0:
+            metrics["winning_trades"] = metrics.get("winning_trades", 0) + 1
+        
+        # Update win rate
+        if metrics["total_trades"] > 0:
+            metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100
     
-    total_value = cash + holdings_value + positions_value
+    # Set initial balance if not set
+    if portfolio["initial_balance"] is None and trade.get("action") == "open":
+        # This is approximate - better to set explicitly
+        pass
     
-    # Performance metrics
-    initial_balance = portfolio.get('initial_balance', total_value)
-    total_return = total_value - initial_balance
-    total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
-    
-    return {
-        'cash_balance': cash,
-        'holdings_value': holdings_value,
-        'positions_value': positions_value,
-        'total_value': total_value,
-        'total_invested': total_invested,
-        'positions_pnl': positions_pnl,
-        'positions_pnl_pct': (positions_pnl / total_invested * 100) if total_invested > 0 else 0,
-        'total_return': total_return,
-        'total_return_pct': total_return_pct,
-        'active_positions': len(positions),
-        'holdings_count': len(holdings)
-    }
+    save_portfolio(portfolio)
+    return portfolio
 
-if __name__ == "__main__":
-    # Example usage
-    update_position("BTC", "buy", 0.1, 30000)
-    update_position("ETH", "buy", 1, 2000)
-    update_position("BTC", "sell", 0.05, 35000)
-    prices = {"BTC": 36000, "ETH": 2200}
-    print(get_summary(prices))
+def set_initial_balance(balance):
+    """Set the initial balance (called on first sync)"""
+    portfolio = load_portfolio()
+    if portfolio["initial_balance"] is None:
+        portfolio["initial_balance"] = balance
+        save_portfolio(portfolio)
+    return portfolio["initial_balance"]
+
+def get_performance_summary():
+    """Get performance metrics"""
+    portfolio = load_portfolio()
+    return {
+        "initial_balance": portfolio.get("initial_balance", 0),
+        "total_trades": portfolio["performance_metrics"].get("total_trades", 0),
+        "winning_trades": portfolio["performance_metrics"].get("winning_trades", 0),
+        "total_pnl": portfolio["performance_metrics"].get("total_pnl", 0),
+        "win_rate": portfolio["performance_metrics"].get("win_rate", 0)
+    }

@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import logging
 from ta.volatility import BollingerBands, AverageTrueRange
-from ta.trend import MACD, ADXIndicator
+from ta.trend import MACD
 from ta.momentum import RSIIndicator
 
 logger = logging.getLogger(__name__)

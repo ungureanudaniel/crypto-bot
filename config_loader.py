@@ -61,7 +61,7 @@ class Config:
         # 6. Set API URLs based on mode
         if merged_config['testnet']:
             merged_config['binance_api_url'] = merged_config.get('binance_testnet_api_url', 
-                                                               'https://testnet.binance.vision')
+                                                               'https://testnet.binance.vision/api')
         else:
             merged_config['binance_api_url'] = merged_config.get('binance_api_url', 
                                                                'https://api.binance.com')

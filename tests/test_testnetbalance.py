@@ -1,59 +1,60 @@
-# check_testnet_balance.py
-import os
-from binance.client import Client
-import requests
-import logging
-import time
+#!/usr/bin/env python3
+# tests/test_testnetbalance.py
 import sys
-from datetime import datetime, timedelta
-from typing import Optional, Dict
-# Setup logging
+import os
+
+# Add the project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'modules'))
+
+# Now import
+from modules.trade_engine import trading_engine
+from modules.portfolio import load_portfolio
+import logging
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-BASE_URL = "https://api1.binance.com/"
 
-# -------------------------------------------------------------------
-# CONFIG LOADING
-# -------------------------------------------------------------------
-try:
-    # Add parent directory to path
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from config_loader import config
-    CONFIG = config.config
-    logger.info(f"✅ Config loaded: {CONFIG.get('trading_mode', 'paper')}")
-except ImportError:
-    logger.warning("⚠️ Could not import config_loader, using defaults")
-    CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
-logging.info("🔧 Configuration loaded for data feed. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-
-# Get account info
-
-print("💰 Testnet Account Balance:")
-print("-" * 40)
-
-# Show all assets with non-zero balance
-for balance in account['balances']:
-    free = float(balance['free'])
-    locked = float(balance['locked'])
-    if free > 0 or locked > 0:
-        print(f"{balance['asset']}: Free={free:.8f}, Locked={locked:.8f}")
-
-# Check if you have any USDC specifically
-usdc_balance = next((b for b in account['balances'] if b['asset'] == 'USDC'), None)
-if usdc_balance and float(usdc_balance['free']) > 0:
-    print(f"\n✅ You have USDC: {float(usdc_balance['free']):.2f}")
-else:
-    print(f"\n❌ You have NO USDC balance!")
+def main():
+    print("=" * 60)
+    print("💰 TESTNET BALANCE CHECK")
+    print("=" * 60)
     
-# Check if you have SOL
-sol_balance = next((b for b in account['balances'] if b['asset'] == 'SOL'), None)
-if sol_balance and float(sol_balance['free']) > 0:
-    print(f"✅ You have SOL: {float(sol_balance['free']):.4f}")
-else:
-    print(f"❌ You have NO SOL balance!")
+    print(f"\n🔧 Trading Mode: {trading_engine.trading_mode}")
+    print(f"🔧 Binance Client: {'✅ Available' if trading_engine.binance_client else '❌ Not Available'}")
+    
+    if trading_engine.binance_client:
+        # Force balance sync
+        print("\n🔄 Syncing balance from testnet...")
+        trading_engine.sync_balance_from_testnet()
+        
+        # Show portfolio
+        portfolio = load_portfolio()
+        print("\n📊 Portfolio after sync:")
+        print(f"   Cash: ${portfolio.get('cash_balance', 0):,.2f}")
+        print(f"   Holdings: {len(portfolio.get('holdings', {}))} assets")
+        
+        # Show detailed balances
+        print("\n💎 Detailed Balances:")
+        print("-" * 40)
+        for asset, data in portfolio.get('holdings', {}).items():
+            if asset == 'USDC':
+                print(f"   🔹 {asset}: {data.get('free', 0):.2f} (Free)")
+            else:
+                total = data.get('total', 0)
+                if total > 0:
+                    print(f"   • {asset}: {total:.6f}")
+        
+        # Get summary
+        summary = trading_engine.get_portfolio_summary()
+        print("\n📈 Portfolio Summary:")
+        print(f"   Total Value: ${summary['portfolio_value']:,.2f}")
+        print(f"   Cash: ${summary['cash_balance']:,.2f}")
+        print(f"   Positions: {summary['active_positions']}")
+        print(f"   Return: {summary['total_return_pct']:+.1f}%")
+        print(f"   Last Sync: {summary.get('last_sync', 'Never')}")
+    else:
+        print("\n❌ No Binance client available. Check your API keys and trading mode.")
+
+if __name__ == "__main__":
+    main()

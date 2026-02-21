@@ -1,8 +1,9 @@
 {
-  "cash_balance": 1000.0,
-  "holdings": {},
-  "positions": {
+  "cash_balance": 10000.0,
+  "holdings": {
+    
   },
+  "positions": {},
   "pending_orders": [],
   "initial_balance": 1000.0,
   "performance_metrics": {
@@ -16,5 +17,8 @@
     "avg_loss": 0.0
   },
   "last_updated": "2026-01-17T22:23:49.340411",
-  "trade_history": []
+  "trade_history": [],
+  "last_sync": "2026-02-21T22:58:16.984340",
+  "open_orders": [],
+  "total_usdc_value": 20250.0
 }

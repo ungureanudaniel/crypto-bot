@@ -1,4 +1,4 @@
-# services/telegram_bot.py - UPDATED FOR NEW STRATEGY
+# services/telegram_bot.py - UPDATED FOR EXCHANGE-ONLY PORTFOLIO
 import json
 import sys
 import logging
@@ -54,18 +54,19 @@ def get_config():
 CONFIG = get_config()
 
 # -------------------------------------------------------------------
-# PORTFOLIO
+# TRADE HISTORY (optional - for record keeping)
 # -------------------------------------------------------------------
-PORTFOLIO_FILE = os.path.join(project_root, "portfolio.json")
+HISTORY_FILE = os.path.join(project_root, "trade_history.json")
 
-def load_portfolio():
-    if os.path.exists(PORTFOLIO_FILE):
+def load_trade_history():
+    """Load trade history from file (optional)"""
+    if os.path.exists(HISTORY_FILE):
         try:
-            with open(PORTFOLIO_FILE, "r") as f:
+            with open(HISTORY_FILE, "r") as f:
                 return json.load(f)
         except:
             pass
-    return {"cash_balance": 10000, "positions": {}, "trade_history": []}
+    return []
 
 # -------------------------------------------------------------------
 # SCHEDULER JOBS - USING UPDATED SCHEDULER
@@ -86,11 +87,9 @@ async def trading_job_callback(context: ContextTypes.DEFAULT_TYPE):
         check_pending_orders()
         
         # Only scan for signals if we have capacity
-        from modules.portfolio import load_portfolio
         from modules.trade_engine import trading_engine
         
-        portfolio = load_portfolio()
-        current_positions = len(portfolio.get('positions', {}))
+        current_positions = len(trading_engine.open_positions)
         
         if current_positions < trading_engine.max_positions:
             scan_for_trading_signals()
@@ -124,15 +123,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command"""
     try:
         from modules.trade_engine import trading_engine
+        
+        # Get fresh summary from exchange
         summary = trading_engine.get_portfolio_summary()
         
         await update.message.reply_text(
             f"🤖 *Trading Bot Started!*\n\n"
-            f"📊 Mode: {summary['trading_mode'].upper()}\n"
-            f"💰 Portfolio: ${summary['portfolio_value']:,.2f}\n"
-            f"💵 Cash: ${summary['cash_balance']:,.2f}\n"
-            f"📈 Return: {summary['total_return_pct']:+.1f}%\n"
-            f"🎯 Active: {summary['active_positions']}/{trading_engine.max_positions}\n\n"
+            f"📊 Mode: `{summary['trading_mode'].upper()}`\n"
+            f"💰 Portfolio: `${summary['portfolio_value']:,.2f}`\n"
+            f"💵 Cash: `${summary['cash_balance']:,.2f}`\n"
+            f"📈 Return: `{summary['total_return_pct']:+.1f}%`\n"
+            f"🎯 Active: `{summary['active_positions']}/{trading_engine.max_positions}`\n\n"
             f"Use /help for commands",
             parse_mode='Markdown'
         )
@@ -144,14 +145,31 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show balance"""
     try:
         from modules.trade_engine import trading_engine
+        
+        # Get fresh summary from exchange
         summary = trading_engine.get_portfolio_summary()
+        
+        # Format holdings if any
+        holdings_text = ""
+        if summary.get('holdings') and len(summary['holdings']) > 1:  # More than just USDC
+            holdings_text = "\n📊 *Holdings:*\n"
+            for asset, data in summary['holdings'].items():
+                if asset != 'USDC':
+                    if isinstance(data, dict):
+                        amount = data.get('amount', 0)
+                        value = data.get('value_usdc', 0)
+                        if amount > 0:
+                            holdings_text += f"   • {asset}: {amount:.4f} (${value:,.2f})\n"
+                    else:
+                        # Simple format
+                        holdings_text += f"   • {asset}: {data}\n"
         
         await update.message.reply_text(
             f"💰 *Portfolio Balance*\n\n"
             f"Total Value: `${summary['portfolio_value']:,.2f}`\n"
             f"Cash: `${summary['cash_balance']:,.2f}`\n"
-            f"Positions Value: `${summary['positions_value']:,.2f}`\n"
-            f"Return: `{summary['total_return_pct']:+.1f}%`",
+            f"Return: `{summary['total_return_pct']:+.1f}%`\n"
+            f"{holdings_text}",
             parse_mode='Markdown'
         )
     except Exception as e:
@@ -162,14 +180,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""
     try:
         from modules.trade_engine import trading_engine
-        from modules.portfolio import load_portfolio
         
+        # Get fresh data from exchange
         summary = trading_engine.get_portfolio_summary()
-        portfolio = load_portfolio()
-        positions = portfolio.get('positions', {})
-        trade_history = portfolio.get('trade_history', [])
         
-        # Calculate win rate from closed trades
+        # Get trade history for win rate
+        trade_history = load_trade_history()
         closed_trades = [t for t in trade_history if t.get('action') == 'close']
         winning_trades = [t for t in closed_trades if t.get('pnl', 0) > 0]
         win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0
@@ -187,29 +203,33 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📋 Total Trades: `{len(closed_trades)}`",
         ]
         
-        if positions:
+        # Add open positions from engine
+        if trading_engine.open_positions:
             message_lines.append(f"\n📊 *Active Positions:*")
             message_lines.append(f"━━━━━━━━━━━━━━━━")
             
             # Get current prices
             current_prices = trading_engine.get_current_prices()
             
-            for symbol, position in positions.items():
+            for symbol, position in trading_engine.open_positions.items():
                 current_price = current_prices.get(symbol, position.get('entry_price', 0))
                 entry_price = position.get('entry_price', 0)
+                amount = position.get('amount', 0)
                 
                 if position['side'] == 'long':
+                    pnl = (current_price - entry_price) * amount
                     pnl_pct = ((current_price / entry_price) - 1) * 100
-                    pnl_emoji = "🟢" if pnl_pct > 0 else "🔴" if pnl_pct < 0 else "⚪"
+                    pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
                 else:  # short
+                    pnl = (entry_price - current_price) * amount
                     pnl_pct = (1 - (current_price / entry_price)) * 100
-                    pnl_emoji = "🟢" if pnl_pct > 0 else "🔴" if pnl_pct < 0 else "⚪"
+                    pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
                 
                 message_lines.append(
-                    f"\n{pnl_emoji} *{symbol}*"
+                    f"\n{pnl_emoji} *{symbol}* ({position['side'].upper()})"
                     f"\n   Entry: `${entry_price:.2f}`"
                     f"\n   Current: `${current_price:.2f}`"
-                    f"\n   P&L: `{pnl_pct:+.1f}%`"
+                    f"\n   P&L: `${pnl:+.2f}` ({pnl_pct:+.1f}%)"
                     f"\n   Stop: `${position.get('stop_loss', 0):.2f}`"
                     f"\n   Target: `${position.get('take_profit', 0):.2f}`"
                 )
@@ -404,23 +424,19 @@ async def execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current positions"""
     try:
-        from modules.portfolio import load_portfolio
         from modules.trade_engine import trading_engine
         
-        portfolio = load_portfolio()
-        positions = portfolio.get('positions', {})
-        
-        if not positions:
+        if not trading_engine.open_positions:
             await update.message.reply_text("📭 No open positions", parse_mode='Markdown')
             return
         
         current_prices = trading_engine.get_current_prices()
         
-        message_lines = [f"📊 *Open Positions ({len(positions)}):*\n"]
+        message_lines = [f"📊 *Open Positions ({len(trading_engine.open_positions)}):*\n"]
         
         total_pnl = 0
         
-        for symbol, position in positions.items():
+        for symbol, position in trading_engine.open_positions.items():
             current_price = current_prices.get(symbol, position.get('entry_price', 0))
             entry_price = position.get('entry_price', 0)
             amount = position.get('amount', 0)
@@ -475,9 +491,15 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Get optional stop loss
     stop_loss = None
+    take_profit = None
     if len(context.args) >= 4:
         try:
             stop_loss = float(context.args[3])
+        except:
+            pass
+    if len(context.args) >= 5:
+        try:
+            take_profit = float(context.args[4])
         except:
             pass
     
@@ -507,6 +529,8 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if stop_loss:
                 response += f"Stop Loss: `${stop_loss:.2f}`\n"
+            if take_profit:
+                response += f"Take Profit: `${take_profit:.2f}`\n"
             
             await update.message.reply_text(response, parse_mode='Markdown')
         else:
@@ -574,29 +598,48 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)[:150]}", parse_mode='Markdown')
 
 async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show pending orders"""
+    """Show pending orders from exchange"""
     try:
-        from modules.portfolio import load_portfolio
+        from modules.trade_engine import trading_engine
         
-        portfolio = load_portfolio()
-        orders = portfolio.get('pendingorders', [])
-        
-        if not orders:
-            await update.message.reply_text("📭 No pending orders", parse_mode='Markdown')
+        if not trading_engine.binance_client:
+            await update.message.reply_text("📭 No exchange connection", parse_mode='Markdown')
             return
         
-        message_lines = [f"📋 *Pending Orders ({len(orders)}):*\n"]
+        # Get open orders from exchange
+        open_orders = []
+        for symbol in CONFIG.get('coins', ['BTC/USDC', 'ETH/USDC']):
+            try:
+                binance_symbol = symbol.replace('/', '')
+                orders = trading_engine.binance_client.get_open_orders(symbol=binance_symbol)
+                for order in orders:
+                    open_orders.append({
+                        'symbol': symbol,
+                        'order_id': order['orderId'],
+                        'side': order['side'].lower(),
+                        'amount': float(order['origQty']),
+                        'price': float(order['price']),
+                        'status': order['status']
+                    })
+            except Exception as e:
+                logger.debug(f"Error fetching orders for {symbol}: {e}")
         
-        for order in orders:
-            emoji = "🟢" if order.get('side') == 'buy' else "🔴"
-            side_text = "BUY" if order.get('side') == 'buy' else "SELL"
+        if not open_orders:
+            await update.message.reply_text("📭 No pending orders on exchange", parse_mode='Markdown')
+            return
+        
+        message_lines = [f"📋 *Pending Orders ({len(open_orders)}):*\n"]
+        
+        for order in open_orders:
+            emoji = "🟢" if order['side'] == 'buy' else "🔴"
+            side_text = "BUY" if order['side'] == 'buy' else "SELL"
             
             message_lines.append(
-                f"{emoji} *{order.get('symbol')} {side_text}*"
-                f"\n   Amount: {order.get('amount', 0):.6f}"
-                f"\n   Price: `${order.get('price', 0):.2f}`"
-                f"\n   Total: `${order.get('amount', 0) * order.get('price', 0):.2f}`"
-                f"\n"
+                f"{emoji} *{order['symbol']} {side_text}*\n"
+                f"   Amount: {order['amount']:.6f}\n"
+                f"   Price: `${order['price']:.2f}`\n"
+                f"   Total: `${order['amount'] * order['price']:.2f}`\n"
+                f"   ID: `{order['order_id']}`\n"
             )
         
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
@@ -606,24 +649,31 @@ async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def cancel_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel all pending orders"""
-    await update.message.reply_text("🗑️ Cancelling all pending orders...", parse_mode='Markdown')
+    """Cancel all pending orders on exchange"""
+    await update.message.reply_text("🗑️ Cancelling all pending orders on exchange...", parse_mode='Markdown')
     
     try:
-        from modules.portfolio import load_portfolio, save_portfolio
+        from modules.trade_engine import trading_engine
         
-        portfolio = load_portfolio()
-        orders = portfolio.get('pendingorders', [])
-        
-        if not orders:
-            await update.message.reply_text("📭 No orders to cancel", parse_mode='Markdown')
+        if not trading_engine.binance_client:
+            await update.message.reply_text("❌ No exchange connection", parse_mode='Markdown')
             return
         
-        portfolio['pendingorders'] = []
-        save_portfolio(portfolio)
+        cancelled = 0
+        failed = 0
+        
+        for symbol in CONFIG.get('coins', ['BTC/USDC', 'ETH/USDC']):
+            try:
+                binance_symbol = symbol.replace('/', '')
+                result = trading_engine.binance_client.cancel_open_orders(symbol=binance_symbol)
+                if result:
+                    cancelled += len(result)
+            except Exception as e:
+                logger.debug(f"Error cancelling orders for {symbol}: {e}")
+                failed += 1
         
         await update.message.reply_text(
-            f"✅ Cancelled {len(orders)} order(s)",
+            f"✅ Cancelled {cancelled} order(s) on exchange",
             parse_mode='Markdown'
         )
         
@@ -651,20 +701,17 @@ async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        from modules.portfolio import load_portfolio, save_portfolio
+        from modules.trade_engine import trading_engine
         
-        portfolio = load_portfolio()
-        positions = portfolio.get('positions', {})
-        
-        if symbol not in positions:
-            await update.message.reply_text(f"❌ No position for {symbol}", parse_mode='Markdown')
+        # Check if position exists in engine
+        if symbol not in trading_engine.open_positions:
+            await update.message.reply_text(f"❌ No open position for {symbol}", parse_mode='Markdown')
             return
         
-        positions[symbol]['stop_loss'] = stop_price
+        # Update position in memory
+        trading_engine.open_positions[symbol]['stop_loss'] = stop_price
         if take_profit:
-            positions[symbol]['take_profit'] = take_profit
-        
-        save_portfolio(portfolio)
+            trading_engine.open_positions[symbol]['take_profit'] = take_profit
         
         response = f"✅ *Stop Loss Set for {symbol}*\n\n"
         response += f"Stop: `${stop_price:.2f}`\n"
@@ -680,7 +727,6 @@ async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command"""
     help_text = """
-
     <b>🤖 Trading Bot Commands</b>
 
     <b>Basic Commands</b>
@@ -696,18 +742,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /execute SYMBOL - Execute specific signal
 
     <b>Manual Orders</b>
-    /limitbuy SYMBOL AMOUNT PRICE - Limit buy (optional STOP)
+    /limitbuy SYMBOL AMOUNT PRICE [STOP] [TARGET] - Limit buy
     /limitsell SYMBOL AMOUNT PRICE - Limit sell
-    /pendingorders - Show pending orders
-    /cancelall - Cancel all orders
+    /pendingorders - Show pending orders on exchange
+    /cancelall - Cancel all orders on exchange
 
     <b>Risk Management</b>
-    /setstop SYMBOL STOP - Set stop loss (optional TARGET)
+    /setstop SYMBOL STOP [TARGET] - Set stop loss for position
     /stop - Stop bot
 
     <b>Examples</b>
     <code>/scan</code>
-    <code>/limitbuy BTC/USDC 0.001 50000</code>
+    <code>/limitbuy BTC/USDC 0.001 50000 47500 52500</code>
     <code>/status</code>
     """
     
