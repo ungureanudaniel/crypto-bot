@@ -680,37 +680,38 @@ async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command"""
     help_text = """
-🤖 *Trading Bot Commands*
 
-*Basic Commands*
-/start - Start bot
-/status - Full status
-/balance - Show balance
-/positions - Show open positions
-/help - This help
+    <b>🤖 Trading Bot Commands</b>
 
-*Trading Signals*
-/scan - Scan for signals
-/execute_all - Execute all signals
-/execute SYMBOL - Execute specific signal
+    <b>Basic Commands</b>
+    /start - Start bot
+    /status - Full status
+    /balance - Show balance
+    /positions - Show open positions
+    /help - This help
 
-*Manual Orders*
-/limit_buy SYMBOL AMOUNT PRICE [STOP] - Limit buy
-/limit_sell SYMBOL AMOUNT PRICE - Limit sell
-/pending_orders - Show pending orders
-/cancel_all - Cancel all orders
+    <b>Trading Signals</b>
+    /scan - Scan for signals
+    /execute_all - Execute all signals
+    /execute SYMBOL - Execute specific signal
 
-*Risk Management*
-/set_stop SYMBOL STOP [TARGET] - Set stop loss
-/stop - Stop bot
+    <b>Manual Orders</b>
+    /limit_buy SYMBOL AMOUNT PRICE - Limit buy (optional STOP)
+    /limit_sell SYMBOL AMOUNT PRICE - Limit sell
+    /pending_orders - Show pending orders
+    /cancel_all - Cancel all orders
 
-*Examples*
-`/scan`
-`/limit_buy BTC/USDC 0.001 50000 47500`
-`/status`
+    <b>Risk Management</b>
+    /set_stop SYMBOL STOP - Set stop loss (optional TARGET)
+    /stop - Stop bot
+
+    <b>Examples</b>
+    <code>/scan</code>
+    <code>/limit_buy BTC/USDC 0.001 50000</code>
+    <code>/status</code>
     """
     
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    await update.message.reply_text(help_text, parse_mode='HTML')
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stop the bot"""
