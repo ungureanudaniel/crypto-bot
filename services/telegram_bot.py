@@ -114,7 +114,7 @@ async def health_job_callback(context: ContextTypes.DEFAULT_TYPE):
     try:
         from services.scheduler import health_check
         health_check()
-    except Exception as e):
+    except Exception as e:
         logger.error(f"❌ Health check error: {e}")
 
 # -------------------------------------------------------------------

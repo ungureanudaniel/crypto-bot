@@ -226,10 +226,8 @@ class TradingEngine:
         return False
 
     def open_position(self, symbol: str, side: str, entry_price: float, 
-                     units: float, stop_loss: float, take_profit: float) -> bool:
-        """
-        Open a new position with stop loss and take profit
-        """
+                 units: float, stop_loss: float, take_profit: float, auto_stop: bool = True) -> bool:
+        """Open a new position with stop loss and take profit"""
         portfolio = load_portfolio()
         
         # Validation checks
@@ -251,34 +249,73 @@ class TradingEngine:
             logger.info(f"⏭️ At max positions ({self.max_positions})")
             return False
         
-        # Check cash balance
-        cost = units * entry_price
-        cash_balance = portfolio.get('cash_balance', 0)
-        
-        if cash_balance < cost:
-            logger.warning(f"⚠️ Insufficient funds: Need ${cost:.2f}, have ${cash_balance:.2f}")
-            return False
-        
         base_currency = symbol.split('/')[0]
         
-        # Execute REAL trade if in live/testnet mode
-        if self.trading_mode in ['live', 'testnet'] and self.binance_client and side == 'long':
+        # For SHORT positions in live/testnet mode
+        if self.trading_mode in ['live', 'testnet'] and self.binance_client:
             try:
                 binance_symbol = symbol.replace('/', '')
                 
-                order = self.binance_client.order_market_buy(
-                    symbol=binance_symbol,
-                    quantity=round(units, 6)
-                )
-                logger.info(f"📤 Live BUY order executed: {order['orderId']}")
+                if side == 'long':
+                    # BUY order for long positions
+                    order = self.binance_client.order_market_buy(
+                        symbol=binance_symbol,
+                        quantity=round(units, 6)
+                    )
+                    logger.info(f"📤 Live BUY order executed: {order['orderId']}")
+                    
+                elif side == 'short':
+                    # For SHORT positions on spot exchange, we need to:
+                    # 1. Check if we have the base currency to sell
+                    # 2. Place a market SELL order
+                    
+                    # First, check if we have the asset to sell
+                    account = self.binance_client.get_account()
+                    asset_balance = next(
+                        (b for b in account['balances'] if b['asset'] == base_currency),
+                        {'free': '0'}
+                    )
+                    
+                    if float(asset_balance['free']) < units:
+                        logger.error(f"❌ Insufficient {base_currency} balance for short: have {asset_balance['free']}, need {units}")
+                        return False
+                    
+                    # Place market sell order
+                    order = self.binance_client.order_market_sell(
+                        symbol=binance_symbol,
+                        quantity=round(units, 6)
+                    )
+                    logger.info(f"📤 Live SELL order executed for SHORT: {order['orderId']}")
+                
             except Exception as e:
-                logger.error(f"❌ Failed to execute live buy order: {e}")
+                logger.error(f"❌ Failed to execute live order: {e}")
                 return False
         
-        # Update portfolio (paper tracking)
-        update_position(base_currency, "buy", units, entry_price)
+        # For PAPER mode, just update the portfolio
+        if side == 'long':
+            # For long positions, we spend quote currency (USDC)
+            cost = units * entry_price
+            if portfolio.get('cash_balance', 0) < cost:
+                logger.warning(f"Insufficient funds: Need ${cost:.2f}")
+                return False
+            
+            # Update cash balance (spend USDC)
+            update_position(base_currency, "buy", units, entry_price)
+            
+        elif side == 'short':
+            # For short positions, we need to HAVE the base currency to sell
+            # In paper mode, we'll simulate having it
+            holdings = portfolio.get('holdings', {})
+            current_holdings = holdings.get(base_currency, 0)
+            
+            if current_holdings < units:
+                logger.warning(f"Insufficient {base_currency} for short: have {current_holdings}, need {units}")
+                return False
+            
+            # Update holdings (sell the asset)
+            update_position(base_currency, "sell", units, entry_price)
         
-        # Add to positions
+        # Add to positions (tracking)
         positions = portfolio.get('positions', {})
         positions[symbol] = {
             'side': side,
@@ -313,7 +350,7 @@ class TradingEngine:
             try:
                 asyncio.create_task(notifier.send_trade_notification({
                     'symbol': symbol,
-                    'side': 'BUY' if side == 'long' else 'SHORT',
+                    'side': 'SHORT' if side == 'short' else 'LONG',
                     'price': entry_price,
                     'amount': units,
                     'stop_loss': stop_loss,
@@ -324,7 +361,6 @@ class TradingEngine:
                 pass
         
         logger.info(f"✅ Opened {side.upper()} position: {units:.6f} {symbol} at ${entry_price:.2f}")
-        logger.info(f"   Stop: ${stop_loss:.2f}, Target: ${take_profit:.2f}")
         return True
     
     def scan_and_trade(self) -> List[Dict]:
