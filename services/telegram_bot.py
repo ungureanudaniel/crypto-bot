@@ -271,7 +271,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(signals_found) > 9:
             message_lines.append(f"\n*... and {len(signals_found) - 9} more*")
         
-        message_lines.append(f"\nUse `/execute_all` to execute all signals")
+        message_lines.append(f"\nUse `/executeall` to execute all signals")
         
         # Store in user data
         if context.user_data is None:
@@ -458,8 +458,8 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Place limit buy order"""
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
-            "Usage: `/limit_buy SYMBOL AMOUNT PRICE`\n"
-            "Example: `/limit_buy SOL/USDC 2 122`",
+            "Usage: `/limitbuy SYMBOL AMOUNT PRICE`\n"
+            "Example: `/limitbuy SOL/USDC 2 122`",
             parse_mode='Markdown'
         )
         return
@@ -523,8 +523,8 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Place limit sell order"""
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
-            "Usage: `/limit_sell SYMBOL AMOUNT PRICE`\n"
-            "Example: `/limit_sell SOL/USDC 2 125`",
+            "Usage: `/limitsell SYMBOL AMOUNT PRICE`\n"
+            "Example: `/limitsell SOL/USDC 2 125`",
             parse_mode='Markdown'
         )
         return
@@ -579,7 +579,7 @@ async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from modules.portfolio import load_portfolio
         
         portfolio = load_portfolio()
-        orders = portfolio.get('pending_orders', [])
+        orders = portfolio.get('pendingorders', [])
         
         if not orders:
             await update.message.reply_text("📭 No pending orders", parse_mode='Markdown')
@@ -613,13 +613,13 @@ async def cancel_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from modules.portfolio import load_portfolio, save_portfolio
         
         portfolio = load_portfolio()
-        orders = portfolio.get('pending_orders', [])
+        orders = portfolio.get('pendingorders', [])
         
         if not orders:
             await update.message.reply_text("📭 No orders to cancel", parse_mode='Markdown')
             return
         
-        portfolio['pending_orders'] = []
+        portfolio['pendingorders'] = []
         save_portfolio(portfolio)
         
         await update.message.reply_text(
@@ -635,8 +635,8 @@ async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set stop loss for position"""
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
-            "Usage: `/set_stop SYMBOL STOP_PRICE [TAKE_PROFIT]`\n"
-            "Example: `/set_stop BTC/USDC 48000 52000`",
+            "Usage: `/setstop SYMBOL STOP_PRICE [TAKE_PROFIT]`\n"
+            "Example: `/setstop BTC/USDC 48000 52000`",
             parse_mode='Markdown'
         )
         return
@@ -692,22 +692,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     <b>Trading Signals</b>
     /scan - Scan for signals
-    /execute_all - Execute all signals
+    /executeall - Execute all signals
     /execute SYMBOL - Execute specific signal
 
     <b>Manual Orders</b>
-    /limit_buy SYMBOL AMOUNT PRICE - Limit buy (optional STOP)
-    /limit_sell SYMBOL AMOUNT PRICE - Limit sell
-    /pending_orders - Show pending orders
-    /cancel_all - Cancel all orders
+    /limitbuy SYMBOL AMOUNT PRICE - Limit buy (optional STOP)
+    /limitsell SYMBOL AMOUNT PRICE - Limit sell
+    /pendingorders - Show pending orders
+    /cancelall - Cancel all orders
 
     <b>Risk Management</b>
-    /set_stop SYMBOL STOP - Set stop loss (optional TARGET)
+    /setstop SYMBOL STOP - Set stop loss (optional TARGET)
     /stop - Stop bot
 
     <b>Examples</b>
     <code>/scan</code>
-    <code>/limit_buy BTC/USDC 0.001 50000</code>
+    <code>/limitbuy BTC/USDC 0.001 50000</code>
     <code>/status</code>
     """
     
@@ -758,13 +758,13 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("positions", positions))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("scan", scan))
-    application.add_handler(CommandHandler("execute_all", execute_all))
+    application.add_handler(CommandHandler("executeall", execute_all))
     application.add_handler(CommandHandler("execute", execute))
-    application.add_handler(CommandHandler("limit_buy", limit_buy))
-    application.add_handler(CommandHandler("limit_sell", limit_sell))
-    application.add_handler(CommandHandler("pending_orders", pending_orders))
-    application.add_handler(CommandHandler("cancel_all", cancel_all_orders))
-    application.add_handler(CommandHandler("set_stop", set_stop_loss))
+    application.add_handler(CommandHandler("limitbuy", limit_buy))
+    application.add_handler(CommandHandler("limitsell", limit_sell))
+    application.add_handler(CommandHandler("pendingorders", pending_orders))
+    application.add_handler(CommandHandler("cancelall", cancel_all_orders))
+    application.add_handler(CommandHandler("setstop", set_stop_loss))
     application.add_handler(CommandHandler("stop", stop))
     
     logger.info("✅ Bot ready - starting polling...")
