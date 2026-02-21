@@ -1,21 +1,13 @@
-# modules/trading_engine.py - UNIVERSAL VERSION
+# modules/trade_engine.py - REFACTORED FOR NEW STRATEGY
 import asyncio
-import sys
-import os
 import logging
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from data_feed import *
+from data_feed import data_feed
 from strategy_tools import generate_trade_signal
 from portfolio import load_portfolio, save_portfolio, update_position, get_summary
-try:
-    from services.notifier import notifier
-    has_notifier = True
-except ImportError:
-    has_notifier = False
-    logger = logging.getLogger(__name__)
-    logger.warning("⚠️ Notifier service not available")
+from config_loader import config
 
 # Setup logging
 logging.basicConfig(
@@ -25,19 +17,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Try to import notifier
+try:
+    from services.notifier import notifier
+    has_notifier = True
+except ImportError:
+    has_notifier = False
+    logger.warning("⚠️ Notifier service not available")
+
 # -------------------------------------------------------------------
 # CONFIG LOADING
 # -------------------------------------------------------------------
-try:
-    # Add parent directory to path
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from config_loader import config
-    CONFIG = config.config
-    logger.info(f"✅ Config loaded: {CONFIG.get('trading_mode', 'paper')}")
-except ImportError:
-    logger.warning("⚠️ Could not import config_loader, using defaults")
-    CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
-logging.info("🔧 Configuration loaded for data feed. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
+CONFIG = config.config
+logger.info(f"✅ Config loaded: {CONFIG.get('trading_mode', 'paper')}")
 
 # -------------------------------------------------------------------
 # LIVE TRADING SUPPORT
@@ -55,7 +47,6 @@ def get_real_binance_client():
             logger.warning("⚠️ No API keys for real trading")
             return None
         
-        # ✅ FIXED: Use testnet=True parameter
         if trading_mode == 'testnet':
             client = Client(api_key=api_key, api_secret=api_secret, testnet=True)
             logger.info("✅ Connected to Binance Testnet")
@@ -95,7 +86,12 @@ class TradingEngine:
                 logger.warning("⚠️ Could not initialize Binance client, falling back to paper")
                 self.trading_mode = 'paper'
         
+        # Track pending signals to avoid duplicates
+        self.last_signals = {}
+        
         logger.info(f"🚀 Trading Engine initialized for {self.trading_mode.upper()} mode")
+        logger.info(f"📊 Monitoring {len(self.symbols)} symbols on {self.timeframe}")
+        logger.info(f"📈 Max positions: {self.max_positions}, Risk per trade: {self.risk_per_trade:.1%}")
     
     def get_current_prices(self) -> Dict[str, float]:
         """Get current prices for all symbols"""
@@ -103,45 +99,65 @@ class TradingEngine:
         for symbol in self.symbols:
             try:
                 price = self.data_feed.get_price(symbol)
-                if price:
+                if price and price > 0:
                     prices[symbol] = price
             except Exception as e:
-                logger.error(f"Error getting price for {symbol}: {e}")
+                logger.debug(f"Error getting price for {symbol}: {e}")
         return prices
     
     def check_stop_losses(self) -> bool:
-        """Check stop losses for all positions"""
+        """
+        Check stop losses and take profits for all open positions
+        Returns True if any positions were closed
+        """
         portfolio = load_portfolio()
         positions = portfolio.get('positions', {})
-        current_prices = self.get_current_prices()
         
         if not positions:
             return False
         
+        current_prices = self.get_current_prices()
         positions_closed = False
         
         for symbol, position in list(positions.items()):
             current_price = current_prices.get(symbol)
+            
             if not current_price:
+                logger.warning(f"⚠️ Could not get price for {symbol}, skipping stop check")
                 continue
             
-            if position['side'] == 'long' and current_price <= position['stop_loss']:
-                logger.info(f"🛑 Stop loss triggered for {symbol}")
-                self.close_position(symbol, current_price, "stop_loss")
-                positions_closed = True
-            elif position['side'] == 'long' and current_price >= position['take_profit']:
-                logger.info(f"🎯 Take profit triggered for {symbol}")
-                self.close_position(symbol, current_price, "take_profit")
-                positions_closed = True
+            # Check stop loss and take profit
+            if position['side'] == 'long':
+                if current_price <= position['stop_loss']:
+                    logger.info(f"🛑 Stop loss triggered for {symbol} at ${current_price:.2f}")
+                    self.close_position(symbol, current_price, "stop_loss")
+                    positions_closed = True
+                elif current_price >= position['take_profit']:
+                    logger.info(f"🎯 Take profit triggered for {symbol} at ${current_price:.2f}")
+                    self.close_position(symbol, current_price, "take_profit")
+                    positions_closed = True
+                    
+            elif position['side'] == 'short':
+                if current_price >= position['stop_loss']:
+                    logger.info(f"🛑 Stop loss triggered for {symbol} at ${current_price:.2f}")
+                    self.close_position(symbol, current_price, "stop_loss")
+                    positions_closed = True
+                elif current_price <= position['take_profit']:
+                    logger.info(f"🎯 Take profit triggered for {symbol} at ${current_price:.2f}")
+                    self.close_position(symbol, current_price, "take_profit")
+                    positions_closed = True
         
         return positions_closed
     
     def close_position(self, symbol: str, exit_price: float, reason: str) -> bool:
-        """Close a position"""
+        """
+        Close an existing position
+        """
         portfolio = load_portfolio()
         positions = portfolio.get('positions', {})
         
         if symbol not in positions:
+            logger.warning(f"⚠️ No position found for {symbol}")
             return False
         
         position = positions[symbol]
@@ -151,23 +167,23 @@ class TradingEngine:
         # Execute REAL trade if in live/testnet mode
         if self.trading_mode in ['live', 'testnet'] and self.binance_client:
             try:
-                # Convert to Binance format
                 binance_symbol = symbol.replace('/', '')
                 
-                # Place market sell order
                 if position['side'] == 'long':
                     order = self.binance_client.order_market_sell(
                         symbol=binance_symbol,
                         quantity=round(amount, 6)
                     )
-                    logger.info(f"📤 Live SELL order executed: {order}")
+                    logger.info(f"📤 Live SELL order executed: {order['orderId']}")
             except Exception as e:
                 logger.error(f"❌ Failed to execute live sell order: {e}")
+                # Still update paper tracking even if live order fails
         
         # Update portfolio (paper tracking)
         pnl = update_position(base_currency, "sell", amount, exit_price)
         
         if pnl is not None:
+            # Record trade in history
             trade_history = portfolio.get('trade_history', [])
             trade_history.append({
                 'symbol': symbol,
@@ -177,26 +193,32 @@ class TradingEngine:
                 'entry_price': position['entry_price'],
                 'exit_price': exit_price,
                 'pnl': pnl,
+                'pnl_pct': ((exit_price / position['entry_price']) - 1) * 100 if position['side'] == 'long' else (1 - (exit_price / position['entry_price'])) * 100,
                 'timestamp': datetime.now().isoformat(),
                 'reason': reason,
                 'mode': self.trading_mode
             })
             
+            # Remove from active positions
             del positions[symbol]
             portfolio['positions'] = positions
             portfolio['trade_history'] = trade_history
             save_portfolio(portfolio)
             
             # Send notification
-            if hasattr(self, 'notifier') and self.notifier is not None:
-                asyncio.create_task(notifier.send_trade_notification({
-                    'symbol': symbol,
-                    'side': 'SELL',
-                    'price': exit_price,
-                    'amount': amount,
-                    'pnl': pnl,
-                    'mode': self.trading_mode
-                }))
+            if has_notifier:
+                try:
+                    asyncio.create_task(notifier.send_trade_notification({
+                        'symbol': symbol,
+                        'side': 'SELL' if position['side'] == 'long' else 'COVER',
+                        'price': exit_price,
+                        'amount': amount,
+                        'pnl': pnl,
+                        'reason': reason,
+                        'mode': self.trading_mode
+                    }))
+                except:
+                    pass
             
             logger.info(f"✅ Closed {symbol}: PnL ${pnl:.2f} ({self.trading_mode})")
             return True
@@ -204,29 +226,37 @@ class TradingEngine:
         return False
 
     def open_position(self, symbol: str, side: str, entry_price: float, 
-                     units: float, stop_loss: float, take_profit: float, auto_stop: bool = True) -> bool:
-        """Open a new position with auto stop loss"""
+                     units: float, stop_loss: float, take_profit: float) -> bool:
+        """
+        Open a new position with stop loss and take profit
+        """
         portfolio = load_portfolio()
-
-        # If no stop loss provided and auto_stop is True, calculate one
-        if auto_stop and stop_loss is None:
-            # Default 5% stop loss
-            if side == 'long':
-                stop_loss = entry_price * 0.95  # 5% stop
-                take_profit = entry_price * 1.10  # 10% target (2:1)
-            else:  # short
-                stop_loss = entry_price * 1.05  # 5% stop
-                take_profit = entry_price * 0.90  # 10% target (2:1)
+        
+        # Validation checks
+        if units <= 0:
+            logger.warning(f"⚠️ Invalid units: {units}")
+            return False
+        
+        if entry_price <= 0:
+            logger.warning(f"⚠️ Invalid entry price: {entry_price}")
+            return False
         
         # Check if already in position
         if symbol in portfolio.get('positions', {}):
-            logger.info(f"Already in position for {symbol}")
+            logger.info(f"⏭️ Already in position for {symbol}")
+            return False
+        
+        # Check max positions
+        if len(portfolio.get('positions', {})) >= self.max_positions:
+            logger.info(f"⏭️ At max positions ({self.max_positions})")
             return False
         
         # Check cash balance
         cost = units * entry_price
-        if portfolio.get('cash_balance', 0) < cost:
-            logger.warning(f"Insufficient funds: Need ${cost:.2f}")
+        cash_balance = portfolio.get('cash_balance', 0)
+        
+        if cash_balance < cost:
+            logger.warning(f"⚠️ Insufficient funds: Need ${cost:.2f}, have ${cash_balance:.2f}")
             return False
         
         base_currency = symbol.split('/')[0]
@@ -234,15 +264,13 @@ class TradingEngine:
         # Execute REAL trade if in live/testnet mode
         if self.trading_mode in ['live', 'testnet'] and self.binance_client and side == 'long':
             try:
-                # Convert to Binance format
                 binance_symbol = symbol.replace('/', '')
                 
-                # Place market buy order
                 order = self.binance_client.order_market_buy(
                     symbol=binance_symbol,
                     quantity=round(units, 6)
                 )
-                logger.info(f"📤 Live BUY order executed: {order}")
+                logger.info(f"📤 Live BUY order executed: {order['orderId']}")
             except Exception as e:
                 logger.error(f"❌ Failed to execute live buy order: {e}")
                 return False
@@ -262,7 +290,7 @@ class TradingEngine:
             'mode': self.trading_mode
         }
         
-        # Record trade
+        # Record trade in history
         trade_history = portfolio.get('trade_history', [])
         trade_history.append({
             'symbol': symbol,
@@ -270,9 +298,9 @@ class TradingEngine:
             'side': side,
             'amount': units,
             'price': entry_price,
-            'timestamp': datetime.now().isoformat(),
             'stop_loss': stop_loss,
             'take_profit': take_profit,
+            'timestamp': datetime.now().isoformat(),
             'mode': self.trading_mode
         })
         
@@ -281,144 +309,48 @@ class TradingEngine:
         save_portfolio(portfolio)
         
         # Send notification
-        if hasattr(self, 'notifier') and self.notifier is not None:
-            asyncio.create_task(notifier.send_trade_notification({
-                'symbol': symbol,
-                'side': 'BUY',
-                'price': entry_price,
-                'amount': units,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'mode': self.trading_mode
-            }))
-        logger.info(f"✅ Opened {side} position: {symbol} ({self.trading_mode})")
+        if has_notifier:
+            try:
+                asyncio.create_task(notifier.send_trade_notification({
+                    'symbol': symbol,
+                    'side': 'BUY' if side == 'long' else 'SHORT',
+                    'price': entry_price,
+                    'amount': units,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'mode': self.trading_mode
+                }))
+            except:
+                pass
+        
+        logger.info(f"✅ Opened {side.upper()} position: {units:.6f} {symbol} at ${entry_price:.2f}")
+        logger.info(f"   Stop: ${stop_loss:.2f}, Target: ${take_profit:.2f}")
         return True
     
-    def place_limit_order(self, symbol: str, side: str, amount: float, price: float) -> Tuple[bool, str]:
-        """Place a limit order"""
-        try:
-            portfolio = load_portfolio()
-            
-            if side not in ['buy', 'sell']:
-                return False, "Invalid side"
-            
-            if amount <= 0 or price <= 0:
-                return False, "Invalid amount or price"
-            
-            # Execute REAL limit order if in live/testnet mode
-            if self.trading_mode in ['live', 'testnet'] and self.binance_client:
-                try:
-                    # Convert to Binance format
-                    binance_symbol = symbol.replace('/', '')
-                    
-                    # For testnet, we might need to adjust the symbol
-                    if self.trading_mode == 'testnet':
-                        # Testnet might use different symbol formats
-                        # Try alternative formats
-                        if 'USDT' in symbol:
-                            binance_symbol = binance_symbol.replace('USDT', 'USDC')  # Testnet often uses USDC
-                    
-                    # Validate symbol exists
-                    try:
-                        # Try to get symbol info first
-                        symbol_info = self.binance_client.get_symbol_info(binance_symbol)
-                        print(symbol_info)
-                        if not symbol_info:
-                            return False, f"Symbol {binance_symbol} not found on exchange"
-                    except Exception:
-                        return False, f"Symbol {binance_symbol} not supported"
-                    
-                    # Round quantity to proper step size
-                    step_size = 0.000001  # Default minimum
-                    if symbol_info:
-                        for filter in symbol_info['filters']:
-                            if filter['filterType'] == 'LOT_SIZE':
-                                step_size = float(filter['stepSize'])
-                    
-                    # Round amount to step size
-                    rounded_amount = round(amount / step_size) * step_size
-                    
-                    if side == 'buy':
-                        order = self.binance_client.order_limit_buy(
-                            symbol=binance_symbol,
-                            quantity=rounded_amount,
-                            price=str(price)
-                        )
-                    else:  # sell
-                        order = self.binance_client.order_limit_sell(
-                            symbol=binance_symbol,
-                            quantity=rounded_amount,
-                            price=str(price)
-                        )
-                    
-                    logger.info(f"📤 Live LIMIT {side.upper()} order placed: {order}")
-                    
-                    # Also track in portfolio
-                    pending_orders = portfolio.get('pending_orders', [])
-                    pending_orders.append({
-                        'id': order['orderId'],
-                        'symbol': symbol,  # Keep original symbol format
-                        'side': side,
-                        'amount': rounded_amount,
-                        'price': price,
-                        'timestamp': datetime.now().isoformat(),
-                        'status': 'pending',
-                        'type': 'limit',
-                        'mode': self.trading_mode,
-                        'binance_order_id': order['orderId']
-                    })
-                    
-                    portfolio['pending_orders'] = pending_orders
-                    save_portfolio(portfolio)
-                    
-                    # Return SHORT success message
-                    return True, f"Order #{order['orderId']}"
-                    
-                except Exception as e:
-                    # Return SHORT error message
-                    error_msg = str(e)
-                    logger.error(f"Binance order error: {error_msg}")
-                    
-                    # Check for common errors
-                    if "Invalid symbol" in error_msg:
-                        return False, f"Symbol {symbol} not valid. Try format: SOLUSDT"
-                    elif "Insufficient balance" in error_msg:
-                        return False, "Insufficient balance"
-                    elif "precision" in error_msg.lower():
-                        return False, "Amount or price precision error"
-                    else:
-                        # Truncate for Telegram
-                        if len(error_msg) > 100:
-                            error_msg = error_msg[:100] + "..."
-                        return False, f"Exchange error: {error_msg}"
-            
-            # If not in live/testnet mode or no binance client, return paper trading message
-            return False, "Paper trading mode - limit orders not supported"
-                
-        except Exception as e:
-            logger.error(f"Error placing limit order: {e}")
-            # Return SHORT error message
-            error_msg = str(e)
-            if len(error_msg) > 100:
-                error_msg = error_msg[:100] + "..."
-            return False, error_msg
-    
     def scan_and_trade(self) -> List[Dict]:
-        """Scan for signals"""
+        """
+        Scan all symbols for trading signals
+        Returns list of signals found
+        """
         signals_found = []
         portfolio = load_portfolio()
         
-        if len(portfolio.get('positions', {})) >= self.max_positions:
-            logger.info("At max positions")
+        # Check if we can take new positions
+        current_positions = len(portfolio.get('positions', {}))
+        if current_positions >= self.max_positions:
+            logger.info(f"⏭️ At max positions ({current_positions}/{self.max_positions})")
             return signals_found
         
-        logger.info(f"🔍 Scanning {len(self.symbols)} symbols...")
+        slots_available = self.max_positions - current_positions
+        logger.info(f"🔍 Scanning {len(self.symbols)} symbols for signals ({slots_available} slots available)...")
         
         for symbol in self.symbols:
             try:
+                # Skip if already in position
                 if symbol in portfolio.get('positions', {}):
                     continue
                 
+                # Fetch data
                 df = self.data_feed.get_ohlcv(
                     symbol=symbol,
                     interval=self.timeframe,
@@ -426,38 +358,47 @@ class TradingEngine:
                 )
                 
                 if df.empty or len(df) < 50:
+                    logger.debug(f"⏭️ {symbol}: Insufficient data ({len(df)} candles)")
                     continue
                 
+                # Get current equity for position sizing
                 equity = portfolio.get('cash_balance', 0)
-                if equity <= 0:
+                if equity <= 10:  # Need at least $10
+                    logger.warning(f"⚠️ Low equity: ${equity:.2f}")
                     continue
                 
+                # Generate signal
                 try:
                     signal = generate_trade_signal(df, equity, self.risk_per_trade)
-                except:
-                    # Basic signal if strategy_tools fails
-                    signal = {
-                        'side': 'long',
-                        'entry': df['close'].iloc[-1],
-                        'units': (equity * self.risk_per_trade) / df['close'].iloc[-1],
-                        'stop_loss': df['close'].iloc[-1] * 0.95,
-                        'take_profit': df['close'].iloc[-1] * 1.10
-                    }
+                except Exception as e:
+                    logger.error(f"❌ Error generating signal for {symbol}: {e}")
+                    continue
                 
                 if signal:
-                    signals_found.append({
-                        'symbol': symbol,
-                        'signal': signal,
-                        'data': df
-                    })
+                    # Check for duplicate signals (avoid same signal twice)
+                    signal_key = f"{symbol}_{signal['signal_type']}"
                     
+                    # Simple duplicate prevention (don't take same signal type twice in a row)
+                    if signal_key != self.last_signals.get(symbol):
+                        signals_found.append({
+                            'symbol': symbol,
+                            'signal': signal
+                        })
+                        self.last_signals[symbol] = signal_key
+                        logger.info(f"✅ {symbol}: {signal['signal_type'].upper()} {signal['side']} signal at ${signal['entry']:.2f}")
+                    else:
+                        logger.info(f"⏭️ {symbol}: Duplicate signal skipped")
+                
             except Exception as e:
-                logger.error(f"Error scanning {symbol}: {e}")
+                logger.error(f"❌ Error scanning {symbol}: {e}")
         
+        logger.info(f"📊 Scan complete: Found {len(signals_found)} signals")
         return signals_found
     
     def execute_signal(self, signal_data: Dict) -> bool:
-        """Execute a trading signal"""
+        """
+        Execute a trading signal
+        """
         try:
             symbol = signal_data['symbol']
             signal = signal_data['signal']
@@ -472,57 +413,75 @@ class TradingEngine:
             )
             
         except Exception as e:
-            logger.error(f"Error executing signal: {e}")
+            logger.error(f"❌ Error executing signal: {e}")
             return False
     
     def get_portfolio_summary(self) -> Dict:
-        """Get portfolio summary"""
+        """
+        Get comprehensive portfolio summary
+        """
         current_prices = self.get_current_prices()
         portfolio = load_portfolio()
         
         cash = portfolio.get('cash_balance', 0)
-        holdings = portfolio.get('holdings', {})
         positions = portfolio.get('positions', {})
+        trade_history = portfolio.get('trade_history', [])
         
+        # Calculate total value
         total_value = cash
-        
-        for asset, amount in holdings.items():
-            if asset not in ['USDT', 'USDC']:
-                symbol = f"{asset}/USDT"
-                price = current_prices.get(symbol, 0)
-                total_value += amount * price
+        positions_value = 0
+        positions_pnl = 0
         
         for symbol, position in positions.items():
             current_price = current_prices.get(symbol, position.get('entry_price', 0))
-            total_value += position['amount'] * current_price
+            position_value = position['amount'] * current_price
+            position_cost = position['amount'] * position['entry_price']
+            
+            positions_value += position_value
+            
+            if position['side'] == 'long':
+                pnl = position_value - position_cost
+            else:
+                pnl = position_cost - position_value
+            
+            positions_pnl += pnl
         
+        total_value += positions_value
+        
+        # Calculate performance metrics
         initial_balance = portfolio.get('initial_balance', total_value)
-        total_return_pct = ((total_value - initial_balance) / initial_balance * 100) if initial_balance > 0 else 0
+        total_return = total_value - initial_balance
+        total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
         
-        perf_metrics = portfolio.get('performance_metrics', {})
-        total_trades = perf_metrics.get('total_trades', 0)
-        winning_trades = perf_metrics.get('winning_trades', 0)
-        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        # Win rate from trade history
+        closed_trades = [t for t in trade_history if t['action'] == 'close']
+        winning_trades = [t for t in closed_trades if t.get('pnl', 0) > 0]
+        
+        win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0
         
         return {
             'trading_mode': self.trading_mode,
             'cash_balance': cash,
+            'positions_value': positions_value,
             'portfolio_value': total_value,
             'initial_balance': initial_balance,
+            'total_return': total_return,
             'total_return_pct': total_return_pct,
             'active_positions': len(positions),
-            'total_trades': total_trades,
-            'winning_trades': winning_trades,
+            'total_trades': len(closed_trades),
+            'winning_trades': len(winning_trades),
             'win_rate': win_rate,
-            'total_pnl': perf_metrics.get('total_pnl', 0),
-            'max_drawdown': perf_metrics.get('max_drawdown', 0)
+            'positions_pnl': positions_pnl
         }
     
     def check_portfolio_health(self) -> bool:
-        """Check portfolio health"""
+        """
+        Check if portfolio is healthy and can continue trading
+        """
         try:
             summary = self.get_portfolio_summary()
             
+            # Check drawdown
             max_drawdown = self.config.get('max_drawdown', 0.05)
             current_drawdown = -summary['total_return_pct'] / 100 if summary['total_return_pct'] < 0 else 0
             
@@ -530,28 +489,48 @@ class TradingEngine:
                 logger.warning(f"⚠️ Drawdown {current_drawdown:.1%} > {max_drawdown:.1%}")
                 return False
             
+            # Check minimum cash
             min_trade_size = 10
             if summary['cash_balance'] < min_trade_size:
                 logger.warning(f"⚠️ Low cash: ${summary['cash_balance']:.2f}")
                 return False
             
-            logger.info(f"✅ Portfolio healthy: ${summary['portfolio_value']:,.2f}")
+            logger.info(f"✅ Portfolio healthy: ${summary['portfolio_value']:,.2f} (Return: {summary['total_return_pct']:+.1f}%)")
             return True
             
         except Exception as e:
-            logger.error(f"Error checking health: {e}")
+            logger.error(f"❌ Error checking health: {e}")
             return False
 
 # Create singleton instance
 trading_engine = TradingEngine()
 
-# For backward compatibility
-trading_engine = trading_engine
-
 if __name__ == "__main__":
     # Test the engine
-    print(f"🧪 Testing Trading Engine - Mode: {trading_engine.trading_mode}")
+    print(f"\n🧪 Testing Trading Engine")
+    print("=" * 50)
+    print(f"Mode: {trading_engine.trading_mode}")
+    print(f"Symbols: {len(trading_engine.symbols)}")
+    print(f"Timeframe: {trading_engine.timeframe}")
+    print(f"Max positions: {trading_engine.max_positions}")
+    print(f"Risk per trade: {trading_engine.risk_per_trade:.1%}")
+    
+    # Test scan
+    print("\n🔍 Testing scan...")
+    signals = trading_engine.scan_and_trade()
+    
+    if signals:
+        print(f"✅ Found {len(signals)} signals:")
+        for s in signals:
+            sig = s['signal']
+            print(f"   {s['symbol']}: {sig['signal_type']} {sig['side']} @ ${sig['entry']:.2f}")
+    else:
+        print("❌ No signals found")
+    
+    # Test portfolio summary
+    print("\n💰 Portfolio Summary:")
     summary = trading_engine.get_portfolio_summary()
-    print(f"Portfolio: ${summary['portfolio_value']:,.2f}")
-    print(f"Return: {summary['total_return_pct']:+.1f}%")
-    print(f"Active positions: {summary['active_positions']}")
+    print(f"   Value: ${summary['portfolio_value']:,.2f}")
+    print(f"   Cash: ${summary['cash_balance']:,.2f}")
+    print(f"   Positions: {summary['active_positions']}")
+    print(f"   Return: {summary['total_return_pct']:+.1f}%")
