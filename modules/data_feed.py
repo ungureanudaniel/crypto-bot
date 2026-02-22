@@ -374,7 +374,7 @@ def test_connection() -> bool:
         
         # Try a simple data fetch as alternative test
         try:
-            price = get_current_price('BTCUSDT')
+            price = get_current_price('BTCUSDC')
             if price:
                 logger.info(f"✅ Connection test passed via price fetch: ${price:.2f}")
                 return True

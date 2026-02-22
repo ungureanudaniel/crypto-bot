@@ -315,6 +315,11 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     signals = context.user_data['pending_signals']
     
+    # DEBUG: Print the signals to logs
+    logger.info(f"🔍 DEBUG - Attempting to execute {len(signals)} signals:")
+    for i, signal_data in enumerate(signals):
+        logger.info(f"   Signal {i+1}: {signal_data['symbol']} - {signal_data['signal']}")
+    
     await update.message.reply_text(
         f"⚡ Executing {len(signals)} signal(s)...",
         parse_mode='Markdown'
@@ -327,11 +332,20 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         failed = []
         
         for signal_data in signals:
-            success = trading_engine.execute_signal(signal_data)
-            if success:
-                executed.append(signal_data['symbol'])
-            else:
-                failed.append(signal_data['symbol'])
+            symbol = signal_data['symbol']
+            logger.info(f"🔍 Executing signal for {symbol}")
+            
+            try:
+                success = trading_engine.execute_signal(signal_data)
+                if success:
+                    executed.append(symbol)
+                    logger.info(f"✅ Successfully executed {symbol}")
+                else:
+                    failed.append(symbol)
+                    logger.warning(f"❌ Failed to execute {symbol}")
+            except Exception as e:
+                failed.append(symbol)
+                logger.error(f"❌ Error executing {symbol}: {e}")
         
         # Clear pending signals
         context.user_data['pending_signals'] = []
