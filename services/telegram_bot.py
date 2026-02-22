@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from services.scheduler import start_scheduler
 
 stop_event = None
 
@@ -811,6 +812,8 @@ def run_telegram_bot():
     except Exception as e:
         logger.warning(f"⚠️ Job queue setup failed: {e}")
     
+    start_scheduler()
+
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("balance", balance))

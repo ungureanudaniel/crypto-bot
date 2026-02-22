@@ -384,6 +384,20 @@ class TradingEngine:
     def open_position(self, symbol: str, side: str, entry_price: float, 
                      units: float, stop_loss: float, take_profit: float) -> bool:
         """Open a new position with stop loss and take profit"""
+        # DEBUG: Log everything
+        logger.info(f"🔍 OPEN POSITION ATTEMPT:")
+        logger.info(f"   Symbol: {symbol}")
+        logger.info(f"   Side: {side}")
+        logger.info(f"   Entry: ${entry_price:.2f}")
+        logger.info(f"   Units: {units:.6f}")
+        logger.info(f"   Value: ${units * entry_price:.2f}")
+        
+        # Check minimum order value (Binance often requires $10 minimum)
+        min_order_value = 10
+        
+        if units * entry_price < min_order_value:
+            logger.warning(f"⚠️ Order value ${units * entry_price:.2f} below minimum ${min_order_value}")
+            return False
         
         # Validation checks
         if units <= 0:

@@ -1,4 +1,3 @@
-# services/notifier.py - FIXED VERSION
 import sys
 import os
 import asyncio
@@ -56,9 +55,9 @@ class Notifier:
                 message = message[:4000] + "... (truncated)"
             
             await self.bot.send_message(
-                chat_id=self.chat_id,
+                chat_id=int(self.chat_id),
                 text=message,
-                parse_mode='Markdown'
+                parse_mode='html'
             )
             
             logger.info(f"📤 Message sent: {message[:50]}...")
