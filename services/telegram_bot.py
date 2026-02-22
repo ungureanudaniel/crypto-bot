@@ -783,7 +783,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN FUNCTION
 # -------------------------------------------------------------------
 def run_telegram_bot():
-    """Run Telegram bot"""
+    """Run Telegram bot - FIXED VERSION"""
     global stop_event
     
     token = CONFIG.get('telegram_token')
@@ -797,23 +797,18 @@ def run_telegram_bot():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Create application
+    # Create application WITHOUT job queue
     application = ApplicationBuilder().token(token).build()
     
-    # Setup job queue
+    # IMPORTANT: DO NOT use application.job_queue!
+    # Start our thread-based scheduler instead
     try:
-        job_queue = application.job_queue
-        if job_queue:
-            # Schedule jobs
-            job_queue.run_repeating(trading_job_callback, interval=300, first=10)   # 5 min
-            job_queue.run_repeating(portfolio_job_callback, interval=3600, first=30) # 1 hour
-            job_queue.run_repeating(health_job_callback, interval=21600, first=60)  # 6 hours
-            logger.info("✅ Scheduler jobs scheduled")
+        from services.scheduler import start_scheduler
+        start_scheduler()  # This runs in a separate thread
+        logger.info("✅ Thread-based scheduler started")
     except Exception as e:
-        logger.warning(f"⚠️ Job queue setup failed: {e}")
+        logger.error(f"❌ Failed to start scheduler: {e}")
     
-    start_scheduler()
-
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("balance", balance))
@@ -830,16 +825,27 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("setstop", set_stop_loss))
     application.add_handler(CommandHandler("stop", stop))
     
+    logger.info(f"✅ Registered {len(application.handlers[0])} command handlers")
     logger.info("✅ Bot ready - starting polling...")
     
     try:
-        application.run_polling(drop_pending_updates=True)
+        # Run polling - this will now be responsive because scheduler is in another thread
+        application.run_polling(
+            drop_pending_updates=True,
+            poll_interval=1.0,
+            timeout=30
+        )
     except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 Bot stopped")
+        logger.info("🛑 Bot stopped by user")
     except Exception as e:
         logger.error(f"❌ Polling error: {e}")
     finally:
         logger.info("👋 Goodbye!")
+        try:
+            from services.scheduler import stop_scheduler
+            stop_scheduler()
+        except:
+            pass
 
 if __name__ == "__main__":
     run_telegram_bot()
