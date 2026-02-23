@@ -316,10 +316,18 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     signals = context.user_data['pending_signals']
     
-    # DEBUG: Print the signals to logs
-    logger.info(f"🔍 DEBUG - Attempting to execute {len(signals)} signals:")
+    # DEBUG: Log what we're trying to execute
+    logger.info("=" * 60)
+    logger.info(f"🔍 EXECUTE_ALL: Attempting to execute {len(signals)} signals")
+    
     for i, signal_data in enumerate(signals):
-        logger.info(f"   Signal {i+1}: {signal_data['symbol']} - {signal_data['signal']}")
+        logger.info(f"   Signal {i+1}: {signal_data['symbol']}")
+        logger.info(f"      Signal dict keys: {signal_data.keys()}")
+        if 'signal' in signal_data:
+            logger.info(f"      Signal type: {signal_data['signal'].get('signal_type', 'unknown')}")
+            logger.info(f"      Side: {signal_data['signal'].get('side', 'unknown')}")
+            logger.info(f"      Entry: ${signal_data['signal'].get('entry', 0):.2f}")
+            logger.info(f"      Units: {signal_data['signal'].get('units', 0):.6f}")
     
     await update.message.reply_text(
         f"⚡ Executing {len(signals)} signal(s)...",
@@ -331,27 +339,72 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         executed = []
         failed = []
+        fail_reasons = {}
         
         for signal_data in signals:
             symbol = signal_data['symbol']
-            logger.info(f"🔍 Executing signal for {symbol}")
+            logger.info(f"🔍 Processing {symbol}...")
             
             try:
+                # Check if we can execute this signal
+                if 'signal' not in signal_data:
+                    logger.error(f"❌ {symbol}: No 'signal' key in signal_data")
+                    failed.append(symbol)
+                    fail_reasons[symbol] = "Invalid signal format"
+                    continue
+                
+                signal = signal_data['signal']
+                
+                # Validate required fields
+                required_fields = ['side', 'entry', 'units', 'stop_loss', 'take_profit']
+                missing_fields = [f for f in required_fields if f not in signal]
+                if missing_fields:
+                    logger.error(f"❌ {symbol}: Missing fields: {missing_fields}")
+                    failed.append(symbol)
+                    fail_reasons[symbol] = f"Missing fields: {missing_fields}"
+                    continue
+                
+                # Check cash balance before executing
+                cash = trading_engine.get_cash_balance()
+                cost = signal['units'] * signal['entry']
+                
+                logger.info(f"   Cash: ${cash:.2f}, Cost: ${cost:.2f}")
+                
+                if cash < cost:
+                    logger.warning(f"⚠️ {symbol}: Insufficient funds (need ${cost:.2f}, have ${cash:.2f})")
+                    failed.append(symbol)
+                    fail_reasons[symbol] = f"Insufficient funds (need ${cost:.2f})"
+                    continue
+                
+                # Check minimum order value (Binance often requires $10)
+                min_order = 10
+                if cost < min_order:
+                    logger.warning(f"⚠️ {symbol}: Order value ${cost:.2f} below minimum ${min_order}")
+                    failed.append(symbol)
+                    fail_reasons[symbol] = f"Order too small (min ${min_order})"
+                    continue
+                
+                # Execute the signal
+                logger.info(f"   Executing {signal['side']} signal for {symbol}")
                 success = trading_engine.execute_signal(signal_data)
+                
                 if success:
                     executed.append(symbol)
                     logger.info(f"✅ Successfully executed {symbol}")
                 else:
                     failed.append(symbol)
+                    fail_reasons[symbol] = "Execution returned False"
                     logger.warning(f"❌ Failed to execute {symbol}")
+                    
             except Exception as e:
                 failed.append(symbol)
+                fail_reasons[symbol] = str(e)[:50]
                 logger.error(f"❌ Error executing {symbol}: {e}")
         
         # Clear pending signals
         context.user_data['pending_signals'] = []
         
-        # Build response
+        # Build detailed response
         response = ["📊 *Execution Results:*\n"]
         
         if executed:
@@ -364,13 +417,25 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if failed:
             response.append(f"\n❌ *Failed ({len(failed)}):*")
             for sym in failed[:5]:
-                response.append(f"  • {sym}")
+                reason = fail_reasons.get(sym, "Unknown")
+                response.append(f"  • {sym}: `{reason}`")
+        
+        # Log summary
+        logger.info("=" * 60)
+        logger.info(f"📊 Execution Summary:")
+        logger.info(f"   Executed: {len(executed)}")
+        logger.info(f"   Failed: {len(failed)}")
+        for sym, reason in fail_reasons.items():
+            logger.info(f"      {sym}: {reason}")
         
         await update.message.reply_text("\n".join(response), parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"❌ Execute all error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
 
 async def execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Execute specific signal"""
