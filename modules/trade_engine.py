@@ -581,10 +581,57 @@ class TradingEngine:
         Execute a trading signal
         """
         try:
+            # DEBUG: Log the signal data
+            logger.info(f"🔍 EXECUTE_SIGNAL called")
+            logger.info(f"   Signal data type: {type(signal_data)}")
+            logger.info(f"   Signal data keys: {signal_data.keys()}")
+            
+            if 'symbol' not in signal_data:
+                logger.error("❌ No 'symbol' in signal_data")
+                return False
+            
+            if 'signal' not in signal_data:
+                logger.error("❌ No 'signal' in signal_data")
+                return False
+            
             symbol = signal_data['symbol']
             signal = signal_data['signal']
             
-            return self.open_position(
+            logger.info(f"   Symbol: {symbol}")
+            logger.info(f"   Signal type: {signal.get('signal_type', 'unknown')}")
+            logger.info(f"   Side: {signal.get('side', 'unknown')}")
+            logger.info(f"   Entry: ${signal.get('entry', 0):.2f}")
+            logger.info(f"   Units: {signal.get('units', 0):.6f}")
+            logger.info(f"   Stop: ${signal.get('stop_loss', 0):.2f}")
+            logger.info(f"   Target: ${signal.get('take_profit', 0):.2f}")
+            
+            # Check cash balance before executing
+            cash = self.get_cash_balance()
+            cost = signal['units'] * signal['entry']
+            logger.info(f"   Cash: ${cash:.2f}, Cost: ${cost:.2f}")
+            
+            if cash < cost:
+                logger.warning(f"⚠️ Insufficient funds: Need ${cost:.2f}, have ${cash:.2f}")
+                return False
+            
+            # Check minimum order value
+            min_order = 10
+            if cost < min_order:
+                logger.warning(f"⚠️ Order value ${cost:.2f} below minimum ${min_order}")
+                return False
+            
+            # Check if we already have a position
+            if symbol in self.open_positions:
+                logger.warning(f"⚠️ Already in position for {symbol}")
+                return False
+            
+            # Check max positions
+            if len(self.open_positions) >= self.max_positions:
+                logger.warning(f"⚠️ At max positions ({self.max_positions})")
+                return False
+            
+            # Execute the position opening
+            result = self.open_position(
                 symbol=symbol,
                 side=signal['side'],
                 entry_price=signal['entry'],
@@ -593,8 +640,17 @@ class TradingEngine:
                 take_profit=signal['take_profit']
             )
             
+            if result:
+                logger.info(f"✅ Successfully opened position for {symbol}")
+            else:
+                logger.warning(f"❌ Failed to open position for {symbol}")
+            
+            return result
+        
         except Exception as e:
             logger.error(f"❌ Error executing signal: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     def get_portfolio_summary(self) -> Dict:
