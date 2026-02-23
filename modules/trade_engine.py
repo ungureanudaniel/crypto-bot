@@ -68,6 +68,20 @@ def get_real_binance_client():
 # -------------------------------------------------------------------
 # EXCHANGE DATA FETCHING
 # -------------------------------------------------------------------
+def get_usdt_balance(client) -> float:
+    """Get USDT balance directly from exchange"""
+    if not client:
+        return 0
+    try:
+        account = client.get_account()
+        for balance in account['balances']:
+            if balance['asset'] == 'USDT':
+                return float(balance['free'])
+        return 0
+    except Exception as e:
+        logger.error(f"Error fetching USDT balance: {e}")
+        return 0
+
 def get_usdc_balance(client) -> float:
     """Get USDC balance directly from exchange"""
     if not client:
@@ -426,35 +440,67 @@ class TradingEngine:
                 binance_symbol = symbol.replace('/', '')
                 
                 if side == 'long':
-                    # Check if we have enough USDC
-                    usdc_balance = get_usdc_balance(self.binance_client)
+                    # Check if we have enough USDT
+                    usdt_balance = get_usdt_balance(self.binance_client)  # You need this function
                     cost = units * entry_price
                     
-                    if usdc_balance < cost:
-                        logger.error(f"❌ Insufficient USDC balance: have ${usdc_balance:.2f}, need ${cost:.2f}")
+                    logger.info(f"   USDT balance: ${usdt_balance:.2f}")
+                    logger.info(f"   Required: ${cost:.2f}")
+                    
+                    if usdt_balance < cost:
+                        logger.error(f"❌ Insufficient USDT balance: have ${usdt_balance:.2f}, need ${cost:.2f}")
                         return False
                     
+                    # VALIDATE AND ADJUST QUANTITY
+                    is_valid, adjusted_units, error = self.validate_and_adjust_order(symbol, units)
+                    
+                    if not is_valid:
+                        logger.error(f"❌ Order validation failed: {error}")
+                        return False
+                    
+                    if adjusted_units != units:
+                        logger.info(f"🔄 Quantity adjusted from {units} to {adjusted_units}")
+                        units = adjusted_units
+                        # Recalculate cost
+                        cost = units * entry_price
+                    
                     # Place market buy order
+                    logger.info(f"📤 Placing market BUY order for {adjusted_units} {binance_symbol}...")
                     order = self.binance_client.order_market_buy(
                         symbol=binance_symbol,
-                        quantity=round(units, 6)
+                        quantity=adjusted_units
                     )
-                    logger.info(f"📤 Live BUY order executed: {order['orderId']}")
+                    logger.info(f"✅ Live BUY order executed: {order['orderId']}")
                     
                 elif side == 'short':
-                    # For SHORT positions on spot exchange, we need to sell what we have
+                    # Check if we have the asset to sell
                     asset_balance = get_asset_balance(self.binance_client, base_currency)
+                    
+                    logger.info(f"   {base_currency} balance: {asset_balance:.6f}")
+                    logger.info(f"   Required: {units:.6f}")
                     
                     if asset_balance < units:
                         logger.error(f"❌ Insufficient {base_currency} balance: have {asset_balance:.6f}, need {units:.6f}")
                         return False
                     
+                    # VALIDATE AND ADJUST QUANTITY for the asset we're selling
+                    is_valid, adjusted_units, error = self.validate_and_adjust_order(symbol, units)
+                    
+                    if not is_valid:
+                        logger.error(f"❌ Order validation failed: {error}")
+                        return False
+                    
+                    if adjusted_units != units:
+                        logger.info(f"🔄 Quantity adjusted from {units} to {adjusted_units}")
+                        units = adjusted_units
+                    
                     # Place market sell order
+                    logger.info(f"📤 Placing market SELL order for {units} {binance_symbol}...")
                     order = self.binance_client.order_market_sell(
                         symbol=binance_symbol,
-                        quantity=round(units, 6)
+                        quantity=round(units, 6)  # Round to 6 decimal places
                     )
-                    logger.info(f"📤 Live SELL order executed for SHORT: {order['orderId']}")
+                    logger.info(f"✅ Live SELL order executed for SHORT: {order['orderId']}")
                 
             except Exception as e:
                 logger.error(f"❌ Failed to execute live order: {e}")
@@ -510,6 +556,73 @@ class TradingEngine:
         logger.info(f"✅ Opened {side.upper()} position: {units:.6f} {symbol} at ${entry_price:.2f}")
         return True
     
+    def validate_and_adjust_order(self, symbol: str, quantity: float) -> Tuple[bool, float, str]:
+        """
+        Validate and adjust order quantity to meet LOT_SIZE requirements
+        Returns: (is_valid, adjusted_quantity, error_message)
+        """
+        try:
+            binance_symbol = symbol.replace('/', '')
+            
+            # Check if binance_client is available
+            if not self.binance_client:
+                return True, quantity, "No Binance client available"
+            
+            # Get symbol info
+            symbol_info = self.binance_client.get_symbol_info(binance_symbol)
+            
+            # Check if symbol_info is None
+            if symbol_info is None:
+                return False, quantity, f"Could not retrieve symbol info for {binance_symbol}"
+            
+            # Find LOT_SIZE filter
+            lot_size_filter = None
+            for f in symbol_info['filters']:
+                if f['filterType'] == 'LOT_SIZE':
+                    lot_size_filter = f
+                    break
+            
+            if not lot_size_filter:
+                return True, quantity, "No LOT_SIZE filter found"
+            
+            # Get filter values
+            min_qty = float(lot_size_filter['minQty'])
+            max_qty = float(lot_size_filter['maxQty'])
+            step_size = float(lot_size_filter['stepSize'])
+            
+            logger.info(f"📏 LOT_SIZE for {symbol}: min={min_qty}, max={max_qty}, step={step_size}")
+            logger.info(f"   Original quantity: {quantity}")
+            
+            # Check minimum
+            if quantity < min_qty:
+                return False, quantity, f"Quantity {quantity} below minimum {min_qty}"
+            
+            # Check maximum
+            if quantity > max_qty:
+                return False, quantity, f"Quantity {quantity} above maximum {max_qty}"
+            
+            # Round to step size
+            # quantity must be: step_size * N where N is integer
+            steps = quantity / step_size
+            rounded_steps = round(steps)  # Round to nearest integer
+            adjusted_qty = rounded_steps * step_size
+            
+            # Ensure we don't go below minimum after rounding
+            if adjusted_qty < min_qty:
+                adjusted_qty = min_qty
+            
+            # Ensure we don't exceed maximum
+            if adjusted_qty > max_qty:
+                adjusted_qty = max_qty
+            
+            logger.info(f"   Adjusted quantity: {adjusted_qty}")
+            
+            return True, adjusted_qty, ""
+            
+        except Exception as e:
+            logger.error(f"❌ Error validating order: {e}")
+            return False, quantity, str(e)
+
     def scan_and_trade(self) -> List[Dict]:
         """
         Scan all symbols for trading signals

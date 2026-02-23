@@ -1,16 +1,31 @@
-# modules/strategy.py - CLEAN SIGNAL GENERATION ONLY
+from modules.ml_integration import MLStrategy
 import pandas as pd
 import numpy as np
 import logging
-from ta.volatility import BollingerBands, AverageTrueRange
+from typing import Dict
+from modules.sentiment_agent import SentimentAgent
+from ta.volatility import BollingerBands
 from ta.trend import MACD
 from ta.momentum import RSIIndicator
 
 logger = logging.getLogger(__name__)
-
+ml_strategies = {}
+sentiment_agent = None
 # -------------------------------------------------------------------
 # Helper Functions
 # -------------------------------------------------------------------
+async def get_ml_prediction(symbol: str, df: pd.DataFrame) -> Dict:
+    """Get ML prediction for a symbol"""
+    global ml_strategies
+    
+    if symbol not in ml_strategies:
+        ml_strategies[symbol] = MLStrategy(symbol)
+        await ml_strategies[symbol].ensure_trained()
+    
+    ml_strategy = ml_strategies[symbol]
+    prediction = await ml_strategy.get_prediction(df)
+    
+    return prediction
 
 def calculate_donchian(df, length=20):
     """Returns Donchian channel: high, low, mid"""
@@ -206,8 +221,7 @@ def volume_breakout_signal(df):
 # -------------------------------------------------------------------
 # Position Sizing (Only calculates - execution in trade_engine)
 # -------------------------------------------------------------------
-
-def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None, stop_atr_multiplier=2):
+def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None, stop_atr_multiplier: float = 2):
     """
     Calculate position size based on risk
     Returns: units, stop_loss_price, take_profit_price
@@ -220,7 +234,7 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
         else:
             stop_loss_pct = 0.02  # Default 2%
         
-        # Ensure stop isn't too tight
+        # Ensure stop isn't too tight or too wide
         stop_loss_pct = max(stop_loss_pct, 0.005)  # Min 0.5%
         stop_loss_pct = min(stop_loss_pct, 0.05)   # Max 5%
         
@@ -228,15 +242,17 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
         stop_loss_price = entry_price * (1 - stop_loss_pct)
         
         # Take profit (2:1 reward:risk)
-        take_profit_price = entry_price * (1 + (stop_loss_pct * 2))
+        take_profit_pct = stop_loss_pct * 2
+        take_profit_price = entry_price * (1 + take_profit_pct)
         
         # Calculate units based on risk
         risk_amount = equity * risk_per_trade
         risk_per_unit = entry_price * stop_loss_pct
         
         if risk_per_unit <= 0:
+            logger.warning(f"⚠️ Risk per unit is zero or negative")
             return 0, None, None
-            
+        
         units = risk_amount / risk_per_unit
         
         # Cap at 20% of equity
@@ -246,12 +262,16 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
         # Minimum trade size ($10)
         min_units = 10 / entry_price
         if units < min_units:
+            logger.debug(f"Position too small: {units:.6f}, required: {min_units:.6f}")
             return 0, None, None
+        
+        logger.info(f"Position calc: Entry=${entry_price:.2f}, SL={stop_loss_pct:.2%}, "
+                    f"TP={take_profit_pct:.2%}, Units={units:.6f}, Risk=${risk_amount:.2f}")
         
         return units, stop_loss_price, take_profit_price
         
     except Exception as e:
-        logger.error(f"Error calculating position size: {e}")
+        logger.error(f"Error in calculate_position_units: {e}")
         return 0, None, None
 
 # -------------------------------------------------------------------
