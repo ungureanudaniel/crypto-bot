@@ -4,7 +4,6 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from data_feed import data_feed
-from modules.trade_engine_bk import get_real_binance_client
 from strategy_tools import generate_trade_signal
 from config_loader import config
 from portfolio import add_trade, get_performance_summary, set_initial_balance
