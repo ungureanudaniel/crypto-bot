@@ -3,10 +3,8 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import requests
 import logging
-import time
 import sys
-from datetime import datetime, timedelta
-from typing import Optional, Dict
+from datetime import datetime
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -15,56 +13,48 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api1.binance.com/"
 
 # -------------------------------------------------------------------
-# CONFIG LOADING
+# CONFIG LOADING – NO DEFAULTS, RAISE ERRORS IMMEDIATELY
 # -------------------------------------------------------------------
-try:
-    # Add parent directory to path
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from config_loader import config
-    CONFIG = config.config
-    logger.info(f"✅ Config loaded: {CONFIG.get('trading_mode', 'paper')}")
-except ImportError:
-    logger.warning("⚠️ Could not import config_loader, using defaults")
-    CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config_loader import config
 
-logging.info("🔧 Configuration loaded for data feed. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
+# This will raise KeyError if any required key is missing
+CONFIG = config.config
+trading_mode = CONFIG['trading_mode'].lower()
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+if trading_mode not in ['live', 'testnet']:
+    raise ValueError(f"❌ Invalid trading_mode '{trading_mode}'. Must be 'live' or 'testnet'.")
 
+# Get API keys – these must exist (config_loader already validated them)
+api_key = CONFIG['binance_api_key']
+api_secret = CONFIG['binance_api_secret']
+
+logger.info(f"✅ Config loaded: {trading_mode}")
+
+# -------------------------------------------------------------------
+# HELPER FUNCTIONS
+# -------------------------------------------------------------------
 def get_server_time():
+    """Get Binance server time (used for timestamp sync)"""
     endpoint = "/api/v3/time"
     response = requests.get(BASE_URL + endpoint)
     return response.json()
 
-def get_price(symbol:str):
-    url = f"{BASE_URL}/api/v3/ticker/price"
-    params = {"symbol": symbol}
-    response = requests.get(url, params=params)
-    return response.json()
-
 def check_balance(client):
-    """Check testnet account balance"""
+    """Check account balance (works for both live and testnet)"""
     print("\n" + "=" * 50)
-    print("💰 TESTNET ACCOUNT BALANCE")
+    print("💰 ACCOUNT BALANCE")
     print("=" * 50)
     
     try:
-        # Get account info
         account = client.get_account()
-        
-        # Check trading permissions
         can_trade = account.get('canTrade', False)
         print(f"✅ Trading enabled: {can_trade}")
         
         if not can_trade:
             print("   ⚠️  Your API keys need 'Enable Trading' permission!")
         
-        # Show all balances
         print("\n📊 Asset Balances:")
         print("-" * 40)
         
@@ -75,7 +65,6 @@ def check_balance(client):
             if free > 0 or locked > 0:
                 has_balance = True
                 asset = balance['asset']
-                # Highlight important assets
                 if asset in ['USDC', 'USDT', 'SOL', 'BTC', 'ETH']:
                     print(f"   🔹 {asset}: Free={free:.8f}, Locked={locked:.8f}")
                 else:
@@ -83,36 +72,33 @@ def check_balance(client):
         
         if not has_balance:
             print("   ❌ NO BALANCE FOUND!")
-            print("\n🔧 You need to request test funds:")
-            print("   1. Go to: https://testnet.binance.vision")
-            print("   2. Log in with your testnet credentials")
-            print("   3. Click 'Faucet' or 'Get Test Funds'")
-            print("   4. Request USDC, SOL, BTC, ETH, etc.")
+            if trading_mode == 'testnet':
+                print("\n🔧 You need to request test funds:")
+                print("   1. Go to: https://testnet.binance.vision")
+                print("   2. Log in with your testnet credentials")
+                print("   3. Click 'Faucet' or 'Get Test Funds'")
+                print("   4. Request USDC, SOL, BTC, ETH, etc.")
         
-        # Check specific assets for trading
+        # Check specific assets
         print("\n🎯 Trading-Ready Check:")
         print("-" * 40)
         
-        # Check USDC
         usdc = next((b for b in account['balances'] if b['asset'] == 'USDC'), None)
         if usdc and float(usdc['free']) > 0:
             print(f"   ✅ USDC: {float(usdc['free']):.2f} (can buy)")
         else:
             print("   ❌ Need USDC to buy crypto")
         
-        # Check SOL
         sol = next((b for b in account['balances'] if b['asset'] == 'SOL'), None)
         if sol and float(sol['free']) > 0:
             print(f"   ✅ SOL: {float(sol['free']):.4f} (can sell)")
         else:
             print("   ❌ Need SOL to sell")
         
-        # Check BTC
         btc = next((b for b in account['balances'] if b['asset'] == 'BTC'), None)
         if btc and float(btc['free']) > 0:
             print(f"   ✅ BTC: {float(btc['free']):.8f}")
         
-        # Check ETH
         eth = next((b for b in account['balances'] if b['asset'] == 'ETH'), None)
         if eth and float(eth['free']) > 0:
             print(f"   ✅ ETH: {float(eth['free']):.6f}")
@@ -124,23 +110,16 @@ def check_balance(client):
         if e.code == -2015:
             print("   This usually means invalid API key or wrong permissions")
             print("   Make sure your API key has 'Enable Trading' permission")
-        return None
+        raise
     except Exception as e:
         print(f"❌ Error checking balance: {e}")
-        return None
+        raise
 
 def main():
     try:
-        api_key = CONFIG.get('binance_api_key')
-        api_secret = CONFIG.get('binance_api_secret')
-        symbol_list = []
-        
-        if not api_key or not api_secret:
-            print("❌ API keys missing")
-            return
-
-        # Initialize client with testnet
-        client = Client(api_key=api_key, api_secret=api_secret, testnet=True)
+        # Initialize client based on trading mode
+        use_testnet = (trading_mode == 'testnet')
+        client = Client(api_key, api_secret, testnet=use_testnet)
         
         # Test basic connection
         time_data = get_server_time()
@@ -152,31 +131,32 @@ def main():
         symbols = [s['symbol'] for s in info['symbols']]
         
         # Filter for USDC and USDT pairs
-        for s in symbols:
-            if s.endswith('USDC') or s.endswith('USDT'):
-                symbol_list.append(s)
-        
+        symbol_list = [s for s in symbols if s.endswith('USDC') or s.endswith('USDT')]
         print(f"\n📈 Total trading pairs found: {len(symbol_list)}")
         print(f"   First 20 pairs: {symbol_list[:20]}")
         
-        # Check SOL pairs specifically
+        # Check SOL pairs
         sol_pairs = [s for s in symbol_list if s.startswith('SOL')]
         print(f"\n🔍 SOL pairs available: {sol_pairs}")
         
-        # CHECK BALANCE - INSERTED HERE
+        # Check balance
         check_balance(client)
         
-        # Get current price for SOL/USDC
-        try:
+        # Get current price for SOL/USDC (if pair exists)
+        if 'SOLUSDC' in symbols:
             ticker = client.get_symbol_ticker(symbol='SOLUSDC')
             print(f"\n💰 Current SOL/USDC price: ${float(ticker['price']):.2f}")
-        except Exception as e:
-            print(f"\n❌ Could not get SOL/USDC price: {e}")
+        else:
+            print("\n⚠️ SOL/USDC pair not available on this endpoint")
         
         print("\n✅ API test completed successfully!")
         
+    except BinanceAPIException as e:
+        print(f"❌ Binance API Error: {e}")
+        sys.exit(1)
     except Exception as e:
         print(f"❌ API test failed: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

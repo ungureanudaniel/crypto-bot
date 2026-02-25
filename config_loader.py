@@ -1,10 +1,13 @@
 import os
 import json
+import logging
 from typing import Dict, Any
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class Config:
     """Load configuration from both .env and config.json"""
@@ -85,8 +88,48 @@ class Config:
         """Check if key exists"""
         return key in self.config
 
-# Global instance
+# Global config instance
 config = Config()
+
+# -------------------------------------------------------------------
+# Shared Binance client (singleton)
+# -------------------------------------------------------------------
+_binance_client = None
+
+def get_binance_client():
+    """Return a singleton Binance client instance."""
+    global _binance_client
+    if _binance_client is not None:
+        return _binance_client
+
+    from binance.client import Client
+    from binance.exceptions import BinanceAPIException
+
+    trading_mode = config.config['trading_mode'].lower()
+    api_key = config.config['binance_api_key']
+    api_secret = config.config['binance_api_secret']
+
+    logger.info(f"Initializing shared Binance client for {trading_mode} mode")
+
+    try:
+        if trading_mode == 'testnet':
+            client = Client(api_key, api_secret, testnet=True)
+        else:
+            client = Client(api_key, api_secret)
+
+        # Test connection – fail fast
+        client.ping()
+        logger.info("✅ Shared client ping successful")
+        client.get_account()
+        logger.info("✅ Shared client authentication successful")
+        logger.info(f"🌐 API URL: {client.API_URL}")
+
+        _binance_client = client
+        return client
+
+    except (ImportError, BinanceAPIException, Exception) as e:
+        logger.error(f"❌ Failed to initialize shared Binance client: {e}")
+        raise
 
 if __name__ == "__main__":
     # Test loading
@@ -95,3 +138,6 @@ if __name__ == "__main__":
     print(f"Trading mode: {CONFIG.get('trading_mode')}")
     print(f"Testnet flag: {CONFIG.get('testnet')}")
     print(f"binance_api_url: {CONFIG.get('binance_api_url')}")
+    # Optionally test client
+    # client = get_binance_client()
+    # print("✅ Client created")

@@ -1,13 +1,14 @@
 # modules/trade_engine.py - FIXED VERSION
 import asyncio
 import logging
-import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from data_feed import data_feed
+from modules.trade_engine_bk import get_real_binance_client
 from strategy_tools import generate_trade_signal
 from config_loader import config
 from portfolio import add_trade, get_performance_summary, set_initial_balance
+from config_loader import get_binance_client 
 
 # Setup logging
 logging.basicConfig(
@@ -29,42 +30,7 @@ except ImportError:
 # CONFIG LOADING
 # -------------------------------------------------------------------
 CONFIG = config.config
-logger.info(f"✅ Config loaded: {CONFIG.get('trading_mode', 'paper')}")
-
-# -------------------------------------------------------------------
-# LIVE TRADING SUPPORT
-# -------------------------------------------------------------------
-def get_real_binance_client():
-    """Get real Binance client for live/testnet trading"""
-    try:
-        from binance.client import Client
-        
-        trading_mode = CONFIG.get('trading_mode', 'paper').lower()
-        api_key = CONFIG.get('binance_api_key', '')
-        api_secret = CONFIG.get('binance_api_secret', '')
-        
-        if not api_key or not api_secret:
-            logger.warning("⚠️ No API keys for real trading")
-            return None
-        
-        if trading_mode == 'testnet':
-            client = Client(api_key=api_key, api_secret=api_secret, testnet=True)
-            # Force correct testnet URL
-            client.API_URL = 'https://testnet.binance.vision'
-            logger.info("✅ Connected to Binance Testnet")
-        else:
-            client = Client(api_key=api_key, api_secret=api_secret)
-            logger.info("✅ Connected to Binance Live")
-        
-        logger.info(f"🌐 API URL: {client.API_URL}")
-        return client
-    except ImportError:
-        logger.error("❌ python-binance not installed for live trading")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Failed to connect to Binance: {e}")
-        return None
-
+client = get_binance_client()
 # -------------------------------------------------------------------
 # EXCHANGE DATA FETCHING
 # -------------------------------------------------------------------
@@ -126,71 +92,83 @@ def get_all_balances(client) -> Dict[str, float]:
         logger.error(f"Error fetching all balances: {e}")
         return {}
 
-def get_total_portfolio_value(client) -> Dict:
-    """Calculate total portfolio value in USDC"""
+def get_total_portfolio_value(client, symbols: List[str]) -> Dict:
+    """Calculate total portfolio value in USDT, only pricing relevant assets."""
     if not client:
-        return {'total_usdc': 0, 'cash_usdc': 0, 'holdings': {}}
+        return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
     
+    # Build set of base currencies we care about (from symbols parameter)
+    # symbols contains e.g. ["SOL/USDT", "BTC/USDT", ...]
+    base_currencies = set()
+    for sym in symbols:
+        base = sym.split('/')[0]
+        base_currencies.add(base)
+    # Always include the quote currency (USDT) and maybe USDC if used
+    base_currencies.add('USDT')
+    # If you also hold USDC and want it valued, add 'USDC'
+    # base_currencies.add('USDC')
+
     try:
         account = client.get_account()
-        total_usdc = 0
-        cash_usdc = 0
+        total_usdt = 0
+        cash_usdt = 0
         holdings = {}
-        
+
         for balance in account['balances']:
             asset = balance['asset']
             free = float(balance['free'])
-            
             if free <= 0:
                 continue
-            
-            if asset == 'USDC':
-                cash_usdc = free
-                total_usdc += free
+
+            # If asset is USDT, it's cash
+            if asset == 'USDT':
+                cash_usdt = free
+                total_usdt += free
                 holdings[asset] = free
-            else:
-                # Try to get price in USDC
-                try:
-                    symbol = f"{asset}USDC"
-                    ticker = client.get_symbol_ticker(symbol=symbol)
-                    price = float(ticker['price'])
-                    value = free * price
-                    total_usdc += value
-                    holdings[asset] = {
-                        'amount': free,
-                        'price_usdc': price,
-                        'value_usdc': value
-                    }
-                except:
-                    # Try USDT if USDC fails
-                    try:
-                        symbol = f"{asset}USDT"
-                        ticker = client.get_symbol_ticker(symbol=symbol)
-                        price = float(ticker['price'])
-                        value = free * price
-                        total_usdc += value
-                        holdings[asset] = {
-                            'amount': free,
-                            'price_usdc': price,
-                            'value_usdc': value,
-                            'note': 'priced via USDT'
-                        }
-                    except:
-                        logger.debug(f"Could not price {asset}")
-                        holdings[asset] = {
-                            'amount': free,
-                            'price_usdc': 0,
-                            'value_usdc': 0
-                        }
-        
+                continue
+
+            # If asset is not in our base set, skip pricing (value 0)
+            if asset not in base_currencies:
+                # Optionally log at debug level
+                logger.debug(f"Skipping {asset} (not in trading pairs)")
+                holdings[asset] = {
+                    'amount': free,
+                    'value_usdt': 0,
+                    'note': 'not priced (not in trading pairs)'
+                }
+                continue
+
+            # Try to get price in USDT
+            try:
+                symbol = f"{asset}USDT"
+                ticker = client.get_symbol_ticker(symbol=symbol)
+                price = float(ticker['price'])
+                value = free * price
+                total_usdt += value
+                holdings[asset] = {
+                    'amount': free,
+                    'price_usdt': price,
+                    'value_usdt': value
+                }
+            except Exception as e:
+                logger.debug(f"Could not price {asset}: {e}")
+                holdings[asset] = {
+                    'amount': free,
+                    'value_usdt': 0,
+                    'note': 'price fetch failed'
+                }
+
+        logger.info(f"💰 Total portfolio value: ${total_usdt:,.2f}")
         return {
-            'total_usdc': total_usdc,
-            'cash_usdc': cash_usdc,
+            'total_usdt': total_usdt,
+            'cash_usdt': cash_usdt,
             'holdings': holdings
         }
+
     except Exception as e:
         logger.error(f"Error calculating portfolio value: {e}")
-        return {'total_usdc': 0, 'cash_usdc': 0, 'holdings': {}}
+        return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
+
 
 def get_current_price(client, symbol: str) -> Optional[float]:
     """Get current price for a symbol from exchange"""
@@ -213,7 +191,7 @@ class TradingEngine:
     def __init__(self):
         self.config = CONFIG
         self.data_feed = data_feed
-        self.trading_mode = self.config.get('trading_mode', 'paper').lower()
+        self.trading_mode = self.config.get('trading_mode', 'testnet').lower()
         self.symbols = self.config.get('coins', ['BTC/USDC', 'ETH/USDC'])
         self.timeframe = self.config.get('trading_timeframe', '15m')
         self.max_positions = self.config.get('max_positions', 3)
@@ -223,13 +201,8 @@ class TradingEngine:
         self.open_positions = {}  # symbol -> position details
         
         # Initialize real trading client if needed
-        self.binance_client = None
-        if self.trading_mode in ['live', 'testnet']:
-            self.binance_client = get_real_binance_client()
-            if not self.binance_client:
-                logger.warning("⚠️ Could not initialize Binance client, falling back to paper")
-                self.trading_mode = 'paper'
-        
+        self.binance_client = get_binance_client()
+
         # Track pending signals to avoid duplicates
         self.last_signals = {}
         
@@ -242,28 +215,51 @@ class TradingEngine:
         
         # Get initial portfolio value
         if self.binance_client:
-            portfolio = self.get_portfolio_value()
-            self.initial_total_value = portfolio['total_usdc']
+            portfolio = self.get_total_portfolio_value()
+            self.initial_total_value = portfolio['total_usdt']
             # Save initial balance to history
             set_initial_balance(self.initial_total_value)
             logger.info(f"💰 Initial portfolio value: ${self.initial_total_value:,.2f}")
     
-    def get_portfolio_value(self) -> Dict:
-        """Get current portfolio value directly from exchange"""
-        if self.trading_mode in ['live', 'testnet'] and self.binance_client:
-            return get_total_portfolio_value(self.binance_client)
-        else:
-            logger.info("Not able to fetch real portfolio value!")
-            return {'total_usdc': 0, 'cash_usdc': 0, 'holdings': {}}
+    def get_portfolio_summary(self) -> Dict:
+        """
+        Get comprehensive portfolio summary directly from exchange
+        """
+        portfolio = self.get_total_portfolio_value()
+        
+        # Calculate returns
+        if self.initial_total_value is None:
+            self.initial_total_value = portfolio['total_usdt']
+        
+        total_return = portfolio['total_usdt'] - self.initial_total_value
+        total_return_pct = (total_return / self.initial_total_value * 100) if self.initial_total_value > 0 else 0
+        
+        perf = get_performance_summary()
+        
+        return {
+            'trading_mode': self.trading_mode,
+            'cash_balance': portfolio['cash_usdt'],
+            'holdings': portfolio['holdings'],
+            'portfolio_value': portfolio['total_usdt'],
+            'initial_balance': self.initial_total_value,
+            'total_return': total_return,
+            'total_return_pct': total_return_pct,
+            'active_positions': len(self.open_positions),
+            'total_trades': perf['total_trades'],
+            'winning_trades': perf['winning_trades'],
+            'win_rate': perf['win_rate'],
+            'total_pnl': perf['total_pnl'],
+            'last_sync': datetime.now().isoformat()
+        }
     
     def get_cash_balance(self) -> float:
         """Get USDC/USDT balance directly from exchange"""
         if self.trading_mode in ['live', 'testnet'] and self.binance_client:
-            return get_usdc_balance(self.binance_client)
+            return get_usdt_balance(self.binance_client)
         else:
             logger.info("Not able to fetch real cash balance!")
             return 0.0
-    
+
     def get_current_prices(self) -> Dict[str, float]:
         """Get current prices for all symbols"""
         prices = {}
@@ -272,7 +268,6 @@ class TradingEngine:
             if self.binance_client:
                 price = get_current_price(self.binance_client, symbol)
             else:
-                # Fall back to data_feed for paper mode
                 price = self.data_feed.get_price(symbol)
             
             if price and price > 0:
@@ -758,38 +753,58 @@ class TradingEngine:
             logger.error(traceback.format_exc())
             return False
     
-    def get_portfolio_summary(self) -> Dict:
-        """
-        Get comprehensive portfolio summary directly from exchange
-        """
-        # Get current portfolio value from exchange
-        portfolio = self.get_portfolio_value()
+    def get_total_portfolio_value(self):
+        """Get total portfolio value in USDT from exchange"""
+        logger.info("Calculating total portfolio value...")
+        total_usdt = 0
+        cash_usdt = 0
+        holdings = {}
         
-        # Calculate returns
-        if self.initial_total_value is None:
-            self.initial_total_value = portfolio['total_usdc']
+        if not self.binance_client:
+            logger.warning("No binance client available")
+            return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
         
-        total_return = portfolio['total_usdc'] - self.initial_total_value
-        total_return_pct = (total_return / self.initial_total_value * 100) if self.initial_total_value > 0 else 0
-        
-        # Get performance metrics from history
-        perf = get_performance_summary()
-        
-        return {
-            'trading_mode': self.trading_mode,
-            'cash_balance': portfolio['cash_usdc'],
-            'holdings': portfolio['holdings'],
-            'portfolio_value': portfolio['total_usdc'],
-            'initial_balance': self.initial_total_value,
-            'total_return': total_return,
-            'total_return_pct': total_return_pct,
-            'active_positions': len(self.open_positions),
-            'total_trades': perf['total_trades'],
-            'winning_trades': perf['winning_trades'],
-            'win_rate': perf['win_rate'],
-            'total_pnl': perf['total_pnl'],
-            'last_sync': datetime.now().isoformat()
-        }
+        try:
+            account = self.binance_client.get_account()
+            logger.info(f"Account has {len(account['balances'])} balances")
+            
+            for balance in account['balances']:
+                asset = balance['asset']
+                free = float(balance['free'])
+                if free <= 0:
+                    continue
+                
+                logger.debug(f"Processing {asset} balance: {free}")
+                
+                if asset == 'USDT':
+                    cash_usdt = free
+                    total_usdt += free
+                    holdings[asset] = free
+                else:
+                    try:
+                        # Skip known test assets that don't have a USDT pair
+                        if asset in ['这是测试币', '456', 'BTC', 'ETH', 'BNB']:
+                            logger.debug(f"Skipping {asset} – no price needed")
+                            holdings[asset] = {'amount': free, 'price': 0, 'value': 0}
+                            continue
+                        
+                        symbol = f"{asset}USDT"
+                        logger.debug(f"Fetching price for {symbol}...")
+                        ticker = self.binance_client.get_symbol_ticker(symbol=symbol)
+                        price = float(ticker['price'])
+                        value = free * price
+                        total_usdt += value
+                        holdings[asset] = {'amount': free, 'price': price, 'value': value}
+                        logger.debug(f"{asset} price: {price}, value: {value}")
+                    except Exception as e:
+                        logger.debug(f"Could not get price for {asset}: {e}")
+                        holdings[asset] = {'amount': free, 'price': 0, 'value': 0}
+            
+            logger.info(f"Total portfolio value: ${total_usdt:.2f}")
+            return {'total_usdt': total_usdt, 'cash_usdt': cash_usdt, 'holdings': holdings}
+        except Exception as e:
+            logger.error(f"Error calculating portfolio value: {e}")
+            return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
     
     def check_portfolio_health(self) -> bool:
         """

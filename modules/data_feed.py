@@ -1,10 +1,13 @@
+# data_feed.py - NO PAPER FALLBACK, FAILS FAST ON CONNECTION ISSUES
 import pandas as pd
 import os
 import sys
 import logging
 import time
+from config_loader import config
 from datetime import datetime, timedelta
 from typing import Optional, Dict
+from config_loader import get_binance_client 
 
 # Setup logging
 logging.basicConfig(
@@ -21,85 +24,12 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # This will raise ImportError if config_loader not found
-from config_loader import config
 CONFIG = config.config
-
-# Validate trading mode
-trading_mode = CONFIG.get('trading_mode')
-if not trading_mode:
-    raise ValueError("❌ CRITICAL: 'trading_mode' not found in config!")
-
-# Validate API keys are present (config_loader already does this, but double-check)
-if trading_mode in ['live', 'testnet']:
-    api_key = CONFIG.get('binance_api_key')
-    api_secret = CONFIG.get('binance_api_secret')
-    if not api_key or not api_secret:
-        raise ValueError(f"❌ CRITICAL: API keys missing for {trading_mode} mode!")
-
-logger.info(f"✅ Config loaded: {trading_mode}")
-
-# ------------------------------------------------------------
-# Binance client initialization - NO FALLBACK, FAILS FAST
-# ------------------------------------------------------------
-def init_binance_client():
-    """Initialize Binance client - raises exception on failure"""
-    from binance.client import Client
-    from binance.exceptions import BinanceAPIException
-    
-    trading_mode = CONFIG['trading_mode'].lower()
-    logger.info(f"Initializing for {trading_mode} mode")
-
-    # Get API keys - these MUST exist for live/testnet
-    api_key = CONFIG['binance_api_key']
-    api_secret = CONFIG['binance_api_secret']
-
-    # Initialize client based on mode
-    try:
-        if trading_mode == 'testnet':
-            logger.info("🔐 Connecting to Binance Testnet...")
-            client = Client(api_key=api_key, api_secret=api_secret, testnet=True)
-        else:  # live
-            logger.info("🔐 Connecting to Binance Live...")
-            client = Client(api_key=api_key, api_secret=api_secret)
-        
-        # Test connection immediately - FAIL FAST
-        logger.info("Testing connection...")
-        client.ping()
-        logger.info("✅ Ping successful")
-        
-        # Test authentication
-        client.get_account()
-        logger.info("✅ Authentication successful")
-        
-        logger.info(f"🌐 API URL: {client.API_URL}")
-        logger.info(f"✅ Binance client initialized for {trading_mode} mode")
-        
-        return client
-        
-    except ImportError:
-        logger.error("❌ python-binance package not installed!")
-        logger.error("   Run: pip install python-binance")
-        raise
-    except BinanceAPIException as e:
-        logger.error(f"❌ Binance API Error: {e}")
-        if e.code == -2015:
-            logger.error("   Invalid API key or wrong permissions")
-            logger.error("   Make sure your API key has 'Enable Trading' permission")
-        elif e.code == -1021:
-            logger.error("   Timestamp error - your system clock may be out of sync")
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize Binance client: {e}")
-        raise
-
-# Global client instance - will raise exception if connection fails
-logger.info("🚀 Initializing Binance client...")
-client = init_binance_client()
+client = get_binance_client()
 
 # ------------------------------------------------------------
 # Data fetching functions
 # ------------------------------------------------------------
-
 def format_symbol(symbol: str) -> str:
     """Format trading symbol for Binance (BTC/USDT -> BTCUSDT)"""
     symbol = symbol.strip().upper()
