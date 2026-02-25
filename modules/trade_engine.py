@@ -226,32 +226,70 @@ class TradingEngine:
         """
         Get comprehensive portfolio summary directly from exchange
         """
-        portfolio = self.get_total_portfolio_value()
+        logger.info("💰 Getting portfolio summary...")
         
-        # Calculate returns
-        if self.initial_total_value is None:
-            self.initial_total_value = portfolio['total_usdt']
+        try:
+            # Get current portfolio value from exchange
+            portfolio = self.get_total_portfolio_value()
+            logger.info(f"   Portfolio value: ${portfolio.get('total_usdt', 0):,.2f}")
+            
+            # Calculate returns
+            if self.initial_total_value is None:
+                self.initial_total_value = portfolio.get('total_usdt', 0)
+                logger.info(f"   Initial value set to: ${self.initial_total_value:,.2f}")
+            
+            total_return = portfolio.get('total_usdt', 0) - self.initial_total_value
+            total_return_pct = (total_return / self.initial_total_value * 100) if self.initial_total_value > 0 else 0
+            
+            # Get performance metrics from history
+            try:
+                from portfolio import get_performance_summary
+                perf = get_performance_summary()
+                logger.info(f"   Performance metrics loaded")
+            except Exception as e:
+                logger.warning(f"   Could not load performance metrics: {e}")
+                perf = {'total_trades': 0, 'winning_trades': 0, 'win_rate': 0, 'total_pnl': 0}
+            
+            result = {
+                'trading_mode': self.trading_mode,
+                'cash_balance': portfolio.get('cash_usdt', 0),
+                'holdings': portfolio.get('holdings', {}),
+                'portfolio_value': portfolio.get('total_usdt', 0),
+                'initial_balance': self.initial_total_value,
+                'total_return': total_return,
+                'total_return_pct': total_return_pct,
+                'active_positions': len(self.open_positions),
+                'total_trades': perf.get('total_trades', 0),
+                'winning_trades': perf.get('winning_trades', 0),
+                'win_rate': perf.get('win_rate', 0),
+                'total_pnl': perf.get('total_pnl', 0),
+                'last_sync': datetime.now().isoformat()
+            }
+            
+            logger.info(f"✅ Portfolio summary: ${result['portfolio_value']:,.2f}, {result['active_positions']} positions")
+            return result
         
-        total_return = portfolio['total_usdt'] - self.initial_total_value
-        total_return_pct = (total_return / self.initial_total_value * 100) if self.initial_total_value > 0 else 0
-        
-        perf = get_performance_summary()
-        
-        return {
-            'trading_mode': self.trading_mode,
-            'cash_balance': portfolio['cash_usdt'],
-            'holdings': portfolio['holdings'],
-            'portfolio_value': portfolio['total_usdt'],
-            'initial_balance': self.initial_total_value,
-            'total_return': total_return,
-            'total_return_pct': total_return_pct,
-            'active_positions': len(self.open_positions),
-            'total_trades': perf['total_trades'],
-            'winning_trades': perf['winning_trades'],
-            'win_rate': perf['win_rate'],
-            'total_pnl': perf['total_pnl'],
-            'last_sync': datetime.now().isoformat()
-        }
+        except Exception as e:
+            logger.error(f"❌ Error in get_portfolio_summary: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # Return minimal summary instead of failing
+            return {
+                'trading_mode': self.trading_mode,
+                'cash_balance': 0,
+                'holdings': {},
+                'portfolio_value': 0,
+                'initial_balance': self.initial_total_value or 0,
+                'total_return': 0,
+                'total_return_pct': 0,
+                'active_positions': len(self.open_positions),
+                'total_trades': 0,
+                'winning_trades': 0,
+                'win_rate': 0,
+                'total_pnl': 0,
+                'last_sync': datetime.now().isoformat(),
+                'error': str(e)
+            }
     
     def get_cash_balance(self) -> float:
         """Get USDC/USDT balance directly from exchange"""

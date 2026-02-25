@@ -146,39 +146,66 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error starting bot")
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show balance"""
+    """Show balance with debug info"""
+    await update.message.reply_text("💰 Fetching balance...", parse_mode='Markdown')
+    
     try:
         from modules.trade_engine import trading_engine
         
-        # Get fresh summary from exchange
-        summary = trading_engine.get_portfolio_summary()
+        # Debug: Check if trading_engine exists
+        logger.info(f"🔍 Balance debug - trading_engine exists: {trading_engine is not None}")
         
-        # Format holdings if any
-        holdings_text = ""
-        if summary.get('holdings') and len(summary['holdings']) > 1:  # More than just USDC
-            holdings_text = "\n📊 *Holdings:*\n"
-            for asset, data in summary['holdings'].items():
-                if asset != 'USDC':
+        if not trading_engine:
+            await update.message.reply_text("❌ Trading engine not initialized")
+            return
+        
+        # Debug: Check binance_client
+        logger.info(f"🔍 Balance debug - binance_client exists: {trading_engine.binance_client is not None}")
+        
+        if not trading_engine.binance_client:
+            await update.message.reply_text("❌ Not connected to exchange")
+            return
+        
+        # Try to get portfolio summary
+        try:
+            summary = trading_engine.get_portfolio_summary()
+            logger.info(f"🔍 Balance debug - summary received: {summary is not None}")
+        except Exception as e:
+            logger.error(f"❌ Error in get_portfolio_summary: {e}")
+            await update.message.reply_text(f"❌ Error getting summary: {str(e)[:100]}")
+            return
+        
+        if not summary:
+            await update.message.reply_text("❌ No portfolio data available")
+            return
+        
+        # Format the response
+        response = (
+            f"💰 *Portfolio Balance*\n\n"
+            f"Total Value: `${summary.get('portfolio_value', 0):,.2f}`\n"
+            f"Cash: `${summary.get('cash_balance', 0):,.2f}`\n"
+            f"Return: `{summary.get('total_return_pct', 0):+.1f}%`\n"
+        )
+        
+        # Add holdings if any
+        holdings = summary.get('holdings', {})
+        if holdings and len(holdings) > 1:  # More than just USDT
+            response += "\n📊 *Holdings:*\n"
+            for asset, data in holdings.items():
+                if asset != 'USDT':
                     if isinstance(data, dict):
                         amount = data.get('amount', 0)
-                        value = data.get('value_usdc', 0)
+                        value = data.get('value_usdt', 0)
                         if amount > 0:
-                            holdings_text += f"   • {asset}: {amount:.4f} (${value:,.2f})\n"
-                    else:
-                        # Simple format
-                        holdings_text += f"   • {asset}: {data}\n"
+                            response += f"   • {asset}: {amount:.4f} (${value:,.2f})\n"
         
-        await update.message.reply_text(
-            f"💰 *Portfolio Balance*\n\n"
-            f"Total Value: `${summary['portfolio_value']:,.2f}`\n"
-            f"Cash: `${summary['cash_balance']:,.2f}`\n"
-            f"Return: `{summary['total_return_pct']:+.1f}%`\n"
-            f"{holdings_text}",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text(response, parse_mode='Markdown')
+        
     except Exception as e:
-        logger.error(f"Balance error: {e}")
-        await update.message.reply_text("❌ Error getting balance")
+        logger.error(f"❌ Balance error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""
