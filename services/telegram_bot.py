@@ -9,6 +9,9 @@ from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from services.scheduler import start_scheduler
+import concurrent.futures
+
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 stop_event = None
 
@@ -591,11 +594,13 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from modules.trade_engine import trading_engine
         
-        success, message = trading_engine.place_limit_order(
+        success, message = trading_engine.limit_buy(
             symbol=symbol,
             side='buy',
             amount=amount,
-            price=price
+            price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit
         )
         
         if success:

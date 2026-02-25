@@ -253,20 +253,16 @@ class TradingEngine:
         if self.trading_mode in ['live', 'testnet'] and self.binance_client:
             return get_total_portfolio_value(self.binance_client)
         else:
-            # Paper mode - return empty
-            return {
-                'total_usdc': 10000,  # Default paper balance
-                'cash_usdc': 10000,
-                'holdings': {}
-            }
+            logger.info("Not able to fetch real portfolio value!")
+            return {'total_usdc': 0, 'cash_usdc': 0, 'holdings': {}}
     
     def get_cash_balance(self) -> float:
-        """Get USDC balance directly from exchange"""
+        """Get USDC/USDT balance directly from exchange"""
         if self.trading_mode in ['live', 'testnet'] and self.binance_client:
             return get_usdc_balance(self.binance_client)
         else:
-            # Paper mode - return default
-            return 10000
+            logger.info("Not able to fetch real cash balance!")
+            return 0.0
     
     def get_current_prices(self) -> Dict[str, float]:
         """Get current prices for all symbols"""
@@ -506,55 +502,51 @@ class TradingEngine:
                 logger.error(f"❌ Failed to execute live order: {e}")
                 return False
         
-        # For PAPER mode, just simulate
-        elif self.trading_mode == 'paper':
-            if side == 'long':
-                # For long positions, we spend quote currency (USDC)
-                cost = units * entry_price
-                logger.info(f"📄 PAPER: Would spend ${cost:.2f} USDC to buy {units:.6f} {symbol}")
-            elif side == 'short':
-                logger.info(f"📄 PAPER: Would sell {units:.6f} {base_currency} at ${entry_price:.2f}")
-        
-        # Add to open positions (in-memory tracking)
-        self.open_positions[symbol] = {
-            'side': side,
-            'amount': units,
-            'entry_price': entry_price,
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'entry_time': datetime.now().isoformat(),
-            'mode': self.trading_mode
-        }
-        
-        # Record trade in history
-        add_trade({
-            'symbol': symbol,
-            'action': 'open',
-            'side': side,
-            'amount': units,
-            'price': entry_price,
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'mode': self.trading_mode
-        })
-        
-        # Send notification
-        if has_notifier:
-            try:
-                asyncio.create_task(notifier.send_trade_notification({
-                    'symbol': symbol,
-                    'side': 'SHORT' if side == 'short' else 'LONG',
-                    'price': entry_price,
-                    'amount': units,
-                    'stop_loss': stop_loss,
-                    'take_profit': take_profit,
-                    'mode': self.trading_mode
-                }))
-            except:
-                pass
-        
-        logger.info(f"✅ Opened {side.upper()} position: {units:.6f} {symbol} at ${entry_price:.2f}")
-        return True
+            # Add to open positions (in-memory tracking)
+            self.open_positions[symbol] = {
+                'side': side,
+                'amount': units,
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'entry_time': datetime.now().isoformat(),
+                'mode': self.trading_mode
+            }
+            
+            # Record trade in history
+            add_trade({
+                'symbol': symbol,
+                'action': 'open',
+                'side': side,
+                'amount': units,
+                'price': entry_price,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'mode': self.trading_mode
+            })
+            
+            # Send notification
+            if has_notifier:
+                try:
+                    asyncio.create_task(notifier.send_trade_notification({
+                        'symbol': symbol,
+                        'side': 'SHORT' if side == 'short' else 'LONG',
+                        'price': entry_price,
+                        'amount': units,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'mode': self.trading_mode
+                    }))
+                except:
+                    pass
+            
+            logger.info(f"✅ Opened {side.upper()} position: {units:.6f} {symbol} at ${entry_price:.2f}")
+            return True
+
+        # connection issues
+        else:
+            logger.warning("⚠️ Possible binance connection issues - no live or testnet orders executed")
+            return False
     
     def validate_and_adjust_order(self, symbol: str, quantity: float) -> Tuple[bool, float, str]:
         """
