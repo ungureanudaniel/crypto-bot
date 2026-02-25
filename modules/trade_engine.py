@@ -1,4 +1,6 @@
-# modules/trade_engine.py - FIXED VERSION
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import logging
 from datetime import datetime
@@ -464,25 +466,36 @@ class TradingEngine:
                     
                 elif side == 'short':
                     # Check if we have the asset to sell
-                    asset_balance = get_asset_balance(self.binance_client, base_currency)
+                    base_balance = get_asset_balance(self.binance_client, base_currency)
                     
-                    logger.info(f"   {base_currency} balance: {asset_balance:.6f}")
-                    logger.info(f"   Required: {units:.6f}")
+                    logger.info(f"   {base_currency} balance: {base_balance:.6f}")
+                    logger.info(f"   Required (from signal): {units:.6f}")
+                    # If we don't have enough, use whatever we have
+                    if base_balance < units:
+                        if base_balance <= 0:
+                            logger.error(f"❌ No {base_currency} available to short")
+                            return False
+
+                    adjusted_units = base_balance
+                    logger.info(f"🔄 Adjusting short position: {units:.6f} -> {adjusted_units:.6f} (using available balance)")
+                    units = adjusted_units
+
+                    # Stop and target prices remain the same, just fewer units
+                    logger.info(f"   New value: ${units * entry_price:.2f}")
                     
-                    if asset_balance < units:
-                        logger.error(f"❌ Insufficient {base_currency} balance: have {asset_balance:.6f}, need {units:.6f}")
-                        return False
-                    
-                    # VALIDATE AND ADJUST QUANTITY for the asset we're selling
                     is_valid, adjusted_units, error = self.validate_and_adjust_order(symbol, units)
-                    
+
                     if not is_valid:
                         logger.error(f"❌ Order validation failed: {error}")
                         return False
-                    
+                
                     if adjusted_units != units:
-                        logger.info(f"🔄 Quantity adjusted from {units} to {adjusted_units}")
+                        logger.info(f"🔄 Quantity adjusted from {units:.6f} to {adjusted_units:.6f}")
                         units = adjusted_units
+
+                    if base_balance < units:
+                        logger.error(f"❌ Insufficient {base_currency} balance: have {base_balance:.6f}, need {units:.6f}")
+                        return False
                     
                     # Place market sell order
                     logger.info(f"📤 Placing market SELL order for {units} {binance_symbol}...")

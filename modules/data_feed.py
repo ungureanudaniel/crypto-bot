@@ -1,7 +1,8 @@
 # data_feed.py - NO PAPER FALLBACK, FAILS FAST ON CONNECTION ISSUES
-import pandas as pd
-import os
 import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import pandas as pd
 import logging
 import time
 from config_loader import config
