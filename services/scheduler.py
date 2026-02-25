@@ -95,32 +95,18 @@ def scan_for_trading_signals():
                 failed = 0
                 
                 for signal in signals:
-                    # Get fresh cash balance before each trade
-                    current_cash = trading_engine.get_cash_balance()
-                    
-                    # Calculate cost of this signal
-                    signal_cost = signal['signal']['units'] * signal['signal']['entry']
-                    
-                    logger.info(f"💰 {signal['symbol']}: Cash=${current_cash:.2f}, Cost=${signal_cost:.2f}")
-                    
-                    # Check if we have enough funds
-                    if current_cash < signal_cost:
-                        logger.warning(f"⚠️ Insufficient funds for {signal['symbol']} (need ${signal_cost:.2f}, have ${current_cash:.2f})")
-                        failed += 1
-                        continue
-                    
-                    # Check if we've reached max positions
-                    if len(trading_engine.open_positions) >= trading_engine.max_positions:
-                        logger.info(f"⏭️ Max positions reached ({trading_engine.max_positions}), stopping execution")
-                        break
-                    
-                    # Execute the signal
+                    # Execute the signal - execute_signal now handles balance checks
                     if trading_engine.execute_signal(signal):
                         executed += 1
                         logger.info(f"✅ Executed {signal['symbol']}")
                     else:
                         failed += 1
                         logger.warning(f"❌ Failed to execute {signal['symbol']}")
+                    
+                    # Check if we've reached max positions
+                    if len(trading_engine.open_positions) >= trading_engine.max_positions:
+                        logger.info(f"⏭️ Max positions reached ({trading_engine.max_positions}), stopping execution")
+                        break
                 
                 if executed > 0:
                     logger.info(f"✅ Auto-executed {executed} signals, {failed} failed")

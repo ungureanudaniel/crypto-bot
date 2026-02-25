@@ -48,6 +48,21 @@ def calculate_atr(df, length=14):
         logger.error(f"Error calculating ATR: {e}")
         return pd.Series([0] * len(df), index=df.index)
 
+def get_available_balance(symbol, trading_engine):
+    """Get available balance for short positions"""
+    if not trading_engine or not trading_engine.binance_client:
+        return 0
+    
+    base_currency = symbol.split('/')[0]
+    try:
+        account = trading_engine.binance_client.get_account()
+        for balance in account['balances']:
+            if balance['asset'] == base_currency:
+                return float(balance['free'])
+    except:
+        pass
+    return 0
+
 # -------------------------------------------------------------------
 # Signal Generation Functions
 # -------------------------------------------------------------------
@@ -277,11 +292,11 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
 # -------------------------------------------------------------------
 # Main Signal Generator
 # -------------------------------------------------------------------
-
-def generate_trade_signal(df, equity, risk_per_trade=0.02):
+def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, available_balance=None):
     """
     Main function that combines multiple strategies
-    Returns signal dict or None
+    symbol: the trading pair (e.g., "XLM/USDT")
+    available_balance: for shorts, how much of the base currency we own
     """
     try:
         if df.empty or len(df) < 50:
@@ -304,6 +319,18 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02):
                 current_price, equity, risk_per_trade, current_atr, 2.5
             )
             if units > 0:
+                # For short signals, cap by available balance
+                if signal == 'short' and available_balance is not None:
+                    if units > available_balance:
+                        original_units = units
+                        units = available_balance
+                        logger.info(f"🔄 Short position capped: {original_units:.6f} -> {units:.6f} (available {symbol} balance)")
+                        
+                        # If capping to zero, skip
+                        if units <= 0:
+                            logger.info(f"⏭️ No {symbol} balance available for short")
+                            return None
+                
                 return {
                     'side': signal,
                     'entry': current_price,
@@ -321,6 +348,14 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02):
                 current_price, equity, risk_per_trade, current_atr, 2.0
             )
             if units > 0:
+                if signal == 'short' and available_balance is not None:
+                    if units > available_balance:
+                        original_units = units
+                        units = available_balance
+                        logger.info(f"🔄 Short position capped: {original_units:.6f} -> {units:.6f} (available {symbol} balance)")
+                        if units <= 0:
+                            return None
+                
                 return {
                     'side': signal,
                     'entry': current_price,
@@ -338,6 +373,14 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02):
                 current_price, equity, risk_per_trade, current_atr, 2.0
             )
             if units > 0:
+                if signal == 'short' and available_balance is not None:
+                    if units > available_balance:
+                        original_units = units
+                        units = available_balance
+                        logger.info(f"🔄 Short position capped: {original_units:.6f} -> {units:.6f} (available {symbol} balance)")
+                        if units <= 0:
+                            return None
+                
                 return {
                     'side': signal,
                     'entry': current_price,
@@ -355,6 +398,14 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02):
                 current_price, equity, risk_per_trade, current_atr, 2.0
             )
             if units > 0:
+                if signal == 'short' and available_balance is not None:
+                    if units > available_balance:
+                        original_units = units
+                        units = available_balance
+                        logger.info(f"🔄 Short position capped: {original_units:.6f} -> {units:.6f} (available {symbol} balance)")
+                        if units <= 0:
+                            return None
+                
                 return {
                     'side': signal,
                     'entry': current_price,
@@ -368,11 +419,18 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02):
         signal = rsi_signal(df)
         if signal:
             logger.info(f"📊 RSI signal: {signal}")
-            # Tighter stops for mean reversion
             units, sl, tp = calculate_position_units(
                 current_price, equity, risk_per_trade * 0.8, current_atr, 1.5
             )
             if units > 0:
+                if signal == 'short' and available_balance is not None:
+                    if units > available_balance:
+                        original_units = units
+                        units = available_balance
+                        logger.info(f"🔄 Short position capped: {original_units:.6f} -> {units:.6f} (available {symbol} balance)")
+                        if units <= 0:
+                            return None
+                
                 return {
                     'side': signal,
                     'entry': current_price,
@@ -390,6 +448,14 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02):
                 current_price, equity, risk_per_trade * 0.8, current_atr, 1.5
             )
             if units > 0:
+                if signal == 'short' and available_balance is not None:
+                    if units > available_balance:
+                        original_units = units
+                        units = available_balance
+                        logger.info(f"🔄 Short position capped: {original_units:.6f} -> {units:.6f} (available {symbol} balance)")
+                        if units <= 0:
+                            return None
+                
                 return {
                     'side': signal,
                     'entry': current_price,
@@ -406,7 +472,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02):
     except Exception as e:
         logger.error(f"Error in generate_trade_signal: {e}")
         return None
-
+    
 if __name__ == "__main__":
     # Test
     from data_feed import fetch_ohlcv

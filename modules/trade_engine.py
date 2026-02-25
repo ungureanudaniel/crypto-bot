@@ -661,9 +661,29 @@ class TradingEngine:
                     logger.debug(f"⏭️ {symbol}: Insufficient data ({len(df)} candles)")
                     continue
                 
-                # Generate signal
+                # Get available balance for shorts (base currency)
+                available_balance = None
+                base_currency = symbol.split('/')[0]
                 try:
-                    signal = generate_trade_signal(df, cash_balance, self.risk_per_trade)
+                    account = self.binance_client.get_account()
+                    for balance in account['balances']:
+                        if balance['asset'] == base_currency:
+                            available_balance = float(balance['free'])
+                            break
+                    if available_balance is not None and available_balance > 0:
+                        logger.debug(f"💰 {symbol}: {base_currency} balance = {available_balance:.6f}")
+                except Exception as e:
+                    logger.debug(f"Could not get {base_currency} balance: {e}")
+                
+                # Generate signal with symbol and balance info
+                try:
+                    signal = generate_trade_signal(
+                        df, 
+                        cash_balance, 
+                        self.risk_per_trade,
+                        symbol=symbol,
+                        available_balance=available_balance
+                    )
                 except Exception as e:
                     logger.error(f"❌ Error generating signal for {symbol}: {e}")
                     continue
@@ -678,10 +698,15 @@ class TradingEngine:
                             'signal': signal
                         })
                         self.last_signals[symbol] = signal_key
-                        logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} {signal['side']} signal at ${signal['entry']:.2f}")
+                        
+                        # Enhanced logging with balance info for shorts
+                        if signal['side'] == 'short' and available_balance:
+                            logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} SHORT signal at ${signal['entry']:.2f} (using {signal['units']:.6f} of {available_balance:.6f} available)")
+                        else:
+                            logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} {signal['side']} signal at ${signal['entry']:.2f}")
                     else:
                         logger.info(f"⏭️ {symbol}: Duplicate signal skipped")
-                
+                    
             except Exception as e:
                 logger.error(f"❌ Error scanning {symbol}: {e}")
         
@@ -717,21 +742,6 @@ class TradingEngine:
             logger.info(f"   Stop: ${signal.get('stop_loss', 0):.2f}")
             logger.info(f"   Target: ${signal.get('take_profit', 0):.2f}")
             
-            # Check cash balance before executing
-            cash = self.get_cash_balance()
-            cost = signal['units'] * signal['entry']
-            logger.info(f"   Cash: ${cash:.2f}, Cost: ${cost:.2f}")
-            
-            if cash < cost:
-                logger.warning(f"⚠️ Insufficient funds: Need ${cost:.2f}, have ${cash:.2f}")
-                return False
-            
-            # Check minimum order value
-            min_order = 10
-            if cost < min_order:
-                logger.warning(f"⚠️ Order value ${cost:.2f} below minimum ${min_order}")
-                return False
-            
             # Check if we already have a position
             if symbol in self.open_positions:
                 logger.warning(f"⚠️ Already in position for {symbol}")
@@ -741,6 +751,44 @@ class TradingEngine:
             if len(self.open_positions) >= self.max_positions:
                 logger.warning(f"⚠️ At max positions ({self.max_positions})")
                 return False
+            
+            # Different checks based on side
+            if signal['side'] == 'long':
+                # For LONG positions, check USDT balance
+                cash = self.get_cash_balance()
+                cost = signal['units'] * signal['entry']
+                logger.info(f"   Cash: ${cash:.2f}, Cost: ${cost:.2f}")
+                
+                if cash < cost:
+                    logger.warning(f"⚠️ Insufficient funds: Need ${cost:.2f}, have ${cash:.2f}")
+                    return False
+                
+                # Check minimum order value
+                min_order = 10
+                if cost < min_order:
+                    logger.warning(f"⚠️ Order value ${cost:.2f} below minimum ${min_order}")
+                    return False
+                    
+            elif signal['side'] == 'short':
+                # For SHORT positions, check base currency balance
+                base_currency = symbol.split('/')[0]
+                try:
+                    account = self.binance_client.get_account()
+                    asset_balance = 0
+                    for balance in account['balances']:
+                        if balance['asset'] == base_currency:
+                            asset_balance = float(balance['free'])
+                            break
+                    
+                    logger.info(f"   {base_currency} balance: {asset_balance:.6f}, Required: {signal['units']:.6f}")
+                    
+                    if asset_balance < signal['units']:
+                        logger.warning(f"⚠️ Insufficient {base_currency}: have {asset_balance:.6f}, need {signal['units']:.6f}")
+                        return False
+                        
+                except Exception as e:
+                    logger.error(f"❌ Error checking {base_currency} balance: {e}")
+                    return False
             
             # Execute the position opening
             result = self.open_position(
@@ -758,7 +806,7 @@ class TradingEngine:
                 logger.warning(f"❌ Failed to open position for {symbol}")
             
             return result
-        
+            
         except Exception as e:
             logger.error(f"❌ Error executing signal: {e}")
             import traceback
