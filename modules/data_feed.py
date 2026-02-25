@@ -1,6 +1,6 @@
-# data_feed.py - NO PAPER FALLBACK, FAILS FAST ON CONNECTION ISSUES
 import sys
 import os
+# Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import logging
@@ -19,12 +19,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
-# CONFIG LOADING - NO DEFAULTS, RAISES ERRORS
+# CONFIG LOADING
 # -------------------------------------------------------------------
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# This will raise ImportError if config_loader not found
 CONFIG = config.config
 client = get_binance_client()
 

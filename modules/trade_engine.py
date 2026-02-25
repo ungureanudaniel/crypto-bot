@@ -1,5 +1,6 @@
 import sys
 import os
+# Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import logging
@@ -98,15 +99,12 @@ def get_total_portfolio_value(client, symbols: List[str]) -> Dict:
     if not client:
         return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
     
-    # Build set of base currencies we care about (from symbols parameter)
-    # symbols contains e.g. ["SOL/USDT", "BTC/USDT", ...]
+    # Build set of base currencies we care about
     base_currencies = set()
     for sym in symbols:
         base = sym.split('/')[0]
         base_currencies.add(base)
-    # Always include the quote currency (USDT) and maybe USDC if used
     base_currencies.add('USDT')
-    # If you also hold USDC and want it valued, add 'USDC'
     # base_currencies.add('USDC')
 
     try:

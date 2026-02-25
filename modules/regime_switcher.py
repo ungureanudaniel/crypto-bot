@@ -1,4 +1,3 @@
-# modules/regime_switcher.py - FIXED VERSION
 import pandas as pd
 import numpy as np
 import sys
@@ -78,7 +77,7 @@ def fetch_data_for_regime(symbol, interval="1h", limit=500):
         return pd.DataFrame()
 
 # ---------------------------
-# Feature Engineering - OPTIMIZED
+# Feature Engineering
 # ---------------------------
 def add_features(df, required_features=None):
     """Add technical indicators as features - OPTIMIZED VERSION"""
@@ -237,7 +236,7 @@ def ensure_features(df):
         return df
 
 # ---------------------------
-# Model Training - FIXED
+# Model Training
 # ---------------------------
 def train_model():
     """Train an XGBoost classifier - FIXED VERSION WITH BETTER CLASS HANDLING"""

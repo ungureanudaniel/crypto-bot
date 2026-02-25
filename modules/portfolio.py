@@ -1,4 +1,3 @@
-# portfolio.py - ONLY for trade history, NOT balances
 import json
 import os
 from datetime import datetime
@@ -16,7 +15,7 @@ def load_portfolio():
     
     # Default structure
     return {
-        "initial_balance": None,  # Will be set on first trade/sync
+        "initial_balance": None,
         "trade_history": [],
         "performance_metrics": {
             "total_trades": 0,
@@ -43,7 +42,12 @@ def add_trade(trade):
     
     # Add to history
     portfolio["trade_history"].append(trade)
+
+    # Keep only last 1000 trades to prevent file bloat    
+    if len(portfolio["trade_history"]) > 1000:
+        portfolio["trade_history"] = portfolio["trade_history"][-1000:]
     
+
     # Update metrics if it's a closed trade
     if trade.get("action") == "close" and "pnl" in trade:
         metrics = portfolio["performance_metrics"]
@@ -59,8 +63,7 @@ def add_trade(trade):
     
     # Set initial balance if not set
     if portfolio["initial_balance"] is None and trade.get("action") == "open":
-        # This is approximate - better to set explicitly
-        pass
+        portfolio["initial_balance"] = trade.get("amount", 0)
     
     save_portfolio(portfolio)
     return portfolio
