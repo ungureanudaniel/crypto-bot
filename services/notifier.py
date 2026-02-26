@@ -53,11 +53,12 @@ class Notifier:
             # Truncate very long messages (Telegram limit: 4096 chars)
             if len(message) > 4000:
                 message = message[:4000] + "... (truncated)"
-            
+            # Ensure chat_id is int
+            chat_id = int(self.chat_id) if not isinstance(self.chat_id, int) else self.chat_id
+
             await self.bot.send_message(
-                chat_id=int(self.chat_id),
+                chat_id=chat_id,
                 text=message,
-                parse_mode='html'
             )
             
             logger.info(f"📤 Message sent: {message[:50]}...")

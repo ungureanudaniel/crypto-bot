@@ -9,7 +9,6 @@ import time
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from services.scheduler import start_scheduler
 import concurrent.futures
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
