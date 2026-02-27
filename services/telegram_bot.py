@@ -146,46 +146,99 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error starting bot")
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show compact balance"""
+    """Show balance with debug info"""
+    await update.message.reply_text("💰 Fetching balance...", parse_mode='Markdown')
+    
     try:
         from modules.trade_engine import trading_engine
         
-        # Get summary
-        summary = trading_engine.get_portfolio_summary()
+        # Debug: Check if trading_engine exists
+        logger.info("🔍 BALANCE DEBUG - Starting balance check")
+        logger.info(f"   trading_engine exists: {trading_engine is not None}")
         
-        # Build compact message
-        lines = [
-            f"💰 *Balance*",
-            f"┌────────────────",
-            f"│ Total: `${summary['portfolio_value']:,.0f}`",
-            f"│ Cash: `${summary['cash_balance']:,.0f}`",
-            f"│ Return: `{summary['total_return_pct']:+.1f}%`",
-        ]
+        if not trading_engine:
+            await update.message.reply_text("❌ Trading engine not initialized")
+            return
         
-        # Add holdings as compact list
+        # Debug: Check binance_client
+        logger.info(f"   binance_client exists: {trading_engine.binance_client is not None}")
+        
+        if not trading_engine.binance_client:
+            await update.message.reply_text("❌ Not connected to exchange")
+            return
+        
+        # Try to get cash balance first
+        try:
+            cash = trading_engine.get_cash_balance()
+            logger.info(f"   get_cash_balance() returned: ${cash}")
+        except Exception as e:
+            logger.error(f"   ❌ get_cash_balance() failed: {e}")
+            cash = 0
+        
+        # Try to get portfolio value
+        try:
+            portfolio_value = trading_engine.get_total_portfolio_value()
+            logger.info(f"   get_portfolio_value() returned: {portfolio_value}")
+        except Exception as e:
+            logger.error(f"   ❌ get_portfolio_value() failed: {e}")
+            portfolio_value = {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
+        
+        # Try to get full summary
+        try:
+            summary = trading_engine.get_portfolio_summary()
+            logger.info(f"   get_portfolio_summary() returned: {summary is not None}")
+        except Exception as e:
+            logger.error(f"   ❌ get_portfolio_summary() failed: {e}")
+            summary = None
+        
+        if not summary:
+            # Fallback to manual summary
+            summary = {
+                'trading_mode': trading_engine.trading_mode,
+                'cash_balance': portfolio_value.get('cash_usdt', cash),
+                'holdings': portfolio_value.get('holdings', {}),
+                'portfolio_value': portfolio_value.get('total_usdt', cash),
+                'initial_balance': getattr(trading_engine, 'initial_total_value', cash),
+                'total_return': 0,
+                'total_return_pct': 0,
+                'active_positions': len(trading_engine.open_positions),
+                'total_trades': 0,
+                'winning_trades': 0,
+                'win_rate': 0,
+                'total_pnl': 0,
+                'last_sync': datetime.now().isoformat()
+            }
+        
+        # Format the response
+        response = (
+            f"💰 *Portfolio Balance*\n\n"
+            f"Total Value: `${summary.get('portfolio_value', 0):,.2f}`\n"
+            f"Cash: `${summary.get('cash_balance', 0):,.2f}`\n"
+            f"Return: `{summary.get('total_return_pct', 0):+.1f}%`\n"
+        )
+        
+        # Add holdings if any
         holdings = summary.get('holdings', {})
-        if holdings and len(holdings) > 1:
-            lines.append(f"│")
+        if holdings and len(holdings) > 1:  # More than just USDT
+            response += "\n📊 *Holdings:*\n"
             for asset, data in holdings.items():
-                if asset == 'USDT':
-                    continue
-                if isinstance(data, dict):
-                    amount = data.get('amount', 0)
-                    value = data.get('value_usdt', 0)
-                    if amount > 0.001:  # Only show meaningful amounts
-                        lines.append(f"│ {asset}: {amount:.1f} (${value:,.0f})")
-                else:
-                    if float(data) > 0.001:
-                        lines.append(f"│ {asset}: {data}")
+                if asset != 'USDT':
+                    if isinstance(data, dict):
+                        amount = data.get('amount', 0)
+                        value = data.get('value_usdt', 0)
+                        if amount > 0:
+                            response += f"   • {asset}: {amount:.4f} (${value:,.2f})\n"
+                    else:
+                        if float(data) > 0:
+                            response += f"   • {asset}: {data}\n"
         
-        lines.append(f"└────────────────")
-        lines.append(f"⏱️ {datetime.now().strftime('%H:%M:%S')}")
-        
-        await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+        await update.message.reply_text(response, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Balance error: {e}")
-        await update.message.reply_text("❌ Error fetching balance")
+        logger.error(f"❌ Balance error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick portfolio summary"""

@@ -290,12 +290,20 @@ class TradingEngine:
             }
     
     def get_cash_balance(self) -> float:
-        """Get USDC/USDT balance directly from exchange"""
-        if self.trading_mode in ['live', 'testnet'] and self.binance_client:
-            return get_usdt_balance(self.binance_client)
-        else:
-            logger.info("Not able to fetch real cash balance!")
-            return 0.0
+        """Get USDT balance directly from exchange"""
+        if not self.binance_client:
+            logger.error("No binance client available")
+            return 0
+        try:
+            account = self.binance_client.get_account()
+            for balance in account['balances']:
+                if balance['asset'] == 'USDT':
+                    return float(balance['free'])
+            logger.debug("No USDT balance found")
+            return 0
+        except Exception as e:
+            logger.error(f"Error fetching USDT balance: {e}")
+            return 0
 
     def get_current_prices(self) -> Dict[str, float]:
         """Get current prices for all symbols"""
