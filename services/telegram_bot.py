@@ -1065,7 +1065,7 @@ def run_telegram_bot():
         application.run_polling(
             drop_pending_updates=True,
             poll_interval=1.0,
-            timeout=30
+            timeout=40
         )
     except (KeyboardInterrupt, SystemExit):
         logger.info("🛑 Bot stopped by user")
