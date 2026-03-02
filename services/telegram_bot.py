@@ -209,7 +209,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"❌ Paper balance error: {e}")
                 await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
-                return
+            return
 
         if not trading_engine.binance_client:
             await update.message.reply_text("❌ Not connected to exchange")
@@ -260,13 +260,53 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quick portfolio summary"""
+    """Quick portfolio summary - works in both paper and live mode"""
     try:
         from modules.trade_engine import trading_engine
         
+        # PAPER MODE - get summary from portfolio
+        if trading_engine.trading_mode == 'paper':
+            try:
+                from modules.portfolio import load_portfolio, get_performance_summary
+                portfolio = load_portfolio()
+                perf = get_performance_summary()
+                
+                cash = portfolio.get('cash_balance', 0)
+                holdings = portfolio.get('holdings', {})
+                initial = portfolio.get('initial_balance', cash)
+                
+                # Calculate total value with current prices
+                total_value = cash
+                for asset, amount in holdings.items():
+                    if asset != 'USDT' and amount > 0:
+                        from modules.data_feed import get_current_price
+                        price = get_current_price(asset + '/USDT')
+                        if price:
+                            total_value += amount * price
+                
+                total_return = total_value - initial
+                total_return_pct = (total_return / initial * 100) if initial > 0 else 0
+                pnl_emoji = "🟢" if total_return_pct >= 0 else "🔴"
+                
+                message = (
+                    f"{pnl_emoji} *Paper Portfolio*: `${total_value:,.0f}` "
+                    f"({total_return_pct:+.1f}%) | "
+                    f"💵 Cash: `${cash:,.0f}` | "
+                    f"📊 {len(holdings)} holdings | "
+                    f"🎯 {perf.get('win_rate', 0):.0f}% win rate"
+                )
+                
+                await update.message.reply_text(message, parse_mode='Markdown')
+                return
+                
+            except Exception as e:
+                logger.error(f"❌ Paper summary error: {e}")
+                await update.message.reply_text("❌ Error getting paper summary")
+                return
+        
+        # LIVE/TESTNET MODE
         summary = trading_engine.get_portfolio_summary()
         
-        # One-line summary
         pnl_emoji = "🟢" if summary['total_return_pct'] >= 0 else "🔴"
         
         message = (
@@ -279,6 +319,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message, parse_mode='Markdown')
         
     except Exception as e:
+        logger.error(f"❌ Summary error: {e}")
         await update.message.reply_text("❌ Error")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):

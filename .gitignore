@@ -11,5 +11,9 @@ logs/
 config.json
 
 portfolio.json
+trade_history.json
+daily_performance.log
+*.log
+
 .pyc
 __pycache__/
