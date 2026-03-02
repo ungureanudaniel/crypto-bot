@@ -150,6 +150,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💰 Fetching balance...", parse_mode='Markdown')
     
     try:
+        logger.info("  ... importing trading_engine for balance command")
         from modules.trade_engine import trading_engine
         
         # Debug: Check if trading_engine exists
