@@ -47,6 +47,10 @@ class Config:
             env_config['binance_api_key'] = api_key
             env_config['binance_api_secret'] = api_secret
             
+        elif trading_mode == 'paper':
+            env_config['binance_api_key'] = ''
+            env_config['binance_api_secret'] = ''
+            
         elif trading_mode == 'testnet':
             api_key = os.getenv('BINANCE_TESTNET_API_KEY')
             api_secret = os.getenv('BINANCE_TESTNET_PRIVATE_KEY')
@@ -55,17 +59,17 @@ class Config:
             env_config['binance_api_key'] = api_key
             env_config['binance_api_secret'] = api_secret
         else:
-            raise ValueError(f"❌ CRITICAL: Invalid TRADING_MODE '{trading_mode}'. Must be 'live' or 'testnet'")
+            raise ValueError(f"❌ CRITICAL: Invalid TRADING_MODE '{trading_mode}'. Must be 'live', 'testnet', or 'paper'")
         
         # 4. Merge configs
         merged_config = {**file_config, **env_config}
         
         # 5. Set derived values
         merged_config['live_trading'] = trading_mode == 'live'
-        merged_config['testnet'] = trading_mode == 'testnet'
+        merged_config['paper_trading'] = trading_mode == 'paper'
         
         # 6. Set API URLs
-        if merged_config['testnet']:
+        if merged_config['paper_trading']:
             merged_config['binance_api_url'] = 'https://testnet.binance.vision/api'
         else:
             merged_config['binance_api_url'] = 'https://api.binance.com'
@@ -102,19 +106,30 @@ def get_binance_client():
     if _binance_client is not None:
         return _binance_client
 
+    trading_mode = config.config['trading_mode'].lower()
+    
+    # PAPER MODE: Return None (no client needed)
+    if trading_mode == 'paper':
+        logger.info("📄 Paper mode - no Binance client needed")
+        _binance_client = None
+        return None
+
+    # For live/testnet, require API keys
+    api_key = config.config.get('binance_api_key')
+    api_secret = config.config.get('binance_api_secret')
+    
+    if not api_key or not api_secret:
+        raise ValueError(f"❌ CRITICAL: API keys required for {trading_mode} mode")
+
     from binance.client import Client
     from binance.exceptions import BinanceAPIException
-
-    trading_mode = config.config['trading_mode'].lower()
-    api_key = config.config['binance_api_key']
-    api_secret = config.config['binance_api_secret']
 
     logger.info(f"Initializing shared Binance client for {trading_mode} mode")
 
     try:
         if trading_mode == 'testnet':
             client = Client(api_key, api_secret, testnet=True)
-        else:
+        else:  # live mode
             client = Client(api_key, api_secret)
 
         # Test connection – fail fast
