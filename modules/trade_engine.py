@@ -190,7 +190,7 @@ class TradingEngine:
     def __init__(self):
         self.config = CONFIG
         self.data_feed = data_feed
-        self.trading_mode = self.config.get('trading_mode', 'testnet').lower()
+        self.trading_mode = self.config.get('trading_mode', 'paper').lower()
         self.symbols = self.config.get('coins', ['BTC/USDC', 'ETH/USDC'])
         self.timeframe = self.config.get('trading_timeframe', '15m')
         self.max_positions = self.config.get('max_positions', 3)
@@ -381,8 +381,8 @@ class TradingEngine:
             pnl = (entry_price - exit_price) * amount
             pnl_pct = (1 - exit_price / entry_price) * 100
         
-        # Execute REAL trade if in live/testnet mode
-        if self.trading_mode in ['live', 'testnet'] and self.binance_client:
+        # Execute REAL trade if in live/paper mode
+        if self.trading_mode in ['live', 'paper'] and self.binance_client:
             try:
                 binance_symbol = symbol.replace('/', '')
                 
@@ -470,8 +470,43 @@ class TradingEngine:
         
         base_currency = symbol.split('/')[0]
         
-        # For LIVE/TESTNET mode
-        if self.trading_mode in ['live', 'testnet'] and self.binance_client:
+        # PAPER MODE
+        if self.trading_mode == 'paper':
+            # Simulate the trade without real exchange
+            logger.info(f"📄 PAPER TRADE: {side.upper()} {units:.6f} {symbol} at ${entry_price:.2f}")
+            
+            # You could update paper portfolio here if needed
+            # from portfolio import update_paper_balance
+            # update_paper_balance(base_currency, units, entry_price, "buy" if side=='long' else "sell")
+            
+            # Skip to adding position
+            self.open_positions[symbol] = {
+                'side': side,
+                'amount': units,
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'entry_time': datetime.now().isoformat(),
+                'mode': self.trading_mode
+            }
+            
+            add_trade({
+                'symbol': symbol,
+                'action': 'open',
+                'side': side,
+                'amount': units,
+                'price': entry_price,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'mode': self.trading_mode
+            })
+            
+            logger.info(f"✅ Paper position opened")
+            return True
+
+
+        # For LIVE/PAPER mode
+        if self.trading_mode in ['live', 'paper'] and self.binance_client:
             try:
                 binance_symbol = symbol.replace('/', '')
                 
@@ -552,53 +587,52 @@ class TradingEngine:
             except Exception as e:
                 logger.error(f"❌ Failed to execute live order: {e}")
                 return False
-        
-            # Add to open positions (in-memory tracking)
-            self.open_positions[symbol] = {
-                'side': side,
-                'amount': units,
-                'entry_price': entry_price,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'entry_time': datetime.now().isoformat(),
-                'mode': self.trading_mode
-            }
-            
-            # Record trade in history
-            add_trade({
-                'symbol': symbol,
-                'action': 'open',
-                'side': side,
-                'amount': units,
-                'price': entry_price,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'mode': self.trading_mode
-            })
-            
-            # Send notification
-            if has_notifier:
-                try:
-                    asyncio.create_task(notifier.send_trade_notification({
-                        'symbol': symbol,
-                        'side': 'SHORT' if side == 'short' else 'LONG',
-                        'price': entry_price,
-                        'amount': units,
-                        'stop_loss': stop_loss,
-                        'take_profit': take_profit,
-                        'mode': self.trading_mode
-                    }))
-                except:
-                    pass
-            
-            logger.info(f"✅ Opened {side.upper()} position: {units:.6f} {symbol} at ${entry_price:.2f}")
-            return True
-
         # connection issues
         else:
-            logger.warning("⚠️ Possible binance connection issues - no live or testnet orders executed")
+            logger.warning("⚠️ Possible binance connection issues - no live or paper orders executed")
             return False
-    
+        
+        # Add to open positions (in-memory tracking)
+        self.open_positions[symbol] = {
+            'side': side,
+            'amount': units,
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'entry_time': datetime.now().isoformat(),
+            'mode': self.trading_mode
+        }
+        
+        # Record trade in history
+        add_trade({
+            'symbol': symbol,
+            'action': 'open',
+            'side': side,
+            'amount': units,
+            'price': entry_price,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'mode': self.trading_mode
+        })
+        
+        # Send notification
+        if has_notifier:
+            try:
+                asyncio.create_task(notifier.send_trade_notification({
+                    'symbol': symbol,
+                    'side': 'SHORT' if side == 'short' else 'LONG',
+                    'price': entry_price,
+                    'amount': units,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'mode': self.trading_mode
+                }))
+            except:
+                pass
+        
+        logger.info(f"✅ Opened {side.upper()} position: {units:.6f} {symbol} at ${entry_price:.2f}")
+        return True
+ 
     def validate_and_adjust_order(self, symbol: str, quantity: float) -> Tuple[bool, float, str]:
         """
         Validate and adjust order quantity to meet LOT_SIZE requirements

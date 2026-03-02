@@ -1,3 +1,7 @@
+import sys
+import os
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from modules.ml_integration import MLStrategy
 import pandas as pd
 import numpy as np
@@ -7,6 +11,7 @@ from modules.sentiment_agent import SentimentAgent
 from ta.volatility import BollingerBands
 from ta.trend import MACD
 from ta.momentum import RSIIndicator
+from modules.data_feed import fetch_ohlcv
 
 logger = logging.getLogger(__name__)
 ml_strategies = {}
@@ -49,18 +54,35 @@ def calculate_atr(df, length=14):
         return pd.Series([0] * len(df), index=df.index)
 
 def get_available_balance(symbol, trading_engine):
-    """Get available balance for short positions"""
+    """
+    Get available balance for short positions.
+    For shorts, we need to know how much of the base currency we have to borrow/sell.
+    """
+    base_currency = symbol.split('/')[0]
+
+    # PAPER MODE: Check paper portfolio
+    if trading_engine and trading_engine.trading_mode == 'paper':
+        try:
+            from portfolio import load_portfolio
+            portfolio = load_portfolio()
+            # Get holdings from paper portfolio
+            holdings = portfolio.get('holdings', {})
+            return holdings.get(base_currency, 0)
+        except Exception as e:
+            logger.debug(f"Could not get paper balance for {base_currency}: {e}")
+            return 0
+    # LIVE MODE: Check real exchange balance
     if not trading_engine or not trading_engine.binance_client:
         return 0
     
-    base_currency = symbol.split('/')[0]
     try:
         account = trading_engine.binance_client.get_account()
         for balance in account['balances']:
             if balance['asset'] == base_currency:
                 return float(balance['free'])
-    except:
-        pass
+    except Exception as e:
+        logger.debug(f"Could not get live balance for {base_currency}: {e}")
+    
     return 0
 
 # -------------------------------------------------------------------
@@ -164,7 +186,7 @@ def macd_signal(df):
 def ema_crossover_signal(df, fast=9, slow=21):
     """
     EMA crossover signal
-    Returns: 'long', 'short', or None
+    Returns: 'long', 'short' or None
     """
     try:
         ema_fast = df['close'].ewm(span=fast).mean()
@@ -234,7 +256,7 @@ def volume_breakout_signal(df):
         return None
 
 # -------------------------------------------------------------------
-# Position Sizing (Only calculates - execution in trade_engine)
+# Position Sizing (Only calculates, but execution in trade_engine.py)
 # -------------------------------------------------------------------
 def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None, stop_atr_multiplier: float = 2):
     """
@@ -292,7 +314,7 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
 # -------------------------------------------------------------------
 # Main Signal Generator
 # -------------------------------------------------------------------
-def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, available_balance=None):
+def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_engine=None):
     """
     Main function that combines multiple strategies
     symbol: the trading pair (e.g., "XLM/USDT")
@@ -309,8 +331,13 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, availabl
         
         current_price = df['close'].iloc[-1]
         
-        # Try each strategy in order of preference
-        
+        # Get available balance for shorts if we have trading_engine
+        available_balance = None
+        if symbol and trading_engine:
+            available_balance = get_available_balance(symbol, trading_engine)
+            if available_balance > 0:
+                logger.debug(f"💰 {symbol} available for short: {available_balance:.6f}")
+
         # 1. Breakout signal (most powerful)
         signal = breakout_signal(df, lookback=20)
         if signal:
@@ -415,7 +442,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, availabl
                     'signal_type': 'macd_crossover'
                 }
         
-        # 5. RSI (mean reversion)
+        # 5. RSI
         signal = rsi_signal(df)
         if signal:
             logger.info(f"📊 RSI signal: {signal}")
@@ -440,7 +467,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, availabl
                     'signal_type': 'rsi'
                 }
         
-        # 6. Bollinger Bands (mean reversion)
+        # 6. Bollinger Bands
         signal = bollinger_band_signal(df)
         if signal:
             logger.info(f"📊 Bollinger Band signal: {signal}")
@@ -474,13 +501,273 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, availabl
         return None
     
 if __name__ == "__main__":
-    # Test
-    from data_feed import fetch_ohlcv
+    import sys
+    import os
+    from datetime import datetime, timedelta
+    import time
     
-    df = fetch_ohlcv("BTC/USDC", interval='1h', limit=200)
-    if not df.empty:
-        signal = generate_trade_signal(df, equity=10000)
-        if signal:
-            print(f"✅ Signal: {signal}")
+    print("=" * 60)
+    print("🧪 STRATEGY TOOLS COMPREHENSIVE TEST")
+    print("=" * 60)
+    
+    # Test configuration
+    test_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    test_timeframes = ["15m", "1h", "4h"]
+    test_equity = 10000
+    
+    # Create a mock trading engine for balance tests
+    class MockTradingEngine:
+        def __init__(self):
+            self.trading_mode = "paper"
+            self.binance_client = None
+    
+    mock_engine = MockTradingEngine()
+    
+    print(f"\n📊 Test Parameters:")
+    print(f"   Symbols: {test_symbols}")
+    print(f"   Timeframes: {test_timeframes}")
+    print(f"   Equity: ${test_equity}")
+    print(f"   Mode: {mock_engine.trading_mode}")
+    
+    # Test 1: Individual strategy functions
+    print("\n" + "=" * 60)
+    print("📈 TEST 1: Individual Strategy Functions")
+    print("=" * 60)
+    
+    for symbol in test_symbols:
+        print(f"\n🔍 Testing {symbol}...")
+        
+        for interval in test_timeframes:
+            print(f"   ⏱️  Timeframe: {interval}")
+            
+            # Fetch data
+            from data_feed import fetch_ohlcv
+            df = fetch_ohlcv(symbol, interval=interval, limit=200)
+            
+            if df.empty or len(df) < 50:
+                print(f"      ❌ Insufficient data ({len(df)} candles)")
+                continue
+            
+            print(f"      ✅ Data fetched: {len(df)} candles")
+            print(f"      Latest price: ${df['close'].iloc[-1]:.2f}")
+            
+            # Test each strategy
+            strategies = [
+                ("Breakout", lambda: breakout_signal(df)),
+                ("RSI", lambda: rsi_signal(df)),
+                ("MACD", lambda: macd_signal(df)),
+                ("EMA Crossover", lambda: ema_crossover_signal(df)),
+                ("Bollinger", lambda: bollinger_band_signal(df)),
+                ("Volume Breakout", lambda: volume_breakout_signal(df))
+            ]
+            
+            for name, func in strategies:
+                try:
+                    signal = func()
+                    if signal:
+                        print(f"      ✅ {name}: {signal.upper()}")
+                    else:
+                        print(f"      ⚪ {name}: No signal")
+                except Exception as e:
+                    print(f"      ❌ {name} error: {e}")
+            
+            # Small delay to avoid rate limiting
+            time.sleep(0.5)
+    
+    # Test 2: Position sizing
+    print("\n" + "=" * 60)
+    print("💰 TEST 2: Position Sizing Calculator")
+    print("=" * 60)
+    
+    test_prices = [50000, 3000, 100, 10, 1]
+    test_atr_values = [1000, 100, 10, 1, 0.1]
+    
+    for i, price in enumerate(test_prices):
+        atr = test_atr_values[i] if i < len(test_atr_values) else price * 0.02
+        
+        print(f"\n📊 Entry Price: ${price:.2f}, ATR: ${atr:.2f}")
+        
+        units, sl, tp = calculate_position_units(
+            entry_price=price,
+            equity=test_equity,
+            risk_per_trade=0.02,
+            atr=atr,
+            stop_atr_multiplier=2
+        )
+        
+        if units > 0:
+            print(f"   ✅ Units: {units:.6f}")
+            print(f"   ✅ Stop Loss: ${sl:.2f} ({(1-sl/price)*100:.1f}% loss)")
+            print(f"   ✅ Take Profit: ${tp:.2f} ({(tp/price-1)*100:.1f}% gain)")
+            print(f"   ✅ Position Value: ${units * price:.2f}")
+            print(f"   ✅ Risk Amount: ${test_equity * 0.02:.2f}")
         else:
-            print("❌ No signal")
+            print(f"   ⚪ Position too small (min ${10/price:.6f} units)")
+    
+    # Test 3: Full signal generation with balance awareness
+    print("\n" + "=" * 60)
+    print("🎯 TEST 3: Full Signal Generation with Balance Awareness")
+    print("=" * 60)
+    
+    # We'll use the get_available_balance function to test different scenarios
+    # by monkey-patching it temporarily
+    
+    original_get_available_balance = get_available_balance
+    
+    for symbol in test_symbols:
+        print(f"\n🔍 Testing {symbol}...")
+        
+        # Fetch data
+        from data_feed import fetch_ohlcv
+        df = fetch_ohlcv(symbol, interval="1h", limit=200)
+        
+        if df.empty:
+            continue
+        
+        # Test with different balance scenarios by mocking the get_available_balance function
+        balance_scenarios = [
+            ("No balance (returns 0)", 0),
+            ("Has balance (100 units)", 100),
+            ("Small balance (10 units)", 10),
+        ]
+        
+        for scenario_name, mock_balance in balance_scenarios:
+            print(f"\n   📊 Scenario: {scenario_name}")
+            
+            # Mock the get_available_balance function for this test
+            def mock_get_balance(sym, engine, balance=mock_balance):
+                return balance
+            
+            # Temporarily replace the function
+            import modules.strategy_tools
+            modules.strategy_tools.get_available_balance = mock_get_balance
+            
+            try:
+                signal = generate_trade_signal(
+                    df=df,
+                    equity=test_equity,
+                    risk_per_trade=0.02,
+                    symbol=symbol,
+                    trading_engine=mock_engine
+                )
+                
+                if signal:
+                    print(f"      ✅ Signal generated!")
+                    print(f"         Type: {signal.get('signal_type', 'unknown')}")
+                    print(f"         Side: {signal.get('side', 'unknown')}")
+                    print(f"         Entry: ${signal.get('entry', 0):.2f}")
+                    print(f"         Units: {signal.get('units', 0):.6f}")
+                    print(f"         Stop: ${signal.get('stop_loss', 0):.2f}")
+                    print(f"         Target: ${signal.get('take_profit', 0):.2f}")
+                else:
+                    print(f"      ⚪ No signal generated")
+            finally:
+                # Restore original function
+                modules.strategy_tools.get_available_balance = original_get_available_balance
+    
+    # Test 4: Multiple timeframes
+    print("\n" + "=" * 60)
+    print("⏱️  TEST 4: Multiple Timeframe Analysis")
+    print("=" * 60)
+    
+    symbol = "BTC/USDT"
+    print(f"\n🔍 Analyzing {symbol} across timeframes...")
+    
+    signals_by_tf = {}
+    
+    for interval in test_timeframes:
+        from data_feed import fetch_ohlcv
+        df = fetch_ohlcv(symbol, interval=interval, limit=200)
+        
+        if df.empty:
+            continue
+        
+        signal = generate_trade_signal(
+            df=df,
+            equity=test_equity,
+            risk_per_trade=0.02,
+            symbol=symbol,
+            trading_engine=mock_engine
+        )
+        
+        if signal:
+            signals_by_tf[interval] = signal
+            print(f"\n   ⏱️  {interval}: {signal['side'].upper()} {signal['signal_type']} at ${signal['entry']:.2f}")
+        else:
+            print(f"\n   ⏱️  {interval}: No signal")
+    
+    # Check for alignment across timeframes
+    if len(signals_by_tf) > 1:
+        sides = [s['side'] for s in signals_by_tf.values()]
+        if all(side == sides[0] for side in sides):
+            print(f"\n   ✅ All timeframes agree on {sides[0].upper()}!")
+        else:
+            print(f"\n   ⚠️  Timeframes show mixed signals: {sides}")
+    
+    # Test 5: Performance metrics
+    print("\n" + "=" * 60)
+    print("📊 TEST 5: Signal Generation Speed")
+    print("=" * 60)
+    
+    symbol = "BTC/USDT"
+    from data_feed import fetch_ohlcv
+    df = fetch_ohlcv(symbol, interval="1h", limit=200)
+    
+    if not df.empty:
+        iterations = 10  # Reduced for speed
+        start_time = time.time()
+        
+        for i in range(iterations):
+            signal = generate_trade_signal(
+                df=df,
+                equity=test_equity,
+                risk_per_trade=0.02,
+                symbol=symbol,
+                trading_engine=mock_engine
+            )
+        
+        elapsed = time.time() - start_time
+        print(f"\n   ⏱️  Generated {iterations} signals in {elapsed:.2f} seconds")
+        print(f"   ⚡ Average: {elapsed/iterations*1000:.2f} ms per signal")
+    
+    # Test 6: Edge cases
+    print("\n" + "=" * 60)
+    print("⚠️  TEST 6: Edge Cases")
+    print("=" * 60)
+    
+    from data_feed import fetch_ohlcv
+    df = fetch_ohlcv("BTC/USDT", interval="1h", limit=200)
+    
+    edge_cases = [
+        ("Empty DataFrame", pd.DataFrame()),
+        ("Insufficient data", pd.DataFrame({'close': [1,2,3]})),
+        ("Zero equity", 0),
+        ("Negative equity", -1000),
+        ("Zero risk", 0),
+    ]
+    
+    for case_name, case_data in edge_cases:
+        print(f"\n   📋 Testing: {case_name}")
+        
+        if case_name == "Empty DataFrame":
+            result = generate_trade_signal(case_data, test_equity, trading_engine=mock_engine)
+        elif case_name == "Insufficient data":
+            result = generate_trade_signal(case_data, test_equity, trading_engine=mock_engine)
+        elif case_name == "Zero equity":
+            result = generate_trade_signal(df, 0, trading_engine=mock_engine)
+        elif case_name == "Negative equity":
+            result = generate_trade_signal(df, -1000, trading_engine=mock_engine)
+        elif case_name == "Zero risk":
+            result = generate_trade_signal(df, test_equity, 0, trading_engine=mock_engine)
+        
+        if result is None:
+            print(f"      ✅ Handled correctly (returned None)")
+        else:
+            print(f"      ⚠️  Returned signal: {result}")
+    
+    # Restore original function
+    modules.strategy_tools.get_available_balance = original_get_available_balance
+    
+    print("\n" + "=" * 60)
+    print("✅ STRATEGY TOOLS TEST COMPLETE")
+    print("=" * 60)
