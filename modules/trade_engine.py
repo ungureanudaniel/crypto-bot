@@ -847,7 +847,7 @@ class TradingEngine:
                         cash_balance, 
                         self.risk_per_trade,
                         symbol=symbol,
-                        trading_engine=trading_engine.trading_mode,
+                        trading_engine=self,
                     )
                 except Exception as e:
                     logger.error(f"❌ Error generating signal for {symbol}: {e}")
