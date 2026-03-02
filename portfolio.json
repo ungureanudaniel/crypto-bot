@@ -5,54 +5,18 @@
   "pending_orders": [],
   "initial_balance": 100.0,
   "performance_metrics": {
-    "total_trades": 4,
-    "winning_trades": 4,
-    "total_pnl": 200.0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "total_pnl": 0.0,
     "max_drawdown": 0.0,
     "largest_win": 0.0,
     "largest_loss": 0.0,
     "avg_win": 0.0,
     "avg_loss": 0.0,
-    "win_rate": 100.0
+    "win_rate": 0.0
   },
   "last_updated": "2026-03-02T16:29:11.911766",
   "trade_history": [
-    {
-      "symbol": "BTC/USDT",
-      "action": "close",
-      "side": "long",
-      "amount": 0.05,
-      "price": 51000,
-      "pnl": 50,
-      "timestamp": "2026-03-02T16:26:36.759860"
-    },
-    {
-      "symbol": "BTC/USDT",
-      "action": "close",
-      "side": "long",
-      "amount": 0.05,
-      "price": 51000,
-      "pnl": 50,
-      "timestamp": "2026-03-02T16:28:14.983324"
-    },
-    {
-      "symbol": "BTC/USDT",
-      "action": "close",
-      "side": "long",
-      "amount": 0.05,
-      "price": 51000,
-      "pnl": 50,
-      "timestamp": "2026-03-02T16:28:20.763660"
-    },
-    {
-      "symbol": "BTC/USDT",
-      "action": "close",
-      "side": "long",
-      "amount": 0.05,
-      "price": 51000,
-      "pnl": 50,
-      "timestamp": "2026-03-02T16:29:11.911766"
-    }
   ],
   "last_sync": "2026-02-21T22:58:16.984340",
   "open_orders": [],
