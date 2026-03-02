@@ -469,7 +469,7 @@ class TradingEngine:
             return False
         
         base_currency = symbol.split('/')[0]
-        
+
         # PAPER MODE
         if self.trading_mode == 'paper':
             # Simulate the trade without real exchange
@@ -760,7 +760,7 @@ class TradingEngine:
                         cash_balance, 
                         self.risk_per_trade,
                         symbol=symbol,
-                        available_balance=available_balance
+                        trading_engine=trading_engine.trading_mode,
                     )
                 except Exception as e:
                     logger.error(f"❌ Error generating signal for {symbol}: {e}")
