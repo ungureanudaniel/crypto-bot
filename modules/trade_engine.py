@@ -222,10 +222,82 @@ class TradingEngine:
     
     def get_portfolio_summary(self) -> Dict:
         """
-        Get comprehensive portfolio summary directly from exchange
+        Get comprehensive portfolio summary - from portfolio in paper mode, from exchange in live/testnet
         """
         logger.info("💰 Getting portfolio summary...")
         
+        # PAPER MODE: Get from portfolio.json
+        if self.trading_mode == 'paper':
+            try:
+                from portfolio import load_portfolio, get_performance_summary
+                portfolio = load_portfolio()
+                perf = get_performance_summary()
+                
+                cash = portfolio.get('cash_balance', 0)
+                initial = portfolio.get('initial_balance', cash)
+                holdings = portfolio.get('holdings', {})
+                
+                # Calculate total value (cash + holdings at current prices)
+                total_value = cash
+                holdings_value = 0
+                
+                # Get current prices for holdings
+                current_prices = self.get_current_prices()
+                
+                for asset, amount in holdings.items():
+                    if asset != 'USDT' and amount > 0:
+                        symbol = f"{asset}/USDT"
+                        price = current_prices.get(symbol, 0)
+                        if price > 0:
+                            asset_value = amount * price
+                            holdings_value += asset_value
+                
+                total_value += holdings_value
+                total_return = total_value - initial
+                total_return_pct = (total_return / initial * 100) if initial > 0 else 0
+                
+                result = {
+                    'trading_mode': 'paper',
+                    'cash_balance': cash,
+                    'holdings': holdings,
+                    'holdings_value': holdings_value,
+                    'portfolio_value': total_value,
+                    'initial_balance': initial,
+                    'total_return': total_return,
+                    'total_return_pct': total_return_pct,
+                    'active_positions': len(self.open_positions),
+                    'total_trades': perf.get('total_trades', 0),
+                    'winning_trades': perf.get('winning_trades', 0),
+                    'win_rate': perf.get('win_rate', 0),
+                    'total_pnl': perf.get('total_pnl', 0),
+                    'last_sync': datetime.now().isoformat()
+                }
+                
+                logger.info(f"✅ Paper portfolio: ${result['portfolio_value']:,.2f}, Cash: ${cash:.2f}")
+                return result
+                
+            except Exception as e:
+                logger.error(f"❌ Error in paper portfolio summary: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return {
+                    'trading_mode': 'paper',
+                    'cash_balance': self.config.get('starting_balance', 1000),
+                    'holdings': {},
+                    'holdings_value': 0,
+                    'portfolio_value': self.config.get('starting_balance', 1000),
+                    'initial_balance': self.config.get('starting_balance', 1000),
+                    'total_return': 0,
+                    'total_return_pct': 0,
+                    'active_positions': 0,
+                    'total_trades': 0,
+                    'winning_trades': 0,
+                    'win_rate': 0,
+                    'total_pnl': 0,
+                    'last_sync': datetime.now().isoformat()
+                }
+        
+        # LIVE/TESTNET MODE: Get from exchange
         try:
             # Get current portfolio value from exchange
             portfolio = self.get_total_portfolio_value()
@@ -266,12 +338,11 @@ class TradingEngine:
             
             logger.info(f"✅ Portfolio summary: ${result['portfolio_value']:,.2f}, {result['active_positions']} positions")
             return result
-        
+            
         except Exception as e:
             logger.error(f"❌ Error in get_portfolio_summary: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            # Return minimal summary instead of failing
             return {
                 'trading_mode': self.trading_mode,
                 'cash_balance': 0,
@@ -290,10 +361,26 @@ class TradingEngine:
             }
     
     def get_cash_balance(self) -> float:
-        """Get USDT balance directly from exchange"""
+        """Get USDT balance - from portfolio in paper mode, from exchange in live/testnet"""
+        
+        # PAPER MODE: Get from portfolio.json
+        if self.trading_mode == 'paper':
+            try:
+                from portfolio import load_portfolio
+                portfolio = load_portfolio()
+                cash = portfolio.get('cash_balance', 0)
+                logger.debug(f"Paper mode cash balance: ${cash:.2f}")
+                return cash
+            except Exception as e:
+                logger.error(f"Error getting paper cash balance: {e}")
+                # Fallback to starting balance from config
+                return self.config.get('starting_balance', 1000)
+        
+        # LIVE/TESTNET MODE: Get from exchange
         if not self.binance_client:
             logger.error("No binance client available")
             return 0
+        
         try:
             account = self.binance_client.get_account()
             for balance in account['balances']:
