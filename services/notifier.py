@@ -228,7 +228,7 @@ if __name__ == "__main__":
             'amount': 0.001,
             'stop_loss': 42750,
             'take_profit': 49500,
-            'mode': 'testnet'
+            'mode': 'paper'
         })
         
         await asyncio.sleep(2)
@@ -242,7 +242,7 @@ if __name__ == "__main__":
             'pnl': 30,
             'entry_price': 45000,
             'reason': 'take_profit',
-            'mode': 'testnet'
+            'mode': 'paper'
         })
         
         await asyncio.sleep(2)
