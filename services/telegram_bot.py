@@ -155,35 +155,67 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Debug: Check if trading_engine exists
         logger.info("🔍 BALANCE DEBUG - Starting balance check")
         logger.info(f"   trading_engine exists: {trading_engine is not None}")
+        logger.info(f"   trading mode: {trading_engine.trading_mode}")
         
         if not trading_engine:
             await update.message.reply_text("❌ Trading engine not initialized")
             return
         
-        # Debug: Check binance_client
+        # Check binance_client
         logger.info(f"   binance_client exists: {trading_engine.binance_client is not None}")
         
+        if trading_engine.trading_mode == 'paper':
+            logger.info("   Getting balance from portfolio file (paper mode)")
+
+            try:
+                from modules.portfolio import load_portfolio
+                portfolio = load_portfolio()
+                cash = portfolio.get('cash_balance', 0)
+                holdings = portfolio.get('holdings', {})
+                initial_balance = portfolio.get('initial_balance', cash)
+
+                from modules.portfolio import get_performance_summary
+                perf = get_performance_summary()
+
+                # Calculate total value
+                total_value = cash
+                for asset, amount in holdings.items():
+                    if asset != 'USDT' and amount > 0:
+                        # logic to get prices from the exchange, not from the portfolio file, to ensure we have up-to-date values
+                        from modules.data_feed import get_current_price
+                        price = get_current_price(asset + '/USDT')
+                        total_value += amount * price
+                    
+                total_return = total_value - initial_balance
+                total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
+
+                response = (
+                    f"💰 *Paper Portfolio Balance*\n\n"
+                    f"Total Value: `${total_value:,.2f}`\n"
+                    f"Cash: `${cash:,.2f}`\n"
+                    f"Return: `{total_return_pct:+.1f}%`\n"
+                    f"Win Rate: `{perf.get('win_rate', 0):.1f}%`\n"
+                    f"Trades: `{perf.get('total_trades', 0)}`\n"
+                )
+                # Add holdings
+                if holdings:
+                    response += "\n📊 *Holdings:*\n"
+                    for asset, amount in holdings.items():
+                        if asset != 'USDT' and amount > 0:
+                            from modules.data_feed import get_current_price
+                            price = get_current_price(asset + '/USDT')
+                            response += f"   • {asset}: {amount:.4f} (${price * amount:,.2f})\n"
+
+            except Exception as e:
+                logger.error(f"❌ Paper balance error: {e}")
+                await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+                return
+
         if not trading_engine.binance_client:
             await update.message.reply_text("❌ Not connected to exchange")
             return
         
-        # Try to get cash balance first
-        try:
-            cash = trading_engine.get_cash_balance()
-            logger.info(f"   get_cash_balance() returned: ${cash}")
-        except Exception as e:
-            logger.error(f"   ❌ get_cash_balance() failed: {e}")
-            cash = 0
-        
-        # Try to get portfolio value
-        try:
-            portfolio_value = trading_engine.get_total_portfolio_value()
-            logger.info(f"   get_portfolio_value() returned: {portfolio_value}")
-        except Exception as e:
-            logger.error(f"   ❌ get_portfolio_value() failed: {e}")
-            portfolio_value = {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
-        
-        # Try to get full summary
+        # Get portfolio summary from exchange
         try:
             summary = trading_engine.get_portfolio_summary()
             logger.info(f"   get_portfolio_summary() returned: {summary is not None}")
@@ -192,22 +224,8 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             summary = None
         
         if not summary:
-            # Fallback to manual summary
-            summary = {
-                'trading_mode': trading_engine.trading_mode,
-                'cash_balance': portfolio_value.get('cash_usdt', cash),
-                'holdings': portfolio_value.get('holdings', {}),
-                'portfolio_value': portfolio_value.get('total_usdt', cash),
-                'initial_balance': getattr(trading_engine, 'initial_total_value', cash),
-                'total_return': 0,
-                'total_return_pct': 0,
-                'active_positions': len(trading_engine.open_positions),
-                'total_trades': 0,
-                'winning_trades': 0,
-                'win_rate': 0,
-                'total_pnl': 0,
-                'last_sync': datetime.now().isoformat()
-            }
+            await update.message.reply_text("❌ Could not get portfolio summary")
+            return
         
         # Format the response
         response = (
@@ -215,11 +233,12 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Total Value: `${summary.get('portfolio_value', 0):,.2f}`\n"
             f"Cash: `${summary.get('cash_balance', 0):,.2f}`\n"
             f"Return: `{summary.get('total_return_pct', 0):+.1f}%`\n"
+            f"Win Rate: `{summary.get('win_rate', 0):.1f}%`\n"
         )
         
         # Add holdings if any
         holdings = summary.get('holdings', {})
-        if holdings and len(holdings) > 1:  # More than just USDT
+        if holdings and len(holdings) > 1:
             response += "\n📊 *Holdings:*\n"
             for asset, data in holdings.items():
                 if asset != 'USDT':
