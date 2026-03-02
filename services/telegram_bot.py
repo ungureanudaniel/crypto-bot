@@ -207,10 +207,12 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             price = get_current_price(asset + '/USDT')
                             response += f"   • {asset}: {amount:.4f} (${price * amount:,.2f})\n"
 
+                await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+                return holdings
             except Exception as e:
                 logger.error(f"❌ Paper balance error: {e}")
                 await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
-            return
+                return
 
         if not trading_engine.binance_client:
             await update.message.reply_text("❌ Not connected to exchange")
