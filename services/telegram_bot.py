@@ -255,7 +255,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             response += f"   • {asset}: {data}\n"
         
         await update.message.reply_text(response, parse_mode='Markdown')
-        
+        return holdings
     except Exception as e:
         logger.error(f"❌ Balance error: {e}")
         import traceback
@@ -300,7 +300,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 
                 await update.message.reply_text(message, parse_mode='Markdown')
-                return
+                return message
                 
             except Exception as e:
                 logger.error(f"❌ Paper summary error: {e}")
