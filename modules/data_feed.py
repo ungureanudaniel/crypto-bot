@@ -22,7 +22,11 @@ logger = logging.getLogger(__name__)
 # CONFIG LOADING
 # -------------------------------------------------------------------
 CONFIG = config.config
-client = get_binance_client()
+if CONFIG.get('trading_mode', 'paper') in ['live', 'testnet']:
+    client = get_binance_client()
+else:
+    client = None
+    logger.info("📄 Paper mode - using public Binance API for price data")
 
 # ------------------------------------------------------------
 # Data fetching functions
@@ -47,22 +51,22 @@ def fetch_ohlcv(
     retry_count: int = 3
 ) -> pd.DataFrame:
     """
-    Fetch OHLCV data from Binance with retry logic.
+    Fetch OHLCV data from Binance public API (no auth needed).
     """
-    # In paper mode, return mock data
-    if client is None:
-        logger.debug(f"Paper mode - returning mock OHLCV data for {symbol}")
-        return generate_mock_ohlcv(symbol, interval, limit)
+    import requests
     
     for attempt in range(retry_count):
         try:
             binance_symbol = format_symbol(symbol)
             
+            # Rate limiting for retries
             if attempt > 0:
-                delay = CONFIG['rate_limit_delay'] * (2 ** attempt)
+                delay = 0.5 * (2 ** attempt)
                 logger.debug(f"Retry attempt {attempt + 1}, waiting {delay:.2f}s...")
                 time.sleep(delay)
             
+            # Build URL for public endpoint
+            url = "https://api.binance.com/api/v3/klines"
             params = {
                 'symbol': binance_symbol,
                 'interval': interval,
@@ -74,7 +78,15 @@ def fetch_ohlcv(
             if end_time:
                 params['endTime'] = int(end_time.timestamp() * 1000)
             
-            klines = client.get_klines(**params)
+            response = requests.get(url, params=params, timeout=10)
+            
+            if response.status_code != 200:
+                logger.warning(f"API returned {response.status_code}: {response.text}")
+                if attempt == retry_count - 1:
+                    return pd.DataFrame()
+                continue
+            
+            klines = response.json()
             
             if not klines:
                 logger.warning(f"No data returned for {symbol}")
@@ -98,11 +110,6 @@ def fetch_ohlcv(
             logger.warning(f"Attempt {attempt + 1} failed for {symbol}: {str(e)[:100]}")
             if attempt == retry_count - 1:
                 logger.error(f"❌ Failed to fetch OHLCV for {symbol} after {retry_count} attempts: {e}")
-                if CONFIG['trading_mode'] != 'paper':
-                    raise  # Re-raise on final attempt for non-paper modes
-                else:
-                    # In paper mode, return mock data as fallback
-                    return generate_mock_ohlcv(symbol, interval, limit)
     
     return pd.DataFrame()
 
@@ -154,33 +161,28 @@ def generate_mock_ohlcv(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     return df
 
 def get_current_price(symbol: str, retry_count: int = 2) -> Optional[float]:
-    """Get current price for a symbol with retry logic"""
-    # In paper mode, we can't get real prices
-    if client is None:
-        logger.debug(f"Paper mode - returning mock price for {symbol}")
-        # Return a mock price for testing (you can make this more sophisticated)
-        mock_prices = {
-            'BTC/USDT': 65000.0,
-            'ETH/USDT': 3500.0,
-            'SOL/USDT': 150.0,
-            'BNB/USDT': 600.0,
-            'XRP/USDT': 0.5,
-        }
-        # Try to return a mock price or a default
-        return mock_prices.get(symbol, 100.0)
+    """Get current price for a symbol using public API (no auth needed)"""
+    import requests
     
     for attempt in range(retry_count):
         try:
             binance_symbol = format_symbol(symbol)
             
+            # Use public endpoint - no API keys needed!
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}"
+            
             if attempt > 0:
                 time.sleep(0.5)
             
-            ticker = client.get_symbol_ticker(symbol=binance_symbol)
-            price = float(ticker['price'])
-            logger.debug(f"Current {symbol}: ${price:.2f}")
-            return price
+            response = requests.get(url, timeout=10)
             
+            if response.status_code == 200:
+                price = float(response.json()['price'])
+                logger.debug(f"Current {symbol}: ${price:.2f}")
+                return price
+            else:
+                logger.warning(f"API returned {response.status_code}: {response.text}")
+                
         except Exception as e:
             logger.warning(f"Price fetch attempt {attempt + 1} failed: {str(e)[:100]}")
             if attempt == retry_count - 1:

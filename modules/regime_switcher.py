@@ -693,9 +693,9 @@ if __name__ == "__main__":
     print("🧪 Testing regime switcher with testnet...")
     
     # Test with config
-    print(f"Config loaded: {config.get('testnet', False)}")
+    print(f"Config loaded: {config.get('trading_mode', 'paper')}")
     
     # Test with a coin
-    test_coin = "BTC/USDC"
+    test_coin = "BTC/USDT"
     result = quick_predict(test_coin)
     print(f"Result for {test_coin}: {result}")
