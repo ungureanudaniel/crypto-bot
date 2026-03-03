@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from data_feed import data_feed
 from strategy_tools import generate_trade_signal
 from config_loader import config
+from modules.regime_switcher import predict_regime, train_model
 from portfolio import add_trade, get_performance_summary, set_initial_balance, update_paper_balance, load_portfolio, save_portfolio
 from config_loader import get_binance_client 
 
@@ -856,6 +857,21 @@ class TradingEngine:
                     logger.debug(f"⏭️ {symbol}: Insufficient data ({len(df)} candles)")
                     continue
                 
+                # ===== REGIME DETECTION =====
+                try:
+                    regime = predict_regime(df)
+                    logger.debug(f"📊 {symbol} regime: {regime}")
+                    
+                    # Skip trading in certain regimes if desired
+                    # For example, skip if market is too volatile
+                    if "Volatile" in regime and self.trading_mode != 'paper':
+                        logger.debug(f"⏭️ Skipping {symbol} due to volatile regime")
+                        continue
+                        
+                except Exception as e:
+                    logger.debug(f"Could not detect regime for {symbol}: {e}")
+                    regime = "unknown"
+                
                 # Get available balance for shorts (base currency)
                 available_balance = None
                 base_currency = symbol.split('/')[0]
@@ -867,8 +883,6 @@ class TradingEngine:
                         portfolio = load_portfolio()
                         holdings = portfolio.get('holdings', {})
                         available_balance = holdings.get(base_currency, 0)
-                        if available_balance > 0:
-                            logger.debug(f"📄 {symbol}: Paper {base_currency} balance = {available_balance:.6f}")
                     except Exception as e:
                         logger.debug(f"Could not get paper {base_currency} balance: {e}")
                 
@@ -880,8 +894,6 @@ class TradingEngine:
                             if balance['asset'] == base_currency:
                                 available_balance = float(balance['free'])
                                 break
-                        if available_balance is not None and available_balance > 0:
-                            logger.debug(f"💰 {symbol}: {base_currency} balance = {available_balance:.6f}")
                     except Exception as e:
                         logger.debug(f"Could not get {base_currency} balance: {e}")
                 
@@ -905,15 +917,13 @@ class TradingEngine:
                     if signal_key != self.last_signals.get(symbol):
                         signals_found.append({
                             'symbol': symbol,
-                            'signal': signal
+                            'signal': signal,
+                            'regime': regime  # Add regime to signal data
                         })
                         self.last_signals[symbol] = signal_key
                         
-                        # Enhanced logging with balance info for shorts
-                        if signal['side'] == 'short' and available_balance:
-                            logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} SHORT signal at ${signal['entry']:.2f} (using {signal['units']:.6f} of {available_balance:.6f} available)")
-                        else:
-                            logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} {signal['side']} signal at ${signal['entry']:.2f}")
+                        # Log with regime info
+                        logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} {signal['side']} signal at ${signal['entry']:.2f} (Regime: {regime})")
                     else:
                         logger.info(f"⏭️ {symbol}: Duplicate signal skipped")
                         
