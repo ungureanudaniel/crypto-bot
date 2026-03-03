@@ -2,6 +2,8 @@
 import json
 import sys
 import os
+
+from modules.portfolio import get_portfolio_summary
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
@@ -127,7 +129,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command"""
     try:
         # Get fresh summary from exchange
-        summary = trading_engine.get_portfolio_summary()
+        summary = get_portfolio_summary()
         
         await update.message.reply_text(
             f"🤖 *Trading Bot Started!*\n\n"
@@ -222,7 +224,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Get portfolio summary from exchange
         try:
-            summary = trading_engine.get_portfolio_summary()
+            summary = get_portfolio_summary()
             logger.info(f"   get_portfolio_summary() returned: {summary is not None}")
         except Exception as e:
             logger.error(f"   ❌ get_portfolio_summary() failed: {e}")
@@ -308,7 +310,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         
         # LIVE/TESTNET MODE
-        summary = trading_engine.get_portfolio_summary()
+        summary = get_portfolio_summary()
         
         pnl_emoji = "🟢" if summary['total_return_pct'] >= 0 else "🔴"
         
@@ -329,7 +331,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""
     try:
         # Get fresh data from exchange
-        summary = trading_engine.get_portfolio_summary()
+        summary = get_portfolio_summary()
         
         # Get trade history for win rate
         trade_history = load_trade_history()
