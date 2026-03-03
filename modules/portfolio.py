@@ -291,6 +291,29 @@ def get_total_portfolio_value(client, symbols: List[str]) -> Dict:
         logger.error(f"Error calculating portfolio value: {e}")
         return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
 
+def get_portfolio_health(open_positions: Optional[Dict] = None) -> bool:
+    """
+    Simple portfolio health check
+    Returns True if healthy, False if not
+    """
+    try:
+        summary = get_portfolio_summary(open_positions=open_positions)
+        
+        # Define what "healthy" means
+        # For example: return > -10% is healthy
+        if summary.get('total_return_pct', 0) < -10:
+            return False
+        
+        # Cash above $5 is healthy
+        cash = summary.get('cash', {}).get('total', 0)
+        if cash < 5:
+            return False
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in portfolio health check: {e}")
+        return False
 # -------------------------------------------------------------------
 # UNIFIED PORTFOLIO SUMMARY
 # -------------------------------------------------------------------
