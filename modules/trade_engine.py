@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from data_feed import data_feed
 from strategy_tools import generate_trade_signal
 from config_loader import config
-from portfolio import add_trade, get_performance_summary, set_initial_balance, update_paper_balance
+from portfolio import add_trade, get_performance_summary, set_initial_balance, update_paper_balance, load_portfolio, save_portfolio
 from config_loader import get_binance_client 
 
 # Setup logging
@@ -33,6 +33,31 @@ except ImportError:
 # -------------------------------------------------------------------
 CONFIG = config.config
 client = get_binance_client()
+
+# -------------------------------------------------------------------
+# PORTFOLIO POSITION HELPERS
+# -------------------------------------------------------------------
+def save_positions_to_file(positions: Dict):
+    """Save open positions to portfolio.json"""
+    try:
+        portfolio = load_portfolio()
+        portfolio["positions"] = positions
+        save_portfolio(portfolio)
+        logger.debug(f"💾 Saved {len(positions)} positions to portfolio.json")
+    except Exception as e:
+        logger.error(f"❌ Failed to save positions: {e}")
+
+def load_positions_from_file() -> Dict:
+    """Load open positions from portfolio.json"""
+    try:
+        portfolio = load_portfolio()
+        positions = portfolio.get("positions", {})
+        logger.info(f"📂 Loaded {len(positions)} positions from portfolio.json")
+        return positions
+    except Exception as e:
+        logger.error(f"❌ Failed to load positions: {e}")
+        return {}
+
 # -------------------------------------------------------------------
 # EXCHANGE DATA FETCHING
 # -------------------------------------------------------------------
@@ -196,8 +221,8 @@ class TradingEngine:
         self.max_positions = self.config.get('max_positions', 3)
         self.risk_per_trade = self.config.get('risk_per_trade', 0.02)
         
-        # Track open positions in memory only (not file)
-        self.open_positions = {}  # symbol -> position details
+        # Load open positions from file on startup
+        self.open_positions = load_positions_from_file()
         
         # Initialize real trading client if needed
         self.binance_client = get_binance_client()
@@ -211,10 +236,11 @@ class TradingEngine:
         logger.info(f"🚀 Trading Engine initialized for {self.trading_mode.upper()} mode")
         logger.info(f"📊 Monitoring {len(self.symbols)} symbols on {self.timeframe}")
         logger.info(f"📈 Max positions: {self.max_positions}, Risk per trade: {self.risk_per_trade:.1%}")
+        logger.info(f"📂 Loaded {len(self.open_positions)} existing positions")
         
         # Get initial portfolio value
         if self.binance_client:
-            portfolio = self.get_total_portfolio_value()
+            portfolio = get_total_portfolio_value(self.binance_client, self.symbols)
             self.initial_total_value = portfolio['total_usdt']
             # Save initial balance to history
             set_initial_balance(self.initial_total_value)
@@ -300,7 +326,7 @@ class TradingEngine:
         # LIVE/TESTNET MODE: Get from exchange
         try:
             # Get current portfolio value from exchange
-            portfolio = self.get_total_portfolio_value()
+            portfolio = get_total_portfolio_value(self.binance_client, self.symbols)
             logger.info(f"   Portfolio value: ${portfolio.get('total_usdt', 0):,.2f}")
             
             # Calculate returns
@@ -496,6 +522,9 @@ class TradingEngine:
         # Remove from open positions
         del self.open_positions[symbol]
         
+        # Save updated positions to file
+        save_positions_to_file(self.open_positions)
+        
         # Record trade in history
         add_trade({
             'symbol': symbol,
@@ -581,7 +610,6 @@ class TradingEngine:
             if result is None and action == "buy":
                 logger.error("❌ Paper buy failed - insufficient funds")
                 return False
-
 
             execution_success = True
         
@@ -673,6 +701,9 @@ class TradingEngine:
                 'entry_time': datetime.now().isoformat(),
                 'mode': self.trading_mode
             }
+            
+            # Save updated positions to file
+            save_positions_to_file(self.open_positions)
             
             # Record trade in history
             add_trade({
@@ -787,7 +818,7 @@ class TradingEngine:
         slots_available = self.max_positions - current_positions
         logger.info(f"🔍 Scanning {len(self.symbols)} symbols for signals ({slots_available} slots available)...")
         
-        # Get current cash balance from exchange
+        # Get current cash balance
         cash_balance = self.get_cash_balance()
         if cash_balance <= 10:
             logger.warning(f"⚠️ Low cash balance: ${cash_balance:.2f}")
@@ -815,16 +846,31 @@ class TradingEngine:
                 # Get available balance for shorts (base currency)
                 available_balance = None
                 base_currency = symbol.split('/')[0]
-                try:
-                    account = self.binance_client.get_account()
-                    for balance in account['balances']:
-                        if balance['asset'] == base_currency:
-                            available_balance = float(balance['free'])
-                            break
-                    if available_balance is not None and available_balance > 0:
-                        logger.debug(f"💰 {symbol}: {base_currency} balance = {available_balance:.6f}")
-                except Exception as e:
-                    logger.debug(f"Could not get {base_currency} balance: {e}")
+                
+                # PAPER MODE: Get from portfolio
+                if self.trading_mode == 'paper':
+                    try:
+                        from portfolio import load_portfolio
+                        portfolio = load_portfolio()
+                        holdings = portfolio.get('holdings', {})
+                        available_balance = holdings.get(base_currency, 0)
+                        if available_balance > 0:
+                            logger.debug(f"📄 {symbol}: Paper {base_currency} balance = {available_balance:.6f}")
+                    except Exception as e:
+                        logger.debug(f"Could not get paper {base_currency} balance: {e}")
+                
+                # LIVE/TESTNET MODE: Get from exchange
+                elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
+                    try:
+                        account = self.binance_client.get_account()
+                        for balance in account['balances']:
+                            if balance['asset'] == base_currency:
+                                available_balance = float(balance['free'])
+                                break
+                        if available_balance is not None and available_balance > 0:
+                            logger.debug(f"💰 {symbol}: {base_currency} balance = {available_balance:.6f}")
+                    except Exception as e:
+                        logger.debug(f"Could not get {base_currency} balance: {e}")
                 
                 # Generate signal with symbol and balance info
                 try:
@@ -857,7 +903,7 @@ class TradingEngine:
                             logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} {signal['side']} signal at ${signal['entry']:.2f}")
                     else:
                         logger.info(f"⏭️ {symbol}: Duplicate signal skipped")
-                    
+                        
             except Exception as e:
                 logger.error(f"❌ Error scanning {symbol}: {e}")
         
@@ -923,22 +969,44 @@ class TradingEngine:
             elif signal['side'] == 'short':
                 # For SHORT positions, check base currency balance
                 base_currency = symbol.split('/')[0]
-                try:
-                    account = self.binance_client.get_account()
-                    asset_balance = 0
-                    for balance in account['balances']:
-                        if balance['asset'] == base_currency:
-                            asset_balance = float(balance['free'])
-                            break
-                    
-                    logger.info(f"   {base_currency} balance: {asset_balance:.6f}, Required: {signal['units']:.6f}")
-                    
-                    if asset_balance < signal['units']:
-                        logger.warning(f"⚠️ Insufficient {base_currency}: have {asset_balance:.6f}, need {signal['units']:.6f}")
-                        return False
+                
+                # PAPER MODE: Check portfolio
+                if self.trading_mode == 'paper':
+                    try:
+                        from portfolio import load_portfolio
+                        portfolio = load_portfolio()
+                        holdings = portfolio.get('holdings', {})
+                        asset_balance = holdings.get(base_currency, 0)
+                        logger.info(f"   Paper {base_currency} balance: {asset_balance:.6f}, Required: {signal['units']:.6f}")
                         
-                except Exception as e:
-                    logger.error(f"❌ Error checking {base_currency} balance: {e}")
+                        if asset_balance < signal['units']:
+                            logger.warning(f"⚠️ Insufficient {base_currency}: have {asset_balance:.6f}, need {signal['units']:.6f}")
+                            return False
+                    except Exception as e:
+                        logger.error(f"❌ Error checking paper {base_currency} balance: {e}")
+                        return False
+                
+                # LIVE/TESTNET MODE: Check exchange
+                elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
+                    try:
+                        account = self.binance_client.get_account()
+                        asset_balance = 0
+                        for balance in account['balances']:
+                            if balance['asset'] == base_currency:
+                                asset_balance = float(balance['free'])
+                                break
+                        
+                        logger.info(f"   {base_currency} balance: {asset_balance:.6f}, Required: {signal['units']:.6f}")
+                        
+                        if asset_balance < signal['units']:
+                            logger.warning(f"⚠️ Insufficient {base_currency}: have {asset_balance:.6f}, need {signal['units']:.6f}")
+                            return False
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Error checking {base_currency} balance: {e}")
+                        return False
+                else:
+                    logger.warning(f"⚠️ Cannot check short balance - no balance source available")
                     return False
             
             # Execute the position opening
@@ -963,119 +1031,3 @@ class TradingEngine:
             import traceback
             logger.error(traceback.format_exc())
             return False
-    
-    def get_total_portfolio_value(self):
-        """Get total portfolio value in USDT from exchange"""
-        logger.info("Calculating total portfolio value...")
-        total_usdt = 0
-        cash_usdt = 0
-        holdings = {}
-        
-        if not self.binance_client:
-            logger.warning("No binance client available")
-            return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
-        
-        try:
-            account = self.binance_client.get_account()
-            logger.info(f"Account has {len(account['balances'])} balances")
-            
-            for balance in account['balances']:
-                asset = balance['asset']
-                free = float(balance['free'])
-                if free <= 0:
-                    continue
-                
-                logger.debug(f"Processing {asset} balance: {free}")
-                
-                if asset == 'USDT':
-                    cash_usdt = free
-                    total_usdt += free
-                    holdings[asset] = free
-                else:
-                    try:
-                        # Skip known test assets that don't have a USDT pair
-                        if asset in ['这是测试币', '456', 'BTC', 'ETH', 'BNB']:
-                            logger.debug(f"Skipping {asset} – no price needed")
-                            holdings[asset] = {'amount': free, 'price': 0, 'value': 0}
-                            continue
-                        
-                        symbol = f"{asset}USDT"
-                        logger.debug(f"Fetching price for {symbol}...")
-                        ticker = self.binance_client.get_symbol_ticker(symbol=symbol)
-                        price = float(ticker['price'])
-                        value = free * price
-                        total_usdt += value
-                        holdings[asset] = {'amount': free, 'price': price, 'value': value}
-                        logger.debug(f"{asset} price: {price}, value: {value}")
-                    except Exception as e:
-                        logger.debug(f"Could not get price for {asset}: {e}")
-                        holdings[asset] = {'amount': free, 'price': 0, 'value': 0}
-            
-            logger.info(f"Total portfolio value: ${total_usdt:.2f}")
-            return {'total_usdt': total_usdt, 'cash_usdt': cash_usdt, 'holdings': holdings}
-        except Exception as e:
-            logger.error(f"Error calculating portfolio value: {e}")
-            return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
-    
-    def check_portfolio_health(self) -> bool:
-        """
-        Check if portfolio is healthy and can continue trading
-        """
-        try:
-            summary = self.get_portfolio_summary()
-            
-            # Check drawdown
-            max_drawdown = self.config.get('max_drawdown', 0.05)
-            current_drawdown = -summary['total_return_pct'] / 100 if summary['total_return_pct'] < 0 else 0
-            
-            if current_drawdown > max_drawdown:
-                logger.warning(f"⚠️ Drawdown {current_drawdown:.1%} > {max_drawdown:.1%}")
-                return False
-            
-            # Check minimum cash
-            min_trade_size = 10
-            if summary['cash_balance'] < min_trade_size:
-                logger.warning(f"⚠️ Low cash: ${summary['cash_balance']:.2f}")
-                return False
-            
-            logger.info(f"✅ Portfolio healthy: ${summary['portfolio_value']:,.2f} (Return: {summary['total_return_pct']:+.1f}%)")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error checking health: {e}")
-            return False
-
-# Create singleton instance
-trading_engine = TradingEngine()
-
-if __name__ == "__main__":
-    # Test the engine
-    print(f"\n🧪 Testing Trading Engine")
-    print("=" * 50)
-    print(f"Mode: {trading_engine.trading_mode}")
-    print(f"Symbols: {len(trading_engine.symbols)}")
-    print(f"Timeframe: {trading_engine.timeframe}")
-    print(f"Max positions: {trading_engine.max_positions}")
-    print(f"Risk per trade: {trading_engine.risk_per_trade:.1%}")
-    
-    # Get portfolio summary directly from exchange
-    print("\n💰 Portfolio Summary (from exchange):")
-    summary = trading_engine.get_portfolio_summary()
-    print(f"   Value: ${summary['portfolio_value']:,.2f}")
-    print(f"   Cash: ${summary['cash_balance']:,.2f}")
-    print(f"   Holdings: {len(summary.get('holdings', {}))}")
-    print(f"   Positions: {summary['active_positions']}")
-    print(f"   Return: {summary['total_return_pct']:+.1f}%")
-    print(f"   Win Rate: {summary['win_rate']:.1f}%")
-    
-    # Test scan
-    print("\n🔍 Testing scan...")
-    signals = trading_engine.scan_and_trade()
-    
-    if signals:
-        print(f"✅ Found {len(signals)} signals:")
-        for s in signals:
-            sig = s['signal']
-            print(f"   {s['symbol']}: {sig.get('signal_type', 'SIGNAL')} {sig['side']} @ ${sig['entry']:.2f}")
-    else:
-        print("❌ No signals found")
