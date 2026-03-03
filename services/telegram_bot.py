@@ -170,8 +170,12 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 from modules.portfolio import load_portfolio
                 portfolio = load_portfolio()
-                cash = portfolio.get('cash_balance', 0)
+                
+                # Get cash from holdings["USDT"] (not cash_balance)
                 holdings = portfolio.get('holdings', {})
+                cash = holdings.get('USDT', 0)  # ← FIXED: Use holdings["USDT"]
+                
+                # Get initial balance from portfolio
                 initial_balance = portfolio.get('initial_balance', cash)
 
                 from modules.portfolio import get_performance_summary
@@ -180,7 +184,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Calculate total value
                 total_value = cash
                 for asset, amount in holdings.items():
-                    if asset != 'USDT' and amount > 0:
+                    if asset not in ['USDT', 'USDC'] and amount > 0:
                         from modules.data_feed import get_current_price
                         price = get_current_price(asset + '/USDT')
                         if price:
@@ -192,26 +196,26 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 response = (
                     f"💰 *Paper Portfolio Balance*\n\n"
                     f"Total Value: `${total_value:,.2f}`\n"
-                    f"Cash: `${cash:,.2f}`\n"
+                    f"Cash (USDT): `${cash:,.2f}`\n"
                     f"Return: `{total_return_pct:+.1f}%`\n"
                     f"Win Rate: `{perf.get('win_rate', 0):.1f}%`\n"
                     f"Trades: `{perf.get('total_trades', 0)}`\n"
                 )
                 
                 # Add holdings
-                if holdings:
+                other_holdings = {k: v for k, v in holdings.items() if k not in ['USDT', 'USDC']}
+                if other_holdings:
                     response += "\n📊 *Holdings:*\n"
-                    for asset, amount in holdings.items():
-                        if asset != 'USDT' and amount > 0:
-                            from modules.data_feed import get_current_price
-                            price = get_current_price(asset + '/USDT')
-                            if price:
-                                response += f"   • {asset}: {amount:.4f} (${price * amount:,.2f})\n"
-                            else:
-                                response += f"   • {asset}: {amount:.4f}\n"
+                    for asset, amount in other_holdings.items():
+                        from modules.data_feed import get_current_price
+                        price = get_current_price(asset + '/USDT')
+                        if price:
+                            response += f"   • {asset}: {amount:.4f} (${price * amount:,.2f})\n"
+                        else:
+                            response += f"   • {asset}: {amount:.4f}\n"
 
                 await update.message.reply_text(response, parse_mode='Markdown')
-                return  # ← Just return, don't try to use 'e'
+                return
                 
             except Exception as e:
                 logger.error(f"❌ Paper balance error: {e}")
@@ -222,9 +226,10 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Not connected to exchange")
             return
         
-        # Get portfolio summary from exchange
+        # LIVE MODE - use get_portfolio_summary from portfolio.py
         try:
-            summary = get_portfolio_summary()
+            from modules.portfolio import get_portfolio_summary
+            summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
             logger.info(f"   get_portfolio_summary() returned: {summary is not None}")
         except Exception as e:
             logger.error(f"   ❌ get_portfolio_summary() failed: {e}")
@@ -234,29 +239,25 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Could not get portfolio summary")
             return
         
-        # Format the response
+        # Format the response using the new structure
         response = (
             f"💰 *Portfolio Balance*\n\n"
-            f"Total Value: `${summary.get('portfolio_value', 0):,.2f}`\n"
-            f"Cash: `${summary.get('cash_balance', 0):,.2f}`\n"
+            f"Total Value: `${summary.get('total_value', 0):,.2f}`\n"
+            f"Cash: `${summary.get('cash', {}).get('total', 0):,.2f}`\n"
             f"Return: `{summary.get('total_return_pct', 0):+.1f}%`\n"
             f"Win Rate: `{summary.get('win_rate', 0):.1f}%`\n"
         )
         
         # Add holdings if any
         holdings = summary.get('holdings', {})
-        if holdings and len(holdings) > 1:
+        crypto_holdings = {k: v for k, v in holdings.items() if k not in ['USDT', 'USDC']}
+        if crypto_holdings:
             response += "\n📊 *Holdings:*\n"
-            for asset, data in holdings.items():
-                if asset != 'USDT':
-                    if isinstance(data, dict):
-                        amount = data.get('amount', 0)
-                        value = data.get('value_usdt', 0)
-                        if amount > 0:
-                            response += f"   • {asset}: {amount:.4f} (${value:,.2f})\n"
-                    else:
-                        if float(data) > 0:
-                            response += f"   • {asset}: {data}\n"
+            for asset, data in crypto_holdings.items():
+                amount = data.get('amount', 0)
+                value = data.get('value_usd', 0)
+                if amount > 0:
+                    response += f"   • {asset}: {amount:.4f} (${value:,.2f})\n"
         
         await update.message.reply_text(response, parse_mode='Markdown')
         
@@ -269,21 +270,21 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick portfolio summary - works in both paper and live mode"""
     try:
-        # PAPER MODE - get summary from portfolio
+        # PAPER MODE
         if trading_engine.trading_mode == 'paper':
             try:
                 from modules.portfolio import load_portfolio, get_performance_summary
                 portfolio = load_portfolio()
                 perf = get_performance_summary()
                 
-                cash = portfolio.get('cash_balance', 0)
                 holdings = portfolio.get('holdings', {})
+                cash = holdings.get('USDT', 0)  # ← FIXED
                 initial = portfolio.get('initial_balance', cash)
                 
                 # Calculate total value with current prices
                 total_value = cash
                 for asset, amount in holdings.items():
-                    if asset != 'USDT' and amount > 0:
+                    if asset not in ['USDT', 'USDC'] and amount > 0:
                         from modules.data_feed import get_current_price
                         price = get_current_price(asset + '/USDT')
                         if price:
@@ -297,12 +298,12 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{pnl_emoji} *Paper Portfolio*: `${total_value:,.0f}` "
                     f"({total_return_pct:+.1f}%) | "
                     f"💵 Cash: `${cash:,.0f}` | "
-                    f"📊 {len(holdings)} holdings | "
+                    f"📊 {len([a for a in holdings if a not in ['USDT', 'USDC']])} holdings | "
                     f"🎯 {perf.get('win_rate', 0):.0f}% win rate"
                 )
                 
                 await update.message.reply_text(message, parse_mode='Markdown')
-                return message
+                return
                 
             except Exception as e:
                 logger.error(f"❌ Paper summary error: {e}")
@@ -310,15 +311,16 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         
         # LIVE/TESTNET MODE
-        summary = get_portfolio_summary()
+        from modules.portfolio import get_portfolio_summary
+        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
         
-        pnl_emoji = "🟢" if summary['total_return_pct'] >= 0 else "🔴"
+        pnl_emoji = "🟢" if summary.get('total_return_pct', 0) >= 0 else "🔴"
         
         message = (
-            f"{pnl_emoji} *Portfolio*: `${summary['portfolio_value']:,.0f}` "
-            f"({summary['total_return_pct']:+.1f}%) | "
-            f"💵 Cash: `${summary['cash_balance']:,.0f}` | "
-            f"📊 {summary['active_positions']} positions"
+            f"{pnl_emoji} *Portfolio*: `${summary.get('total_value', 0):,.0f}` "
+            f"({summary.get('total_return_pct', 0):+.1f}%) | "
+            f"💵 Cash: `${summary.get('cash', {}).get('total', 0):,.0f}` | "
+            f"📊 {summary.get('positions_count', 0)} positions"
         )
         
         await update.message.reply_text(message, parse_mode='Markdown')
@@ -330,8 +332,10 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""
     try:
-        # Get fresh data from exchange
-        summary = get_portfolio_summary()
+        from modules.portfolio import get_portfolio_summary
+        
+        # Get fresh data
+        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
         
         # Get trade history for win rate
         trade_history = load_trade_history()
@@ -343,12 +347,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_lines = [
             f"🤖 *Trading Bot Status*\n",
             f"━━━━━━━━━━━━━━━━",
-            f"📊 Mode: `{summary['trading_mode'].upper()}`",
-            f"💰 Portfolio: `${summary['portfolio_value']:,.2f}`",
-            f"💵 Cash: `${summary['cash_balance']:,.2f}`",
-            f"📈 Return: `{summary['total_return_pct']:+.1f}%`",
+            f"📊 Mode: `{summary.get('trading_mode', 'unknown').upper()}`",
+            f"💰 Portfolio: `${summary.get('total_value', 0):,.2f}`",
+            f"💵 Cash: `${summary.get('cash', {}).get('total', 0):,.2f}`",
+            f"📈 Return: `{summary.get('total_return_pct', 0):+.1f}%`",
             f"🎯 Win Rate: `{win_rate:.1f}%`",
-            f"📊 Active: `{summary['active_positions']}/{trading_engine.max_positions}`",
+            f"📊 Active: `{summary.get('positions_count', 0)}/{trading_engine.max_positions}`",
             f"📋 Total Trades: `{len(closed_trades)}`",
         ]
         
