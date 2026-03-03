@@ -6,12 +6,11 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from data_feed import data_feed
-from strategy_tools import generate_trade_signal
-from config_loader import config
+from modules.data_feed import data_feed
+from modules.strategy_tools import generate_trade_signal
 from modules.regime_switcher import predict_regime, train_model
-from portfolio import add_trade, get_total_portfolio_value, set_initial_balance, update_paper_balance, load_portfolio, save_portfolio
-from config_loader import get_binance_client 
+from modules.portfolio import add_trade, get_total_portfolio_value, set_initial_balance, update_paper_balance, load_portfolio, save_portfolio
+from config_loader import get_binance_client, config
 
 # Setup logging
 logging.basicConfig(
