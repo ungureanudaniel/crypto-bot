@@ -5,6 +5,8 @@ import time
 import threading
 from datetime import datetime
 
+from modules.portfolio import get_portfolio_summary, get_portfolio_health
+
 # -------------------------------------------------------------------
 # SETUP PATHS
 # -------------------------------------------------------------------
@@ -126,13 +128,14 @@ def update_portfolio_summary():
         return
     
     try:
-        summary = trading_engine.get_portfolio_summary()
+        # Pass open_positions from trading_engine to portfolio function
+        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
         
-        logger.info(f"💰 Portfolio: ${summary['portfolio_value']:,.2f}")
-        logger.info(f"   Cash: ${summary['cash_balance']:,.2f}")
-        logger.info(f"   Positions: {summary['active_positions']}")
-        logger.info(f"   Return: {summary['total_return_pct']:+.1f}%")
-        logger.info(f"   Win Rate: {summary['win_rate']:.1f}%")
+        logger.info(f"💰 Portfolio: ${summary.get('total_value', 0):,.2f}")
+        logger.info(f"   Cash: ${summary.get('cash', {}).get('total', 0):,.2f}")
+        logger.info(f"   Positions: {summary.get('positions_count', 0)}")
+        logger.info(f"   Return: {summary.get('total_return_pct', 0):+.1f}%")
+        logger.info(f"   Win Rate: {summary.get('win_rate', 0):.1f}%")
         
         # Send daily notification at 20:00
         current_hour = datetime.now().hour
@@ -142,10 +145,10 @@ def update_portfolio_summary():
                 if hasattr(notifier, 'send_message_sync'):
                     notifier.send_message_sync(
                         f"📊 Daily Portfolio Update\n"
-                        f"Value: ${summary['portfolio_value']:,.2f}\n"
-                        f"Return: {summary['total_return_pct']:+.1f}%\n"
-                        f"Win Rate: {summary['win_rate']:.1f}%\n"
-                        f"Active: {summary['active_positions']}"
+                        f"Value: ${summary.get('total_value', 0):,.2f}\n"
+                        f"Return: {summary.get('total_return_pct', 0):+.1f}%\n"
+                        f"Win Rate: {summary.get('win_rate', 0):.1f}%\n"
+                        f"Active: {summary.get('positions_count', 0)}"
                     )
             except Exception as e:
                 logger.error(f"❌ Failed to send daily notification: {e}")
@@ -187,18 +190,22 @@ def health_check():
         return
     
     try:
-        is_healthy = trading_engine.check_portfolio_health()
+        # You need to implement get_portfolio_health in portfolio.py
+        # For now, let's use a simple check
+        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
+        
+        # Simple health check: if return is worse than -10%, it's unhealthy
+        is_healthy = summary.get('total_return_pct', 0) > -10
         
         if not is_healthy:
             logger.warning("⚠️ Portfolio health check FAILED")
             try:
                 from services.notifier import notifier
-                summary = trading_engine.get_portfolio_summary()
                 if hasattr(notifier, 'send_message_sync'):
                     notifier.send_message_sync(
                         f"⚠️ *Health Alert*\n"
                         f"Portfolio may be at risk\n"
-                        f"Return: {summary['total_return_pct']:+.1f}%"
+                        f"Return: {summary.get('total_return_pct', 0):+.1f}%"
                     )
             except Exception as e:
                 logger.error(f"❌ Failed to send health alert: {e}")
@@ -217,16 +224,16 @@ def log_daily_performance():
         return
     
     try:
-        summary = trading_engine.get_portfolio_summary()
+        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
         
         log_entry = {
             'date': datetime.now().strftime('%Y-%m-%d'),
             'time': datetime.now().strftime('%H:%M:%S'),
-            'portfolio_value': summary['portfolio_value'],
-            'cash_balance': summary['cash_balance'],
-            'return_pct': summary['total_return_pct'],
-            'active_positions': summary['active_positions'],
-            'win_rate': summary['win_rate']
+            'portfolio_value': summary.get('total_value', 0),
+            'cash_balance': summary.get('cash', {}).get('total', 0),
+            'return_pct': summary.get('total_return_pct', 0),
+            'active_positions': summary.get('positions_count', 0),
+            'win_rate': summary.get('win_rate', 0)
         }
         
         log_file = os.path.join(project_root, 'daily_performance.log')
