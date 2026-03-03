@@ -182,10 +182,10 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 total_value = cash
                 for asset, amount in holdings.items():
                     if asset != 'USDT' and amount > 0:
-                        # logic to get prices from the exchange, not from the portfolio file, to ensure we have up-to-date values
                         from modules.data_feed import get_current_price
                         price = get_current_price(asset + '/USDT')
-                        total_value += amount * price
+                        if price:
+                            total_value += amount * price
                     
                 total_return = total_value - initial_balance
                 total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
@@ -198,6 +198,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Win Rate: `{perf.get('win_rate', 0):.1f}%`\n"
                     f"Trades: `{perf.get('total_trades', 0)}`\n"
                 )
+                
                 # Add holdings
                 if holdings:
                     response += "\n📊 *Holdings:*\n"
@@ -205,10 +206,14 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if asset != 'USDT' and amount > 0:
                             from modules.data_feed import get_current_price
                             price = get_current_price(asset + '/USDT')
-                            response += f"   • {asset}: {amount:.4f} (${price * amount:,.2f})\n"
+                            if price:
+                                response += f"   • {asset}: {amount:.4f} (${price * amount:,.2f})\n"
+                            else:
+                                response += f"   • {asset}: {amount:.4f}\n"
 
-                await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
-                return holdings
+                await update.message.reply_text(response, parse_mode='Markdown')
+                return  # ← Just return, don't try to use 'e'
+                
             except Exception as e:
                 logger.error(f"❌ Paper balance error: {e}")
                 await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
@@ -255,7 +260,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             response += f"   • {asset}: {data}\n"
         
         await update.message.reply_text(response, parse_mode='Markdown')
-        return holdings
+        
     except Exception as e:
         logger.error(f"❌ Balance error: {e}")
         import traceback
