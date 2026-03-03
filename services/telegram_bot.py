@@ -1,14 +1,17 @@
 # services/telegram_bot.py - UPDATED FOR EXCHANGE-ONLY PORTFOLIO
 import json
 import sys
+import os
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
 import signal
-import os
 import asyncio
 import time
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from modules.trade_engine import trading_engine
 import concurrent.futures
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -90,9 +93,6 @@ async def trading_job_callback(context: ContextTypes.DEFAULT_TYPE):
         check_stop_losses_and_take_profits()
         check_pending_orders()
         
-        # Only scan for signals if we have capacity
-        from modules.trade_engine import trading_engine
-        
         current_positions = len(trading_engine.open_positions)
         
         if current_positions < trading_engine.max_positions:
@@ -126,8 +126,6 @@ async def health_job_callback(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command"""
     try:
-        from modules.trade_engine import trading_engine
-        
         # Get fresh summary from exchange
         summary = trading_engine.get_portfolio_summary()
         
@@ -151,7 +149,6 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         logger.info("  ... importing trading_engine for balance command")
-        from modules.trade_engine import trading_engine
         
         # Debug: Check if trading_engine exists
         logger.info("🔍 BALANCE DEBUG - Starting balance check")
@@ -270,8 +267,6 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick portfolio summary - works in both paper and live mode"""
     try:
-        from modules.trade_engine import trading_engine
-        
         # PAPER MODE - get summary from portfolio
         if trading_engine.trading_mode == 'paper':
             try:
@@ -333,8 +328,6 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""
     try:
-        from modules.trade_engine import trading_engine
-        
         # Get fresh data from exchange
         summary = trading_engine.get_portfolio_summary()
         
@@ -399,8 +392,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Scanning for trading signals...", parse_mode='Markdown')
     
     try:
-        from modules.trade_engine import trading_engine
-        
         signals_found = trading_engine.scan_and_trade()
         
         if not signals_found:
@@ -488,8 +479,6 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     try:
-        from modules.trade_engine import trading_engine
-        
         executed = []
         failed = []
         fail_reasons = {}
@@ -594,8 +583,6 @@ async def emergency_sell_all(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("🚨 *EMERGENCY SELL ALL* 🚨\n\nSelling all positions...", parse_mode='Markdown')
     
     try:
-        from modules.trade_engine import trading_engine
-        
         if not trading_engine.open_positions:
             await update.message.reply_text("📭 No open positions to sell", parse_mode='Markdown')
             return
@@ -673,8 +660,6 @@ async def execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     try:
-        from modules.trade_engine import trading_engine
-        
         success = trading_engine.execute_signal(signal_to_execute)
         
         if success:
@@ -704,8 +689,6 @@ async def holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current holdings from portfolio"""
     try:
         from modules.portfolio import load_portfolio
-        from modules.trade_engine import trading_engine
-        
         portfolio = load_portfolio()
         holdings = portfolio.get('holdings', {})
         
@@ -745,9 +728,7 @@ async def holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show active positions (trades with stop/target)"""
-    try:
-        from modules.trade_engine import trading_engine
-        
+    try:        
         if not trading_engine.open_positions:
             await update.message.reply_text("📭 No active positions", parse_mode='Markdown')
             return
@@ -831,8 +812,6 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     try:
-        from modules.trade_engine import trading_engine
-        
         success = trading_engine.open_position(
             symbol=symbol,
             side='buy',
@@ -892,8 +871,6 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     try:
-        from modules.trade_engine import trading_engine
-        
         success = trading_engine.open_position(
             symbol=symbol,
             side='sell',
@@ -925,8 +902,6 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show pending orders from exchange"""
     try:
-        from modules.trade_engine import trading_engine
-        
         if not trading_engine.binance_client:
             await update.message.reply_text("📭 No exchange connection", parse_mode='Markdown')
             return
@@ -978,8 +953,6 @@ async def cancel_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🗑️ Cancelling all pending orders on exchange...", parse_mode='Markdown')
     
     try:
-        from modules.trade_engine import trading_engine
-        
         if not trading_engine.binance_client:
             await update.message.reply_text("❌ No exchange connection", parse_mode='Markdown')
             return
@@ -1057,8 +1030,6 @@ async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        from modules.trade_engine import trading_engine
-        
         # Check if position exists in engine
         if symbol not in trading_engine.open_positions:
             await update.message.reply_text(f"❌ No open position for {symbol}", parse_mode='Markdown')

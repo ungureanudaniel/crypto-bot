@@ -222,7 +222,20 @@ class TradingEngine:
         self.risk_per_trade = self.config.get('risk_per_trade', 0.02)
         
         # Load open positions from file on startup
-        self.open_positions = load_positions_from_file()
+        try:
+            from portfolio import load_portfolio
+            portfolio = load_portfolio()
+            self.open_positions = portfolio.get("positions", {})
+            logger.info(f"📂 Loaded {len(self.open_positions)} positions from portfolio.json")
+            
+            # Log first position to verify data
+            if self.open_positions:
+                first_symbol = list(self.open_positions.keys())[0]
+                first_pos = self.open_positions[first_symbol]
+                logger.info(f"   Sample: {first_symbol} - {first_pos.get('side')} @ ${first_pos.get('entry_price')}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load positions: {e}")
+            self.open_positions = {}
         
         # Initialize real trading client if needed
         self.binance_client = get_binance_client()
@@ -1031,3 +1044,5 @@ class TradingEngine:
             import traceback
             logger.error(traceback.format_exc())
             return False
+
+trading_engine = TradingEngine()
