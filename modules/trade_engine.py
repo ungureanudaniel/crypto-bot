@@ -10,7 +10,7 @@ from data_feed import data_feed
 from strategy_tools import generate_trade_signal
 from config_loader import config
 from modules.regime_switcher import predict_regime, train_model
-from portfolio import add_trade, get_performance_summary, set_initial_balance, update_paper_balance, load_portfolio, save_portfolio
+from portfolio import add_trade, get_total_portfolio_value, set_initial_balance, update_paper_balance, load_portfolio, save_portfolio
 from config_loader import get_binance_client 
 
 # Setup logging
@@ -120,81 +120,6 @@ def get_all_balances(client) -> Dict[str, float]:
         logger.error(f"Error fetching all balances: {e}")
         return {}
 
-def get_total_portfolio_value(client, symbols: List[str]) -> Dict:
-    """Calculate total portfolio value in USDT, only pricing relevant assets."""
-    if not client:
-        return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
-    
-    # Build set of base currencies we care about
-    base_currencies = set()
-    for sym in symbols:
-        base = sym.split('/')[0]
-        base_currencies.add(base)
-    base_currencies.add('USDT')
-    # base_currencies.add('USDC')
-
-    try:
-        account = client.get_account()
-        total_usdt = 0
-        cash_usdt = 0
-        holdings = {}
-
-        for balance in account['balances']:
-            asset = balance['asset']
-            free = float(balance['free'])
-            if free <= 0:
-                continue
-
-            # If asset is USDT, it's cash
-            if asset == 'USDT':
-                cash_usdt = free
-                total_usdt += free
-                holdings[asset] = free
-                continue
-
-            # If asset is not in our base set, skip pricing (value 0)
-            if asset not in base_currencies:
-                # Optionally log at debug level
-                logger.debug(f"Skipping {asset} (not in trading pairs)")
-                holdings[asset] = {
-                    'amount': free,
-                    'value_usdt': 0,
-                    'note': 'not priced (not in trading pairs)'
-                }
-                continue
-
-            # Try to get price in USDT
-            try:
-                symbol = f"{asset}USDT"
-                ticker = client.get_symbol_ticker(symbol=symbol)
-                price = float(ticker['price'])
-                value = free * price
-                total_usdt += value
-                holdings[asset] = {
-                    'amount': free,
-                    'price_usdt': price,
-                    'value_usdt': value
-                }
-            except Exception as e:
-                logger.debug(f"Could not price {asset}: {e}")
-                holdings[asset] = {
-                    'amount': free,
-                    'value_usdt': 0,
-                    'note': 'price fetch failed'
-                }
-
-        logger.info(f"💰 Total portfolio value: ${total_usdt:,.2f}")
-        return {
-            'total_usdt': total_usdt,
-            'cash_usdt': cash_usdt,
-            'holdings': holdings
-        }
-
-    except Exception as e:
-        logger.error(f"Error calculating portfolio value: {e}")
-        return {'total_usdt': 0, 'cash_usdt': 0, 'holdings': {}}
-
-
 def get_current_price(client, symbol: str) -> Optional[float]:
     """Get current price for a symbol from exchange"""
     if not client:
@@ -260,163 +185,23 @@ class TradingEngine:
             set_initial_balance(self.initial_total_value)
             logger.info(f"💰 Initial portfolio value: ${self.initial_total_value:,.2f}")
     
-    def get_portfolio_summary(self) -> Dict:
-        """
-        Get comprehensive portfolio summary - from portfolio in paper mode, from exchange in live/testnet
-        """
-        logger.info("💰 Getting portfolio summary...")
+    def get_cash_balance(self, quote_currency: str = "USDT") -> float:
+        """Get balance for specific quote currency from holdings"""
         
-        # PAPER MODE: Get from portfolio.json
-        if self.trading_mode == 'paper':
-            try:
-                from portfolio import load_portfolio, get_performance_summary
-                portfolio = load_portfolio()
-                perf = get_performance_summary()
-                
-                cash = portfolio.get('cash_balance', 0)
-                initial = portfolio.get('initial_balance', cash)
-                holdings = portfolio.get('holdings', {})
-                
-                # Calculate total value (cash + holdings at current prices)
-                total_value = cash
-                holdings_value = 0
-                
-                # Get current prices for holdings
-                current_prices = self.get_current_prices()
-                
-                for asset, amount in holdings.items():
-                    if asset != 'USDT' and amount > 0:
-                        symbol = f"{asset}/USDT"
-                        price = current_prices.get(symbol, 0)
-                        if price > 0:
-                            asset_value = amount * price
-                            holdings_value += asset_value
-                
-                total_value += holdings_value
-                total_return = total_value - initial
-                total_return_pct = (total_return / initial * 100) if initial > 0 else 0
-                
-                result = {
-                    'trading_mode': 'paper',
-                    'cash_balance': cash,
-                    'holdings': holdings,
-                    'holdings_value': holdings_value,
-                    'portfolio_value': total_value,
-                    'initial_balance': initial,
-                    'total_return': total_return,
-                    'total_return_pct': total_return_pct,
-                    'active_positions': len(self.open_positions),
-                    'total_trades': perf.get('total_trades', 0),
-                    'winning_trades': perf.get('winning_trades', 0),
-                    'win_rate': perf.get('win_rate', 0),
-                    'total_pnl': perf.get('total_pnl', 0),
-                    'last_sync': datetime.now().isoformat()
-                }
-                
-                logger.info(f"✅ Paper portfolio: ${result['portfolio_value']:,.2f}, Cash: ${cash:.2f}")
-                return result
-                
-            except Exception as e:
-                logger.error(f"❌ Error in paper portfolio summary: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                return {
-                    'trading_mode': 'paper',
-                    'cash_balance': self.config.get('starting_balance', 1000),
-                    'holdings': {},
-                    'holdings_value': 0,
-                    'portfolio_value': self.config.get('starting_balance', 1000),
-                    'initial_balance': self.config.get('starting_balance', 1000),
-                    'total_return': 0,
-                    'total_return_pct': 0,
-                    'active_positions': 0,
-                    'total_trades': 0,
-                    'winning_trades': 0,
-                    'win_rate': 0,
-                    'total_pnl': 0,
-                    'last_sync': datetime.now().isoformat()
-                }
-        
-        # LIVE/TESTNET MODE: Get from exchange
-        try:
-            # Get current portfolio value from exchange
-            portfolio = get_total_portfolio_value(self.binance_client, self.symbols)
-            logger.info(f"   Portfolio value: ${portfolio.get('total_usdt', 0):,.2f}")
-            
-            # Calculate returns
-            if self.initial_total_value is None:
-                self.initial_total_value = portfolio.get('total_usdt', 0)
-                logger.info(f"   Initial value set to: ${self.initial_total_value:,.2f}")
-            
-            total_return = portfolio.get('total_usdt', 0) - self.initial_total_value
-            total_return_pct = (total_return / self.initial_total_value * 100) if self.initial_total_value > 0 else 0
-            
-            # Get performance metrics from history
-            try:
-                from portfolio import get_performance_summary
-                perf = get_performance_summary()
-                logger.info(f"   Performance metrics loaded")
-            except Exception as e:
-                logger.warning(f"   Could not load performance metrics: {e}")
-                perf = {'total_trades': 0, 'winning_trades': 0, 'win_rate': 0, 'total_pnl': 0}
-            
-            result = {
-                'trading_mode': self.trading_mode,
-                'cash_balance': portfolio.get('cash_usdt', 0),
-                'holdings': portfolio.get('holdings', {}),
-                'portfolio_value': portfolio.get('total_usdt', 0),
-                'initial_balance': self.initial_total_value,
-                'total_return': total_return,
-                'total_return_pct': total_return_pct,
-                'active_positions': len(self.open_positions),
-                'total_trades': perf.get('total_trades', 0),
-                'winning_trades': perf.get('winning_trades', 0),
-                'win_rate': perf.get('win_rate', 0),
-                'total_pnl': perf.get('total_pnl', 0),
-                'last_sync': datetime.now().isoformat()
-            }
-            
-            logger.info(f"✅ Portfolio summary: ${result['portfolio_value']:,.2f}, {result['active_positions']} positions")
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Error in get_portfolio_summary: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return {
-                'trading_mode': self.trading_mode,
-                'cash_balance': 0,
-                'holdings': {},
-                'portfolio_value': 0,
-                'initial_balance': self.initial_total_value or 0,
-                'total_return': 0,
-                'total_return_pct': 0,
-                'active_positions': len(self.open_positions),
-                'total_trades': 0,
-                'winning_trades': 0,
-                'win_rate': 0,
-                'total_pnl': 0,
-                'last_sync': datetime.now().isoformat(),
-                'error': str(e)
-            }
-    
-    def get_cash_balance(self) -> float:
-        """Get USDT balance - from portfolio in paper mode, from exchange in live/testnet"""
-        
-        # PAPER MODE: Get from portfolio.json
+        # PAPER MODE
         if self.trading_mode == 'paper':
             try:
                 from portfolio import load_portfolio
                 portfolio = load_portfolio()
-                cash = portfolio.get('cash_balance', 0)
-                logger.debug(f"Paper mode cash balance: ${cash:.2f}")
+                holdings = portfolio.get('holdings', {})
+                cash = holdings.get(quote_currency, 0)
+                logger.debug(f"Paper mode {quote_currency} balance: ${cash:.2f}")
                 return cash
             except Exception as e:
-                logger.error(f"Error getting paper cash balance: {e}")
-                # Fallback to starting balance from config
-                return self.config.get('starting_balance', 1000)
+                logger.error(f"Error getting paper {quote_currency} balance: {e}")
+                return 100 if quote_currency == "USDT" else 0
         
-        # LIVE/TESTNET MODE: Get from exchange
+        # LIVE/TESTNET MODE
         if not self.binance_client:
             logger.error("No binance client available")
             return 0
@@ -424,12 +209,11 @@ class TradingEngine:
         try:
             account = self.binance_client.get_account()
             for balance in account['balances']:
-                if balance['asset'] == 'USDT':
+                if balance['asset'] == quote_currency:
                     return float(balance['free'])
-            logger.debug("No USDT balance found")
             return 0
         except Exception as e:
-            logger.error(f"Error fetching USDT balance: {e}")
+            logger.error(f"Error fetching {quote_currency} balance: {e}")
             return 0
 
     def get_current_prices(self) -> Dict[str, float]:
@@ -618,8 +402,9 @@ class TradingEngine:
 
             # Update paper portfolio balance
             from portfolio import update_paper_balance
+            quote_currency = symbol.split('/')[1]
             action = "buy" if side == 'long' else "sell"
-            result = update_paper_balance(base_currency, units, entry_price, action)
+            result = update_paper_balance(base_currency, units, entry_price, action, quote_currency)
 
             if result is None and action == "buy":
                 logger.error("❌ Paper buy failed - insufficient funds")
