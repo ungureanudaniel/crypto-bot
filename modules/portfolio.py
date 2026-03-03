@@ -216,10 +216,69 @@ def get_paper_summary():
 # -------------------------------------------------------------------
 # UNIFIED INTERFACE
 # -------------------------------------------------------------------
-def get_portfolio_summary():
+def get_portfolio_summary(self) -> Dict:
     """Get portfolio summary based on trading mode"""
-    if TRADING_MODE == 'paper':
-        return get_paper_summary()
+    """
+    Get comprehensive portfolio summary
+    """
+    logger.info("💰 Getting portfolio summary...")
+    
+    # PAPER MODE
+    if self.trading_mode == 'paper':
+        try:
+            from portfolio import load_portfolio, get_performance_summary
+            portfolio = load_portfolio()
+            perf = get_performance_summary()
+            
+            cash = portfolio.get('cash_balance', 0)
+            initial = portfolio.get('initial_balance', cash)
+            holdings = portfolio.get('holdings', {})
+            
+            # Calculate total value with current prices
+            total_value = cash
+            for asset, amount in holdings.items():
+                if asset != 'USDT' and amount > 0:
+                    from data_feed import get_current_price
+                    price = get_current_price(f"{asset}/USDT")
+                    if price:
+                        total_value += amount * price
+            
+            total_return = total_value - initial
+            total_return_pct = (total_return / initial * 100) if initial > 0 else 0
+            
+            return {
+                'trading_mode': 'paper',
+                'cash_balance': cash,
+                'holdings': holdings,
+                'portfolio_value': total_value,
+                'initial_balance': initial,
+                'total_return': total_return,
+                'total_return_pct': total_return_pct,
+                'active_positions': len(self.open_positions),
+                'total_trades': perf.get('total_trades', 0),
+                'winning_trades': perf.get('winning_trades', 0),
+                'win_rate': perf.get('win_rate', 0),
+                'total_pnl': perf.get('total_pnl', 0),
+                'last_sync': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error in paper portfolio summary: {e}")
+            return {
+                'trading_mode': 'paper',
+                'cash_balance': self.config.get('starting_balance', 1000),
+                'holdings': {},
+                'portfolio_value': self.config.get('starting_balance', 1000),
+                'initial_balance': self.config.get('starting_balance', 1000),
+                'total_return': 0,
+                'total_return_pct': 0,
+                'active_positions': 0,
+                'total_trades': 0,
+                'winning_trades': 0,
+                'win_rate': 0,
+                'total_pnl': 0,
+                'last_sync': datetime.now().isoformat()
+            }
     else:
         # Live mode - return performance metrics
         perf = get_performance_summary()
