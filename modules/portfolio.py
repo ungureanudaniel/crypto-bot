@@ -217,16 +217,14 @@ def get_paper_summary():
 # UNIFIED INTERFACE
 # -------------------------------------------------------------------
 def get_portfolio_summary(self) -> Dict:
-    """Get portfolio summary based on trading mode"""
     """
-    Get comprehensive portfolio summary
+    Get portfolio summary based on trading mode
     """
     logger.info("💰 Getting portfolio summary...")
     
     # PAPER MODE
     if self.trading_mode == 'paper':
         try:
-            from portfolio import load_portfolio, get_performance_summary
             portfolio = load_portfolio()
             perf = get_performance_summary()
             

@@ -699,18 +699,62 @@ async def execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Execute error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
+
+async def holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current holdings from portfolio"""
+    try:
+        from modules.portfolio import load_portfolio
+        from modules.trade_engine import trading_engine
+        
+        portfolio = load_portfolio()
+        holdings = portfolio.get('holdings', {})
+        
+        if not holdings or all(asset == 'USDT' for asset in holdings):
+            await update.message.reply_text("📭 No holdings", parse_mode='Markdown')
+            return
+        
+        # Get current prices
+        current_prices = trading_engine.get_current_prices()
+        
+        message_lines = [f"📊 *Current Holdings:*\n"]
+        
+        total_value = 0
+        cash = portfolio.get('cash_balance', 0)
+        
+        for asset, amount in holdings.items():
+            if asset == 'USDT':
+                continue
+            symbol = f"{asset}/USDT"
+            price = current_prices.get(symbol, 0)
+            value = amount * price
+            total_value += value
+            
+            message_lines.append(
+                f"• *{asset}*: {amount:.4f} @ ${price:.2f} = ${value:.2f}\n"
+            )
+        
+        message_lines.append(f"\n💰 *Holdings Value: ${total_value:.2f}*")
+        message_lines.append(f"💵 *Cash: ${cash:.2f}*")
+        message_lines.append(f"📊 *Total Portfolio: ${total_value + cash:.2f}*")
+        
+        await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"❌ Holdings error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current positions"""
+    """Show active positions (trades with stop/target)"""
     try:
         from modules.trade_engine import trading_engine
         
         if not trading_engine.open_positions:
-            await update.message.reply_text("📭 No open positions", parse_mode='Markdown')
+            await update.message.reply_text("📭 No active positions", parse_mode='Markdown')
             return
         
         current_prices = trading_engine.get_current_prices()
         
-        message_lines = [f"📊 *Open Positions ({len(trading_engine.open_positions)}):*\n"]
+        message_lines = [f"📊 *Active Positions ({len(trading_engine.open_positions)}):*\n"]
         
         total_pnl = 0
         
@@ -1047,6 +1091,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /balance - Show balance
     /summary - Quick portfolio summary
     /positions - Show open positions
+    /holdings - Show current holdings
     /help - This help
 
     <b>Trading Signals</b>
@@ -1112,6 +1157,7 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("positions", positions))
+    application.add_handler(CommandHandler("holdings", holdings))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("executeall", execute_all))
