@@ -899,6 +899,35 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Limit sell error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)[:150]}", parse_mode='Markdown')
 
+async def current_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get current price for symbol"""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/price SYMBOL`\nExample: `/price BTC/USDC`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    symbol = context.args[0].upper()
+    
+    try:
+        price = trading_engine.get_current_prices().get(symbol)
+        
+        if price:
+            await update.message.reply_text(
+                f"💰 Current price of {symbol} is `${price:.2f}`",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Could not fetch price for {symbol}",
+                parse_mode='Markdown'
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Price error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
 async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show pending orders from exchange"""
     try:
@@ -1063,6 +1092,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /summary - Quick portfolio summary
     /positions - Show open positions
     /holdings - Show current holdings
+    /price SYMBOL - Show current price of a symbol
     /help - This help
 
     <b>Trading Signals</b>
@@ -1128,6 +1158,7 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("positions", positions))
+    application.add_handler(CommandHandler("price", current_price))
     application.add_handler(CommandHandler("holdings", holdings))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("scan", scan))
