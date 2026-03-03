@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from data_feed import data_feed
 from strategy_tools import generate_trade_signal
 from config_loader import config
-from portfolio import add_trade, get_performance_summary, set_initial_balance
+from portfolio import add_trade, get_performance_summary, set_initial_balance, update_paper_balance
 from config_loader import get_binance_client 
 
 # Setup logging
@@ -459,6 +459,7 @@ class TradingEngine:
         position = self.open_positions[symbol]
         amount = position['amount']
         entry_price = position['entry_price']
+        base_currency = symbol.split('/')[0]
         
         # Calculate PnL
         if position['side'] == 'long':
@@ -468,8 +469,17 @@ class TradingEngine:
             pnl = (entry_price - exit_price) * amount
             pnl_pct = (1 - exit_price / entry_price) * 100
         
-        # Execute REAL trade if in live/paper mode
-        if self.trading_mode in ['live', 'paper'] and self.binance_client:
+        # PAPER MODE - update portfolio balance
+        if self.trading_mode == 'paper':
+            logger.info(f"📄 PAPER CLOSE: {position['side'].upper()} {amount:.6f} {symbol} at ${exit_price:.2f}")
+            
+            # Update paper portfolio balance
+            from portfolio import update_paper_balance
+            action = "sell" if position['side'] == 'long' else "buy"  # Reverse action
+            update_paper_balance(base_currency, amount, exit_price, action)
+        
+        # Execute REAL trade if in live/testnet mode
+        elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
             try:
                 binance_symbol = symbol.replace('/', '')
                 
@@ -562,6 +572,17 @@ class TradingEngine:
         # PAPER MODE
         if self.trading_mode == 'paper':
             logger.info(f"📄 PAPER TRADE: {side.upper()} {units:.6f} {symbol} at ${entry_price:.2f}")
+
+            # Update paper portfolio balance
+            from portfolio import update_paper_balance
+            action = "buy" if side == 'long' else "sell"
+            result = update_paper_balance(base_currency, units, entry_price, action)
+
+            if result is None and action == "buy":
+                logger.error("❌ Paper buy failed - insufficient funds")
+                return False
+
+
             execution_success = True
         
         # LIVE/TESTNET MODE
