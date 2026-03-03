@@ -128,16 +128,16 @@ async def health_job_callback(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command"""
     try:
-        # Get fresh summary from exchange
-        summary = get_portfolio_summary()
+        from modules.portfolio import get_portfolio_summary
+        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
         
         await update.message.reply_text(
             f"🤖 *Trading Bot Started!*\n\n"
-            f"📊 Mode: `{summary['trading_mode'].upper()}`\n"
-            f"💰 Portfolio: `${summary['portfolio_value']:,.2f}`\n"
-            f"💵 Cash: `${summary['cash_balance']:,.2f}`\n"
-            f"📈 Return: `{summary['total_return_pct']:+.1f}%`\n"
-            f"🎯 Active: `{summary['active_positions']}/{trading_engine.max_positions}`\n\n"
+            f"📊 Mode: `{summary.get('trading_mode', 'unknown').upper()}`\n"
+            f"💰 Portfolio: `${summary.get('total_value', 0):,.2f}`\n"  # ← FIXED
+            f"💵 Cash: `${summary.get('cash', {}).get('total', 0):,.2f}`\n"  # ← FIXED
+            f"📈 Return: `{summary.get('total_return_pct', 0):+.1f}%`\n"
+            f"🎯 Active: `{summary.get('positions_count', 0)}/{trading_engine.max_positions}`\n\n"
             f"Use /help for commands",
             parse_mode='Markdown'
         )
