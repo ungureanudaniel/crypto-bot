@@ -774,11 +774,12 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Place limit buy order"""
+    """Place manual limit buy order"""
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
             "Usage: `/limitbuy SYMBOL AMOUNT PRICE`\n"
-            "Example: `/limitbuy SOL/USDC 2 122`",
+            "Example: `/limitbuy BTC/USDT 0.001 50000`\n"
+            "         `/limitbuy SOL/USDT 2 122`",
             parse_mode='Markdown'
         )
         return
@@ -792,7 +793,7 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Amount and price must be numbers", parse_mode='Markdown')
         return
     
-    # Get optional stop loss
+    # Get optional stop loss and take profit
     stop_loss = None
     take_profit = None
     if len(context.args) >= 4:
@@ -807,23 +808,23 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     
     await update.message.reply_text(
-        f"📝 Placing limit BUY order...",
+        f"📝 Placing manual limit BUY order...",
         parse_mode='Markdown'
     )
     
     try:
-        success = trading_engine.open_position(
+        success, message = trading_engine.place_manual_limit_order(
             symbol=symbol,
             side='buy',
-            entry_price=price,
-            units=amount,
-            stop_loss=stop_loss if stop_loss is not None else price * 0.95,
+            quantity=amount,
+            price=price,
+            stop_loss=stop_loss if stop_loss is not None else price * 0.98,
             take_profit=take_profit if take_profit is not None else price * 1.05
         )
         
         if success:
             response = (
-                f"✅ *Limit BUY Order Placed!*\n\n"
+                f"✅ *Manual Limit BUY Order Placed!*\n\n"
                 f"Symbol: {symbol}\n"
                 f"Amount: {amount:.6f}\n"
                 f"Price: `${price:.2f}`\n"
@@ -838,7 +839,7 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(response, parse_mode='Markdown')
         else:
             await update.message.reply_text(
-                f"❌ Failed: Could not place limit buy order",
+                f"❌ Failed: {message}",
                 parse_mode='Markdown'
             )
             
@@ -847,11 +848,12 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)[:150]}", parse_mode='Markdown')
 
 async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Place limit sell order"""
+    """Place manual limit sell order"""
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
             "Usage: `/limitsell SYMBOL AMOUNT PRICE`\n"
-            "Example: `/limitsell SOL/USDC 2 125`",
+            "Example: `/limitsell BTC/USDT 0.001 55000`\n"
+            "         `/limitsell SOL/USDT 2 130`",
             parse_mode='Markdown'
         )
         return
@@ -865,33 +867,53 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Amount and price must be numbers", parse_mode='Markdown')
         return
     
+    # Get optional stop loss and take profit
+    stop_loss = None
+    take_profit = None
+    if len(context.args) >= 4:
+        try:
+            stop_loss = float(context.args[3])
+        except:
+            pass
+    if len(context.args) >= 5:
+        try:
+            take_profit = float(context.args[4])
+        except:
+            pass
+    
     await update.message.reply_text(
-        f"📝 Placing limit SELL order...",
+        f"📝 Placing manual limit SELL order...",
         parse_mode='Markdown'
     )
     
     try:
-        success = trading_engine.open_position(
+        success, message = trading_engine.place_manual_limit_order(
             symbol=symbol,
             side='sell',
-            entry_price=price,
-            units=amount,
-            stop_loss=price * 1.05,
-            take_profit=price * 0.95)
+            quantity=amount,
+            price=price,
+            stop_loss=stop_loss if stop_loss is not None else price * 1.02,
+            take_profit=take_profit if take_profit is not None else price * 0.95
+        )
         
         if success:
             response = (
-                f"✅ *Limit SELL Order Placed!*\n\n"
+                f"✅ *Manual Limit SELL Order Placed!*\n\n"
                 f"Symbol: {symbol}\n"
                 f"Amount: {amount:.6f}\n"
                 f"Price: `${price:.2f}`\n"
                 f"Total: `${amount * price:.2f}`\n"
             )
             
+            if stop_loss:
+                response += f"Stop Loss: `${stop_loss:.2f}`\n"
+            if take_profit:
+                response += f"Take Profit: `${take_profit:.2f}`\n"
+            
             await update.message.reply_text(response, parse_mode='Markdown')
         else:
             await update.message.reply_text(
-                f"❌ Failed: Could not place limit sell order",
+                f"❌ Failed: {message}",
                 parse_mode='Markdown'
             )
             

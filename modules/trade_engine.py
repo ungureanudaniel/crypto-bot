@@ -818,6 +818,98 @@ class TradingEngine:
             logger.error(f"❌ Error validating order: {e}")
             return False, quantity, str(e)
 
+    def place_manual_limit_order(self, symbol: str, side: str, quantity: float, price: float, 
+                            stop_loss: float, take_profit: float) -> Tuple[bool, str]:
+        """
+        Place a MANUAL limit order (for user commands only)
+        Returns: (success, message)
+        """
+        try:
+            logger.info(f"🔍 MANUAL LIMIT ORDER:")
+            logger.info(f"   Symbol: {symbol}")
+            logger.info(f"   Side: {side}")
+            logger.info(f"   Quantity: {quantity:.6f}")
+            logger.info(f"   Limit Price: ${price:.2f}")
+            logger.info(f"   Value: ${quantity * price:.2f}")
+            
+            # Validation checks
+            if quantity <= 0:
+                return False, "Invalid quantity"
+            if price <= 0:
+                return False, "Invalid price"
+            
+            # PAPER MODE - Simulate
+            if self.trading_mode == 'paper':
+                logger.info(f"📄 PAPER MANUAL LIMIT: {side.upper()} {quantity:.6f} {symbol} at ${price:.2f}")
+                
+                # In paper mode, execute immediately (simulate fill)
+                success = self.open_position(
+                    symbol=symbol,
+                    side=side,
+                    entry_price=price,
+                    units=quantity,
+                    stop_loss=stop_loss if stop_loss else price * 0.95,
+                    take_profit=take_profit if take_profit else price * 1.05
+                )
+                return success, "Paper limit order simulated"
+            
+            # LIVE/TESTNET MODE
+            elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
+                try:
+                    binance_symbol = symbol.replace('/', '')
+                    
+                    # VALIDATE AND ADJUST QUANTITY
+                    is_valid, adjusted_qty, error = self.validate_and_adjust_order(symbol, quantity)
+                    if not is_valid:
+                        return False, f"Order validation failed: {error}"
+                    
+                    if adjusted_qty != quantity:
+                        logger.info(f"🔄 Quantity adjusted from {quantity} to {adjusted_qty}")
+                        quantity = adjusted_qty
+                    
+                    # Place limit order
+                    if side == 'buy':
+                        order = self.binance_client.order_limit_buy(
+                            symbol=binance_symbol,
+                            quantity=round(quantity, 6),
+                            price=str(round(price, 2))
+                        )
+                    else:  # sell
+                        order = self.binance_client.order_limit_sell(
+                            symbol=binance_symbol,
+                            quantity=round(quantity, 6),
+                            price=str(round(price, 2))
+                        )
+                    
+                    logger.info(f"✅ Manual limit order placed: {order['orderId']}")
+                    
+                    # Store in pending orders for tracking
+                    if not hasattr(self, 'pending_orders'):
+                        self.pending_orders = {}
+                    
+                    self.pending_orders[order['orderId']] = {
+                        'symbol': symbol,
+                        'side': side,
+                        'quantity': quantity,
+                        'price': price,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'time': datetime.now().isoformat()
+                    }
+                    
+                    return True, f"Order placed: {order['orderId']}"
+                    
+                except Exception as e:
+                    logger.error(f"❌ Manual limit order failed: {e}")
+                    return False, str(e)
+            
+            else:
+                return False, "No valid trading mode or binance client"
+                
+        except Exception as e:
+            logger.error(f"❌ Error in manual limit order: {e}")
+            return False, str(e)
+
     def scan_and_trade(self) -> List[Dict]:
         """
         Scan all symbols for trading signals
