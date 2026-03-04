@@ -5,7 +5,7 @@ import time
 import threading
 from datetime import datetime
 
-from modules.portfolio import get_portfolio_summary, get_portfolio_health
+from modules.portfolio import get_portfolio_summary
 
 # -------------------------------------------------------------------
 # SETUP PATHS
@@ -128,8 +128,8 @@ def update_portfolio_summary():
         return
     
     try:
-        # Pass open_positions from trading_engine to portfolio function
-        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
+        # Portfolio summary reads from portfolio.json; optionally provide current prices
+        summary = get_portfolio_summary()
         
         logger.info(f"💰 Portfolio: ${summary.get('total_value', 0):,.2f}")
         logger.info(f"   Cash: ${summary.get('cash', {}).get('total', 0):,.2f}")
@@ -192,7 +192,7 @@ def health_check():
     try:
         # You need to implement get_portfolio_health in portfolio.py
         # For now, let's use a simple check
-        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
+        summary = get_portfolio_summary()
         
         # Simple health check: if return is worse than -10%, it's unhealthy
         is_healthy = summary.get('total_return_pct', 0) > -10
@@ -224,7 +224,7 @@ def log_daily_performance():
         return
     
     try:
-        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
+        summary = get_portfolio_summary()
         
         log_entry = {
             'date': datetime.now().strftime('%Y-%m-%d'),

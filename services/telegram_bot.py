@@ -127,9 +127,12 @@ async def health_job_callback(context: ContextTypes.DEFAULT_TYPE):
 # -------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     try:
         from modules.portfolio import get_portfolio_summary
-        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
+        summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
         
         await update.message.reply_text(
             f"🤖 *Trading Bot Started!*\n\n"
@@ -147,6 +150,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show balance with debug info"""
+    if not update.message:
+        logger.warning("⚠️ Balance command triggered without message object")
+        return
     await update.message.reply_text("💰 Fetching balance...", parse_mode='Markdown')
     
     try:
@@ -229,7 +235,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # LIVE MODE - use get_portfolio_summary from portfolio.py
         try:
             from modules.portfolio import get_portfolio_summary
-            summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
+            summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
             logger.info(f"   get_portfolio_summary() returned: {summary is not None}")
         except Exception as e:
             logger.error(f"   ❌ get_portfolio_summary() failed: {e}")
@@ -269,6 +275,9 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick portfolio summary - works in both paper and live mode"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     try:
         # PAPER MODE
         if trading_engine.trading_mode == 'paper':
@@ -312,7 +321,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # LIVE/TESTNET MODE
         from modules.portfolio import get_portfolio_summary
-        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
+        summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
         
         pnl_emoji = "🟢" if summary.get('total_return_pct', 0) >= 0 else "🔴"
         
@@ -331,11 +340,14 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     try:
         from modules.portfolio import get_portfolio_summary
         
         # Get fresh data
-        summary = get_portfolio_summary(open_positions=trading_engine.open_positions)
+        summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
         
         # Get trade history for win rate
         trade_history = load_trade_history()
@@ -395,6 +407,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually trigger scan for signals"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     await update.message.reply_text("🔍 Scanning for trading signals...", parse_mode='Markdown')
     
     try:
@@ -457,6 +472,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Execute all pending signals"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
+
     if not context.user_data or 'pending_signals' not in context.user_data:
         await update.message.reply_text(
             "❌ No pending signals. Run `/scan` first.",
@@ -586,6 +605,9 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def emergency_sell_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """EMERGENCY: Sell all positions at market price"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     await update.message.reply_text("🚨 *EMERGENCY SELL ALL* 🚨\n\nSelling all positions...", parse_mode='Markdown')
     
     try:
@@ -630,6 +652,9 @@ async def emergency_sell_all(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # -------------------------------------------------------------------
 async def execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Execute specific signal"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     if not context.args:
         await update.message.reply_text(
             "Usage: `/execute SYMBOL`\nExample: `/execute BTC/USDC`",
@@ -693,6 +718,9 @@ async def execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current holdings from portfolio"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     try:
         from modules.portfolio import load_portfolio
         portfolio = load_portfolio()
@@ -734,6 +762,9 @@ async def holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show active positions (trades with stop/target)"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     try:        
         if not trading_engine.open_positions:
             await update.message.reply_text("📭 No active positions", parse_mode='Markdown')
@@ -781,6 +812,9 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Place manual limit buy order"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
             "Usage: `/limitbuy SYMBOL AMOUNT PRICE`\n"
@@ -855,6 +889,9 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Place manual limit sell order"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
             "Usage: `/limitsell SYMBOL AMOUNT PRICE`\n"
@@ -929,6 +966,9 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def current_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get current price for symbol"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     if not context.args:
         await update.message.reply_text(
             "Usage: `/price SYMBOL`\nExample: `/price BTC/USDC`",
@@ -958,6 +998,9 @@ async def current_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show pending orders from exchange"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     try:
         if not trading_engine.binance_client:
             await update.message.reply_text("📭 No exchange connection", parse_mode='Markdown')
@@ -1007,6 +1050,9 @@ async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel all pending orders on exchange"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     await update.message.reply_text("🗑️ Cancelling all pending orders on exchange...", parse_mode='Markdown')
     
     try:
@@ -1069,6 +1115,9 @@ async def cancel_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set stop loss for position"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
             "Usage: `/setstop SYMBOL STOP_PRICE [TAKE_PROFIT]`\n"
@@ -1110,6 +1159,9 @@ async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     help_text = """
     <b>🤖 Trading Bot Commands</b>
 

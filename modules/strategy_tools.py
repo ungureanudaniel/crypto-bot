@@ -56,23 +56,34 @@ def calculate_atr(df, length=14):
 def get_available_balance(symbol, trading_engine):
     """
     Get available balance for short positions.
-    For shorts, we need to know how much of the base currency we have to borrow/sell.
+    For shorts, we need to know how much of the base currency we have.
     """
+    if not trading_engine:
+        return 0
+        
     base_currency = symbol.split('/')[0]
 
-    # PAPER MODE: Check paper portfolio
-    if trading_engine and trading_engine.trading_mode == 'paper':
+    # PAPER MODE: Check open positions for the asset
+    if trading_engine.trading_mode == 'paper':
         try:
-            from portfolio import load_portfolio
-            portfolio = load_portfolio()
-            # Get holdings from paper portfolio
-            holdings = portfolio.get('holdings', {})
-            return holdings.get(base_currency, 0)
+            # Look through open positions to find this asset
+            available = 0
+            for pos_symbol, position in trading_engine.open_positions.items():
+                if pos_symbol.split('/')[0] == base_currency and position['side'] == 'long':
+                    # If we already have a long position in this asset, we can use it for short
+                    available = position.get('amount', 0)
+                    break
+            
+            # Also check if we have the asset in cash? No, cash is only quote currencies
+            # For paper mode, we only have what's in positions
+            return available
+            
         except Exception as e:
             logger.debug(f"Could not get paper balance for {base_currency}: {e}")
             return 0
-    # LIVE MODE: Check real exchange balance
-    if not trading_engine or not trading_engine.binance_client:
+    
+    # LIVE/TESTNET MODE: Check real exchange balance
+    if not trading_engine.binance_client:
         return 0
     
     try:
@@ -787,7 +798,7 @@ if __name__ == "__main__":
     print("⚠️  TEST 6: Edge Cases")
     print("=" * 60)
     
-    from data_feed import fetch_ohlcv
+    from modules.data_feed import fetch_ohlcv
     df = fetch_ohlcv("BTC/USDT", interval="1h", limit=200)
     
     edge_cases = [

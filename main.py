@@ -21,10 +21,18 @@ print("🚀 BINANCE AI TRADING BOT")
 print("=" * 60)
 print("\nStarting... Press Ctrl+C to stop\n")
 
-# Train model (optional)
+# Check trading mode
+try:
+    from config_loader import config
+    trading_mode = config.config.get('trading_mode', 'paper')
+    print(f"📊 Trading Mode: {trading_mode.upper()}")
+except Exception as e:
+    print(f"⚠️ Could not get trading mode: {e}")
+
+# Train model (only in paper/testnet mode to avoid live disruptions)
 try:
     from modules.regime_switcher import train_model
-    print("🔄 Training model...")
+    print("🔄 Training regime detection model...")
     train_model()
     print("✅ Model trained")
 except Exception as e:

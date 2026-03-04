@@ -9,7 +9,10 @@ from typing import Dict, List, Optional, Tuple
 from modules.data_feed import data_feed
 from modules.strategy_tools import generate_trade_signal
 from modules.regime_switcher import predict_regime, train_model
-from modules.portfolio import add_trade, get_total_portfolio_value, set_initial_balance, update_paper_balance, load_portfolio, save_portfolio
+from modules.portfolio import (
+    add_trade, load_portfolio, save_portfolio, 
+    get_cash, update_cash, get_positions, save_positions
+)
 from config_loader import get_binance_client, config
 
 # Setup logging
@@ -40,9 +43,7 @@ client = get_binance_client()
 def save_positions_to_file(positions: Dict):
     """Save open positions to portfolio.json"""
     try:
-        portfolio = load_portfolio()
-        portfolio["positions"] = positions
-        save_portfolio(portfolio)
+        save_positions(positions)
         logger.debug(f"💾 Saved {len(positions)} positions to portfolio.json")
     except Exception as e:
         logger.error(f"❌ Failed to save positions: {e}")
@@ -50,8 +51,7 @@ def save_positions_to_file(positions: Dict):
 def load_positions_from_file() -> Dict:
     """Load open positions from portfolio.json"""
     try:
-        portfolio = load_portfolio()
-        positions = portfolio.get("positions", {})
+        positions = get_positions()
         logger.info(f"📂 Loaded {len(positions)} positions from portfolio.json")
         return positions
     except Exception as e:
@@ -148,9 +148,7 @@ class TradingEngine:
         
         # Load open positions from file on startup
         try:
-            from portfolio import load_portfolio
-            portfolio = load_portfolio()
-            self.open_positions = portfolio.get("positions", {})
+            self.open_positions = get_positions()
             logger.info(f"📂 Loaded {len(self.open_positions)} positions from portfolio.json")
             
             # Log first position to verify data
@@ -175,27 +173,15 @@ class TradingEngine:
         logger.info(f"📊 Monitoring {len(self.symbols)} symbols on {self.timeframe}")
         logger.info(f"📈 Max positions: {self.max_positions}, Risk per trade: {self.risk_per_trade:.1%}")
         logger.info(f"📂 Loaded {len(self.open_positions)} existing positions")
-        
-        # Get initial portfolio value
-        if self.binance_client:
-            portfolio = get_total_portfolio_value(self.binance_client, self.symbols)
-            self.initial_total_value = portfolio['total_usdt']
-            # Save initial balance to history
-            set_initial_balance(self.initial_total_value)
-            logger.info(f"💰 Initial portfolio value: ${self.initial_total_value:,.2f}")
     
     def get_cash_balance(self, quote_currency: str = "USDT") -> float:
-        """Get balance for specific quote currency from holdings"""
+        """Get balance for specific quote currency"""
         
         # PAPER MODE
         if self.trading_mode == 'paper':
             try:
-                from portfolio import load_portfolio
-                portfolio = load_portfolio()
-                holdings = portfolio.get('holdings', {})
-                cash = holdings.get(quote_currency, 0)
-                logger.debug(f"Paper mode {quote_currency} balance: ${cash:.2f}")
-                return cash
+                cash_dict = get_cash()
+                return cash_dict.get(quote_currency, 0)
             except Exception as e:
                 logger.error(f"Error getting paper {quote_currency} balance: {e}")
                 return 100 if quote_currency == "USDT" else 0
@@ -282,7 +268,7 @@ class TradingEngine:
         position = self.open_positions[symbol]
         amount = position['amount']
         entry_price = position['entry_price']
-        base_currency = symbol.split('/')[0]
+        quote_currency = position.get('quote_currency', 'USDT')
         
         # Calculate PnL
         if position['side'] == 'long':
@@ -292,14 +278,13 @@ class TradingEngine:
             pnl = (entry_price - exit_price) * amount
             pnl_pct = (1 - exit_price / entry_price) * 100
         
-        # PAPER MODE - update portfolio balance
+        # PAPER MODE - update cash
         if self.trading_mode == 'paper':
             logger.info(f"📄 PAPER CLOSE: {position['side'].upper()} {amount:.6f} {symbol} at ${exit_price:.2f}")
             
-            # Update paper portfolio balance
-            from portfolio import update_paper_balance
-            action = "sell" if position['side'] == 'long' else "buy"  # Reverse action
-            update_paper_balance(base_currency, amount, exit_price, action)
+            # Add cash back (original cost + profit)
+            cash_return = amount * exit_price
+            update_cash(quote_currency, cash_return, "add")
         
         # Execute REAL trade if in live/testnet mode
         elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
@@ -333,7 +318,8 @@ class TradingEngine:
             'pnl': pnl,
             'pnl_pct': pnl_pct,
             'reason': reason,
-            'mode': self.trading_mode
+            'mode': self.trading_mode,
+            'quote_currency': quote_currency
         })
         
         # Send notification
@@ -355,7 +341,7 @@ class TradingEngine:
         return True
 
     def open_position(self, symbol: str, side: str, entry_price: float, 
-                 units: float, stop_loss: float, take_profit: float) -> bool:
+                     units: float, stop_loss: float, take_profit: float) -> bool:
         """Open a new position with stop loss and take profit"""
         # DEBUG: Log everything
         logger.info(f"🔍 OPEN POSITION ATTEMPT:")
@@ -391,6 +377,7 @@ class TradingEngine:
             return False
         
         base_currency = symbol.split('/')[0]
+        quote_currency = symbol.split('/')[1]
         
         # ===== EXECUTION BASED ON MODE =====
         execution_success = False
@@ -399,16 +386,16 @@ class TradingEngine:
         if self.trading_mode == 'paper':
             logger.info(f"📄 PAPER TRADE: {side.upper()} {units:.6f} {symbol} at ${entry_price:.2f}")
 
-            # Update paper portfolio balance
-            from portfolio import update_paper_balance
-            quote_currency = symbol.split('/')[1]
-            action = "buy" if side == 'long' else "sell"
-            result = update_paper_balance(base_currency, units, entry_price, action, quote_currency)
-
-            if result is None and action == "buy":
-                logger.error("❌ Paper buy failed - insufficient funds")
+            # Check cash balance
+            cash_balance = self.get_cash_balance(quote_currency)
+            cost = units * entry_price
+            
+            if cash_balance < cost:
+                logger.error(f"❌ Insufficient {quote_currency}: have ${cash_balance:.2f}, need ${cost:.2f}")
                 return False
-
+            
+            # Deduct cash
+            update_cash(quote_currency, cost, "subtract")
             execution_success = True
         
         # LIVE/TESTNET MODE
@@ -494,8 +481,13 @@ class TradingEngine:
                 'side': side,
                 'amount': units,
                 'entry_price': entry_price,
+                'current_price': entry_price,
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
+                'quote_currency': quote_currency,
+                'value': units * entry_price,
+                'pnl': 0.0,
+                'pnl_pct': 0.0,
                 'entry_time': datetime.now().isoformat(),
                 'mode': self.trading_mode
             }
@@ -512,7 +504,8 @@ class TradingEngine:
                 'price': entry_price,
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
-                'mode': self.trading_mode
+                'mode': self.trading_mode,
+                'quote_currency': quote_currency
             })
             
             # Send notification
@@ -603,7 +596,7 @@ class TradingEngine:
             return False, quantity, str(e)
 
     def place_manual_limit_order(self, symbol: str, side: str, quantity: float, price: float, 
-                            stop_loss: float, take_profit: float) -> Tuple[bool, str]:
+                            stop_loss: Optional[float] = None, take_profit: Optional[float] = None) -> Tuple[bool, str]:
         """
         Place a MANUAL limit order (for user commands only)
         Returns: (success, message)
@@ -615,6 +608,12 @@ class TradingEngine:
             logger.info(f"   Quantity: {quantity:.6f}")
             logger.info(f"   Limit Price: ${price:.2f}")
             logger.info(f"   Value: ${quantity * price:.2f}")
+            
+            # Set default stop/target if not provided
+            if stop_loss is None:
+                stop_loss = price * 0.95
+            if take_profit is None:
+                take_profit = price * 1.05
             
             # Validation checks
             if quantity <= 0:
@@ -632,10 +631,10 @@ class TradingEngine:
                     side=side,
                     entry_price=price,
                     units=quantity,
-                    stop_loss=stop_loss if stop_loss else price * 0.95,
-                    take_profit=take_profit if take_profit else price * 1.05
+                    stop_loss=stop_loss,
+                    take_profit=take_profit
                 )
-                return success, "Paper limit order simulated"
+                return success, "Paper limit order simulated" if success else "Failed to place paper order"
             
             # LIVE/TESTNET MODE
             elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
@@ -739,7 +738,6 @@ class TradingEngine:
                     logger.debug(f"📊 {symbol} regime: {regime}")
                     
                     # Skip trading in certain regimes if desired
-                    # For example, skip if market is too volatile
                     if "Volatile" in regime and self.trading_mode != 'paper':
                         logger.debug(f"⏭️ Skipping {symbol} due to volatile regime")
                         continue
@@ -752,15 +750,14 @@ class TradingEngine:
                 available_balance = None
                 base_currency = symbol.split('/')[0]
                 
-                # PAPER MODE: Get from portfolio
+                # PAPER MODE: Get from portfolio positions
                 if self.trading_mode == 'paper':
-                    try:
-                        from portfolio import load_portfolio
-                        portfolio = load_portfolio()
-                        holdings = portfolio.get('holdings', {})
-                        available_balance = holdings.get(base_currency, 0)
-                    except Exception as e:
-                        logger.debug(f"Could not get paper {base_currency} balance: {e}")
+                    # For shorts, we need the base currency balance
+                    # In paper mode, we can check if we already have this asset in positions
+                    for pos_symbol, position in self.open_positions.items():
+                        if pos_symbol.split('/')[0] == base_currency and position['side'] == 'long':
+                            available_balance = position.get('amount', 0)
+                            break
                 
                 # LIVE/TESTNET MODE: Get from exchange
                 elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
@@ -794,11 +791,10 @@ class TradingEngine:
                         signals_found.append({
                             'symbol': symbol,
                             'signal': signal,
-                            'regime': regime  # Add regime to signal data
+                            'regime': regime
                         })
                         self.last_signals[symbol] = signal_key
                         
-                        # Log with regime info
                         logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} {signal['side']} signal at ${signal['entry']:.2f} (Regime: {regime})")
                     else:
                         logger.info(f"⏭️ {symbol}: Duplicate signal skipped")
@@ -850,10 +846,11 @@ class TradingEngine:
             
             # Different checks based on side
             if signal['side'] == 'long':
-                # For LONG positions, check USDT balance
-                cash = self.get_cash_balance()
+                # For LONG positions, check quote currency balance
+                quote_currency = symbol.split('/')[1]
+                cash = self.get_cash_balance(quote_currency)
                 cost = signal['units'] * signal['entry']
-                logger.info(f"   Cash: ${cash:.2f}, Cost: ${cost:.2f}")
+                logger.info(f"   {quote_currency} balance: ${cash:.2f}, Cost: ${cost:.2f}")
                 
                 if cash < cost:
                     logger.warning(f"⚠️ Insufficient funds: Need ${cost:.2f}, have ${cash:.2f}")
@@ -869,20 +866,19 @@ class TradingEngine:
                 # For SHORT positions, check base currency balance
                 base_currency = symbol.split('/')[0]
                 
-                # PAPER MODE: Check portfolio
+                # PAPER MODE: Check positions
                 if self.trading_mode == 'paper':
-                    try:
-                        from portfolio import load_portfolio
-                        portfolio = load_portfolio()
-                        holdings = portfolio.get('holdings', {})
-                        asset_balance = holdings.get(base_currency, 0)
-                        logger.info(f"   Paper {base_currency} balance: {asset_balance:.6f}, Required: {signal['units']:.6f}")
-                        
-                        if asset_balance < signal['units']:
-                            logger.warning(f"⚠️ Insufficient {base_currency}: have {asset_balance:.6f}, need {signal['units']:.6f}")
-                            return False
-                    except Exception as e:
-                        logger.error(f"❌ Error checking paper {base_currency} balance: {e}")
+                    # Find if we have this asset in any long position
+                    available = 0
+                    for pos_symbol, position in self.open_positions.items():
+                        if pos_symbol.split('/')[0] == base_currency and position['side'] == 'long':
+                            available = position.get('amount', 0)
+                            break
+                    
+                    logger.info(f"   Paper {base_currency} available: {available:.6f}, Required: {signal['units']:.6f}")
+                    
+                    if available < signal['units']:
+                        logger.warning(f"⚠️ Insufficient {base_currency}: have {available:.6f}, need {signal['units']:.6f}")
                         return False
                 
                 # LIVE/TESTNET MODE: Check exchange
@@ -931,4 +927,5 @@ class TradingEngine:
             logger.error(traceback.format_exc())
             return False
 
+# Create singleton instance
 trading_engine = TradingEngine()

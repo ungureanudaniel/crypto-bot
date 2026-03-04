@@ -59,6 +59,7 @@ class Notifier:
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=message,
+                parse_mode='HTML'
             )
             
             logger.info(f"📤 Message sent: {message[:50]}...")
