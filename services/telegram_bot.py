@@ -2,8 +2,6 @@
 import json
 import sys
 import os
-
-from modules.portfolio import get_portfolio_summary
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
@@ -55,7 +53,7 @@ def get_config():
         return app_config.config
     except:
         return {
-            'trading_mode': 'paper',
+            'trading_mode': os.environ.get('TRADING_MODE', 'paper'),
             'telegram_token': os.environ.get('TELEGRAM_TOKEN', ''),
             'telegram_chat_id': os.environ.get('TELEGRAM_CHAT_ID', '')
         }
@@ -136,7 +134,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"🤖 *Trading Bot Started!*\n\n"
-            f"📊 Mode: `{summary.get('trading_mode', 'unknown').upper()}`\n"
+            f"📊 Mode: `{CONFIG.get('trading_mode', 'unknown').upper()}`\n"
             f"💰 Portfolio: `${summary.get('total_value', 0):,.2f}`\n"  # ← FIXED
             f"💵 Cash: `${summary.get('cash', {}).get('total', 0):,.2f}`\n"  # ← FIXED
             f"📈 Return: `{summary.get('total_return_pct', 0):+.1f}%`\n"
