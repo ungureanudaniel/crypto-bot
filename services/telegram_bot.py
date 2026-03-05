@@ -354,13 +354,15 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""
+    if not update.message:
+        logger.warning("⚠️ Summary command triggered without message object")
+        return
     try:
         from modules.portfolio import get_portfolio_summary
         from modules.trade_engine import trading_engine
         
         # Get fresh data
-        current_prices = trading_engine.get_current_prices()
-        summary = get_portfolio_summary(current_prices=current_prices)
+        summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
         
         # Get trade history for win rate
         from modules.portfolio import load_portfolio
@@ -370,45 +372,36 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         winning_trades = [t for t in closed_trades if t.get('pnl', 0) > 0]
         win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0
         
-        # Get cash correctly from the cash dict
-        cash_dict = summary.get('cash', {"USDT": 0, "USDC": 0})
-        total_cash = cash_dict.get('USDT', 0) + cash_dict.get('USDC', 0)
-        
         # Build message
         message_lines = [
             f"🤖 *Trading Bot Status*\n",
             f"━━━━━━━━━━━━━━━━",
             f"📊 Mode: `{summary.get('trading_mode', 'PAPER')}`",
             f"💰 Portfolio: `${summary.get('total_value', 0):,.2f}`",
-            f"💵 Cash: `${total_cash:,.2f}`",  # ← FIXED: shows $47.00
-            f"📈 Return: `{summary.get('total_return_pct', 0):+.1f}%`",
+            f"💵 Cash: `${summary.get('total_cash', 0):,.2f}`",  # ← This shows your $47
+            f"📈 Return: `{summary.get('total_return', 0):+.1f}%`",
             f"🎯 Win Rate: `{win_rate:.1f}%`",
             f"📊 Active: `{summary.get('positions_count', 0)}/{trading_engine.max_positions}`",
             f"📋 Total Trades: `{len(closed_trades)}`",
         ]
         
-        # Add positions (your existing code)
+        # Add positions
         positions = summary.get('positions', {})
         if positions:
             message_lines.append(f"\n📊 *Active Positions:*")
             message_lines.append(f"━━━━━━━━━━━━━━━━")
             
             for symbol, position in positions.items():
-                current_price = current_prices.get(symbol, position.get('entry_price', 0))
+                current_price = position.get('current_price', position.get('entry_price', 0))
                 entry_price = position.get('entry_price', 0)
                 amount = position.get('amount', 0)
+                pnl = position.get('pnl', 0)
+                pnl_pct = position.get('pnl_pct', 0)
                 
-                if position['side'] == 'long':
-                    pnl = (current_price - entry_price) * amount
-                    pnl_pct = ((current_price / entry_price) - 1) * 100
-                    pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-                else:  # short
-                    pnl = (entry_price - current_price) * amount
-                    pnl_pct = (1 - (current_price / entry_price)) * 100
-                    pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
                 
                 message_lines.append(
-                    f"\n{pnl_emoji} *{symbol}* ({position['side'].upper()})"
+                    f"\n{pnl_emoji} *{symbol}* ({position.get('side', 'unknown').upper()})"
                     f"\n   Entry: `${entry_price:.2f}`"
                     f"\n   Current: `${current_price:.2f}`"
                     f"\n   P&L: `${pnl:+.2f}` ({pnl_pct:+.1f}%)"

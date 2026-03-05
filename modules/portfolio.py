@@ -193,12 +193,12 @@ def get_portfolio_summary(current_prices: Optional[Mapping[str, float]] = None) 
     total_value = total_cash + positions_value
     
     return {
-        "total_value": total_value,
-        "cash": cash,
-        "total_cash": total_cash,
-        "positions": enhanced_positions,
-        "positions_count": len(positions),
-        "positions_value": positions_value,
+        'trading_mode': TRADING_MODE,
+        'total_value': total_value,
+        'cash': cash,
+        'total_cash': total_cash,
+        'positions': enhanced_positions,
+        'positions_count': len(positions),
         "positions_pnl": positions_pnl,
         "total_trades": perf.get("total_trades", 0),
         "winning_trades": perf.get("winning_trades", 0),
