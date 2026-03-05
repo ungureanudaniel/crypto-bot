@@ -175,50 +175,61 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             try:
                 from modules.portfolio import load_portfolio
+                from modules.portfolio import get_performance_summary
                 portfolio = load_portfolio()
+                perf = get_performance_summary()
+
                 
-                # Get cash from holdings["USDT"] (not cash_balance)
-                holdings = portfolio.get('holdings', {})
-                cash = holdings.get('USDT', 0)  # ← FIXED: Use holdings["USDT"]
+                # Get cash from
+                cash = portfolio.get('cash', {'USDT': 0, 'USDC': 0})
+                cash_total = cash.get('USDT', 0) + cash.get('USDC', 0)
                 
                 # Get initial balance from portfolio
                 initial_balance = portfolio.get('initial_balance', cash)
 
-                from modules.portfolio import get_performance_summary
-                perf = get_performance_summary()
+                positions = portfolio.get('positions', {})
 
-                # Calculate total value
-                total_value = cash
-                for asset, amount in holdings.items():
-                    if asset not in ['USDT', 'USDC'] and amount > 0:
-                        from modules.data_feed import get_current_price
-                        price = get_current_price(asset + '/USDT')
-                        if price:
-                            total_value += amount * price
-                    
+                # Calculate total value from positions
+                positions_value = 0
+                for symbol, position in positions.items():
+                    positions_value += position.get('value', position['amount'] * position['entry_price'])
+                
+                
+                # Get current prices for positions (optional)
+                current_prices = trading_engine.get_current_prices()
+                
+                # Update position values with current prices
+                updated_positions_value = 0
+                for symbol, position in positions.items():
+                    current_price = current_prices.get(symbol, position.get('current_price', position['entry_price']))
+                    position_value = position['amount'] * current_price
+                    updated_positions_value += position_value
+                
+                total_value = cash_total + updated_positions_value
+                
+                # Get initial balance (you might want to store this in portfolio)
+                initial_balance = 100  # Default, or store in portfolio
+                
                 total_return = total_value - initial_balance
                 total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
 
                 response = (
                     f"💰 *Paper Portfolio Balance*\n\n"
                     f"Total Value: `${total_value:,.2f}`\n"
-                    f"Cash (USDT): `${cash:,.2f}`\n"
+                    f"Cash: `${cash_total:,.2f}`\n"
                     f"Return: `{total_return_pct:+.1f}%`\n"
                     f"Win Rate: `{perf.get('win_rate', 0):.1f}%`\n"
                     f"Trades: `{perf.get('total_trades', 0)}`\n"
                 )
                 
-                # Add holdings
-                other_holdings = {k: v for k, v in holdings.items() if k not in ['USDT', 'USDC']}
-                if other_holdings:
-                    response += "\n📊 *Holdings:*\n"
-                    for asset, amount in other_holdings.items():
-                        from modules.data_feed import get_current_price
-                        price = get_current_price(asset + '/USDT')
-                        if price:
-                            response += f"   • {asset}: {amount:.4f} (${price * amount:,.2f})\n"
-                        else:
-                            response += f"   • {asset}: {amount:.4f}\n"
+                # Add positions
+                if positions:
+                    response += "\n📊 *Positions:*\n"
+                    for symbol, position in positions.items():
+                        current_price = current_prices.get(symbol, position.get('current_price', position['entry_price']))
+                        pnl = (current_price - position['entry_price']) * position['amount'] if position['side'] == 'long' else (position['entry_price'] - current_price) * position['amount']
+                        pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                        response += f"   {pnl_emoji} {symbol}: {position['amount']:.4f} @ ${position['entry_price']:.2f} → ${current_price:.2f} (PnL: ${pnl:+.2f})\n"
 
                 await update.message.reply_text(response, parse_mode='Markdown')
                 return
@@ -245,25 +256,23 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Could not get portfolio summary")
             return
         
-        # Format the response using the new structure
+        # Format the response
         response = (
             f"💰 *Portfolio Balance*\n\n"
             f"Total Value: `${summary.get('total_value', 0):,.2f}`\n"
-            f"Cash: `${summary.get('cash', {}).get('total', 0):,.2f}`\n"
+            f"Cash: `${summary.get('total_cash', 0):,.2f}`\n"
             f"Return: `{summary.get('total_return_pct', 0):+.1f}%`\n"
             f"Win Rate: `{summary.get('win_rate', 0):.1f}%`\n"
         )
         
-        # Add holdings if any
-        holdings = summary.get('holdings', {})
-        crypto_holdings = {k: v for k, v in holdings.items() if k not in ['USDT', 'USDC']}
-        if crypto_holdings:
-            response += "\n📊 *Holdings:*\n"
-            for asset, data in crypto_holdings.items():
-                amount = data.get('amount', 0)
-                value = data.get('value_usd', 0)
-                if amount > 0:
-                    response += f"   • {asset}: {amount:.4f} (${value:,.2f})\n"
+        # Add positions if any
+        positions = summary.get('positions', {})
+        if positions:
+            response += "\n📊 *Positions:*\n"
+            for symbol, pos in positions.items():
+                pnl = pos.get('pnl', 0)
+                pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                response += f"   {pnl_emoji} {symbol}: {pos.get('amount', 0):.4f} @ ${pos.get('entry_price', 0):.2f} → ${pos.get('current_price', 0):.2f} (PnL: ${pnl:+.2f})\n"
         
         await update.message.reply_text(response, parse_mode='Markdown')
         
