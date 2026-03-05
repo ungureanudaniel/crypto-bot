@@ -354,43 +354,46 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""
-    if not update.message:
-        logger.warning("⚠️ Start command triggered without message object")
-        return
     try:
         from modules.portfolio import get_portfolio_summary
+        from modules.trade_engine import trading_engine
         
         # Get fresh data
-        summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
+        current_prices = trading_engine.get_current_prices()
+        summary = get_portfolio_summary(current_prices=current_prices)
         
         # Get trade history for win rate
-        trade_history = load_trade_history()
+        from modules.portfolio import load_portfolio
+        portfolio = load_portfolio()
+        trade_history = portfolio.get('trade_history', [])
         closed_trades = [t for t in trade_history if t.get('action') == 'close']
         winning_trades = [t for t in closed_trades if t.get('pnl', 0) > 0]
         win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0
+        
+        # Get cash correctly from the cash dict
+        cash_dict = summary.get('cash', {"USDT": 0, "USDC": 0})
+        total_cash = cash_dict.get('USDT', 0) + cash_dict.get('USDC', 0)
         
         # Build message
         message_lines = [
             f"🤖 *Trading Bot Status*\n",
             f"━━━━━━━━━━━━━━━━",
-            f"📊 Mode: `{CONFIG.get('trading_mode', 'unknown').upper()}`",
+            f"📊 Mode: `{summary.get('trading_mode', 'PAPER')}`",
             f"💰 Portfolio: `${summary.get('total_value', 0):,.2f}`",
-            f"💵 Cash: `${summary.get('cash', {}).get('total', 0):,.2f}`",
+            f"💵 Cash: `${total_cash:,.2f}`",  # ← FIXED: shows $47.00
             f"📈 Return: `{summary.get('total_return_pct', 0):+.1f}%`",
             f"🎯 Win Rate: `{win_rate:.1f}%`",
             f"📊 Active: `{summary.get('positions_count', 0)}/{trading_engine.max_positions}`",
             f"📋 Total Trades: `{len(closed_trades)}`",
         ]
         
-        # Add open positions from engine
-        if trading_engine.open_positions:
+        # Add positions (your existing code)
+        positions = summary.get('positions', {})
+        if positions:
             message_lines.append(f"\n📊 *Active Positions:*")
             message_lines.append(f"━━━━━━━━━━━━━━━━")
             
-            # Get current prices
-            current_prices = trading_engine.get_current_prices()
-            
-            for symbol, position in trading_engine.open_positions.items():
+            for symbol, position in positions.items():
                 current_price = current_prices.get(symbol, position.get('entry_price', 0))
                 entry_price = position.get('entry_price', 0)
                 amount = position.get('amount', 0)
