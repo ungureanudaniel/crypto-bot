@@ -283,7 +283,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick portfolio summary - works in both paper and live mode"""
     if not update.message:
-        logger.warning("⚠️ Start command triggered without message object")
+        logger.warning("⚠️ Summary command triggered without message object")
         return
     try:
         # PAPER MODE
@@ -293,28 +293,35 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 portfolio = load_portfolio()
                 perf = get_performance_summary()
                 
-                holdings = portfolio.get('holdings', {})
-                cash = holdings.get('USDT', 0)  # ← FIXED
-                initial = portfolio.get('initial_balance', cash)
+                # Get cash from portfolio (now a dict of quote currencies)
+                cash_dict = portfolio.get('cash', {"USDT": 0, "USDC": 0})
+                total_cash = cash_dict.get('USDT', 0) + cash_dict.get('USDC', 0)
                 
-                # Calculate total value with current prices
-                total_value = cash
-                for asset, amount in holdings.items():
-                    if asset not in ['USDT', 'USDC'] and amount > 0:
-                        from modules.data_feed import get_current_price
-                        price = get_current_price(asset + '/USDT')
-                        if price:
-                            total_value += amount * price
+                # Get positions
+                positions = portfolio.get('positions', {})
                 
-                total_return = total_value - initial
-                total_return_pct = (total_return / initial * 100) if initial > 0 else 0
+                # Calculate total value from positions with current prices
+                positions_value = 0
+                current_prices = trading_engine.get_current_prices()
+                
+                for symbol, position in positions.items():
+                    current_price = current_prices.get(symbol, position.get('current_price', position['entry_price']))
+                    positions_value += position['amount'] * current_price
+                
+                total_value = total_cash + positions_value
+                
+                # Get initial balance (you might want to store this in portfolio)
+                initial_balance = portfolio.get('initial_balance', 100)
+                
+                total_return = total_value - initial_balance
+                total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
                 pnl_emoji = "🟢" if total_return_pct >= 0 else "🔴"
                 
                 message = (
                     f"{pnl_emoji} *Paper Portfolio*: `${total_value:,.0f}` "
                     f"({total_return_pct:+.1f}%) | "
-                    f"💵 Cash: `${cash:,.0f}` | "
-                    f"📊 {len([a for a in holdings if a not in ['USDT', 'USDC']])} holdings | "
+                    f"💵 Cash: `${total_cash:,.0f}` | "
+                    f"📊 {len(positions)} positions | "
                     f"🎯 {perf.get('win_rate', 0):.0f}% win rate"
                 )
                 
@@ -335,7 +342,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = (
             f"{pnl_emoji} *Portfolio*: `${summary.get('total_value', 0):,.0f}` "
             f"({summary.get('total_return_pct', 0):+.1f}%) | "
-            f"💵 Cash: `${summary.get('cash', {}).get('total', 0):,.0f}` | "
+            f"💵 Cash: `${summary.get('total_cash', 0):,.0f}` | "
             f"📊 {summary.get('positions_count', 0)} positions"
         )
         
