@@ -212,7 +212,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
 
                 response = (
-                    f"💰 *Paper Portfolio Balance*\n\n"
+                    f"💰 *Portfolio Balance*\n\n"
                     f"Total Value: `${total_value:,.2f}`\n"
                     f"Cash: `${cash_total:,.2f}`\n"
                     f"Return: `{total_return_pct:+.1f}%`\n"
@@ -293,7 +293,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 portfolio = load_portfolio()
                 perf = get_performance_summary()
                 
-                # Get cash from portfolio (now a dict of quote currencies)
+                # Get cash from portfolio
                 cash_dict = portfolio.get('cash', {"USDT": 0, "USDC": 0})
                 total_cash = cash_dict.get('USDT', 0) + cash_dict.get('USDC', 0)
                 
@@ -318,7 +318,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pnl_emoji = "🟢" if total_return_pct >= 0 else "🔴"
                 
                 message = (
-                    f"{pnl_emoji} *Paper Portfolio*: `${total_value:,.0f}` "
+                    f"{pnl_emoji} *Portfolio*: `${total_value:,.0f}` "
                     f"({total_return_pct:+.1f}%) | "
                     f"💵 Cash: `${total_cash:,.0f}` | "
                     f"📊 {len(positions)} positions | "
@@ -373,7 +373,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_lines = [
             f"🤖 *Trading Bot Status*\n",
             f"━━━━━━━━━━━━━━━━",
-            f"📊 Mode: `{summary.get('trading_mode', 'unknown').upper()}`",
+            f"📊 Mode: `{CONFIG.get('trading_mode', 'unknown').upper()}`",
             f"💰 Portfolio: `${summary.get('total_value', 0):,.2f}`",
             f"💵 Cash: `${summary.get('cash', {}).get('total', 0):,.2f}`",
             f"📈 Return: `{summary.get('total_return_pct', 0):+.1f}%`",
