@@ -145,7 +145,8 @@ class TradingEngine:
         self.timeframe = self.config.get('trading_timeframe', '15m')
         self.max_positions = self.config.get('max_positions', 3)
         self.risk_per_trade = self.config.get('risk_per_trade', 0.02)
-        
+        self.last_trade_time = 0
+
         # Load open positions from file on startup
         try:
             self.open_positions = get_positions()
@@ -343,7 +344,7 @@ class TradingEngine:
     def open_position(self, symbol: str, side: str, entry_price: float, 
                      units: float, stop_loss: float, take_profit: float) -> bool:
         """Open a new position with stop loss and take profit"""
-        # DEBUG: Log everything
+        # DEBUG
         logger.info(f"🔍 OPEN POSITION ATTEMPT:")
         logger.info(f"   Symbol: {symbol}")
         logger.info(f"   Side: {side}")
@@ -698,6 +699,18 @@ class TradingEngine:
         Scan all symbols for trading signals
         Returns list of signals found
         """
+        # ===== MINIMUM TIME BETWEEN TRADES =====
+        import time
+        current_time = time.time()
+        min_time_between_trades = 900  # 15 minutes in seconds
+        
+        # Check if enough time has passed since last trade
+        if hasattr(self, 'last_trade_time') and self.last_trade_time:
+            time_since_last = current_time - self.last_trade_time
+            if time_since_last < min_time_between_trades:
+                logger.info(f"⏱️ Too soon since last trade ({time_since_last:.0f}s < {min_time_between_trades}s). Waiting...")
+                return []
+        
         # Check if we can take new positions
         current_positions = len(self.open_positions)
         if current_positions >= self.max_positions:
@@ -801,6 +814,11 @@ class TradingEngine:
                         
             except Exception as e:
                 logger.error(f"❌ Error scanning {symbol}: {e}")
+        
+        # If we found signals, update the last trade time
+        if signals_found:
+            self.last_trade_time = current_time
+            logger.info(f"⏱️ Updated last trade time to {time.strftime('%H:%M:%S', time.localtime(current_time))}")
         
         logger.info(f"📊 Scan complete: Found {len(signals_found)} signals")
         return signals_found

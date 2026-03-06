@@ -144,7 +144,7 @@ def breakout_signal(df, lookback=20, volume_confirmation=True):
         logger.error(f"Error in breakout_signal: {e}")
         return None
 
-def rsi_signal(df, oversold=30, overbought=70):
+def rsi_signal(df, oversold=25, overbought=75):
     """
     RSI mean reversion signal
     Returns: 'long', 'short', or None
@@ -290,7 +290,7 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
         stop_loss_price = entry_price * (1 - stop_loss_pct)
         
         # Take profit (2:1 reward:risk)
-        take_profit_pct = stop_loss_pct * 2
+        take_profit_pct = stop_loss_pct * 3 # 3:1 reward:risk
         take_profit_price = entry_price * (1 + take_profit_pct)
         
         # Calculate units based on risk
