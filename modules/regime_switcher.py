@@ -28,7 +28,7 @@ try:
 except ImportError:
     logger.warning("⚠️ Could not import config_loader, using defaults")
     CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
-logging.info("🔧 Configuration loaded for data feed. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +36,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+logging.info("🔧 Configuration loaded for regime switcher. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
 
 # Global variables
 model = None
@@ -256,8 +257,6 @@ def train_model():
     
     coins = config.get('coins', ['BTC/USDC', 'ETH/USDC', 'SOL/USDC', 'ADA/USDC', 'BNB/USDC'])
     
-    # Use fewer coins but more data per coin
-    coins = coins[:2]  # Just 2 coins for better data
     logger.info(f"🧪 Training with: {coins}")
     
     for coin_idx, coin in enumerate(coins):
@@ -295,9 +294,9 @@ def train_model():
             logger.info(f"   ↳ Regime distribution: {regime_counts.to_dict()}")
             
             # FIX: Ensure we have enough samples for each regime BEFORE adding
-            min_samples_per_class = 5  # Reduced from 10 to 5
+            min_samples_per_class = 5
             valid_regimes = []
-            for regime in [0, 1, 2]:
+            for regime in [0, 1, 2, 3, 4]:  # All 5 regimes
                 count = regime_counts.get(regime, 0)
                 if count >= min_samples_per_class:
                     valid_regimes.append(regime)
@@ -424,10 +423,8 @@ def train_model():
                 learning_rate=0.1,
                 random_state=42,
                 n_jobs=-1,
-                # XGBoost automatically handles multi-class imbalance
                 objective='multi:softprob',
                 num_class=unique_train_classes,
-                use_label_encoder=False,
                 eval_metric='mlogloss'
             )
         else:
@@ -489,7 +486,7 @@ def train_model():
 # Regime Prediction - FIXED
 # ---------------------------
 def predict_regime(df):
-    """Predict the current regime with calibrated confidence - FIXED"""
+    """Predict the current regime with calibrated confidence - WITH TREND DIRECTION"""
     global model, feature_columns_used, scaler
     
     # Check if we have a model
@@ -498,7 +495,7 @@ def predict_regime(df):
         success = train_model()
         if not success or model is None:
             logger.warning("⚠️ Model training failed, using simple detection")
-            return simple_regime_detection(df)
+            return simple_regime_detection_with_direction(df)
     
     try:
         if len(df) < 50:
@@ -531,7 +528,7 @@ def predict_regime(df):
             logger.warning("NaN values in features, trying previous row")
             latest_row = df_with_features.iloc[-2:-1][feature_columns_used]
             if latest_row.isna().any().any():
-                return simple_regime_detection(df)
+                return simple_regime_detection_with_direction(df)
         
         # Scale features
         if scaler is not None:
@@ -546,23 +543,73 @@ def predict_regime(df):
         
         # Map prediction to label
         regime_map = {
-            0: "Range / Mean-Reversion 📊",
-            1: "Compression (Squeeze) 🧲",
-            2: "Expansion (Volatile Chop) 🌪",
-            3: "Breakout 🚀",
-            4: "True Trend 📈"
+            0: "Range / Mean-Reversion",
+            1: "Compression (Squeeze)",
+            2: "Expansion (Volatile Chop)",
+            3: "Breakout",
+            4: "True Trend"
         }
         
         regime_label = regime_map.get(prediction, f"Unknown ({prediction})")
         
+        # ===== ADD TREND DIRECTION =====
+        # Calculate moving averages for trend direction
+        sma_20 = df['close'].rolling(20).mean().iloc[-1]
+        sma_50 = df['close'].rolling(50).mean().iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        # Determine trend direction
+        if current_price > sma_20 and sma_20 > sma_50:
+            direction = "UPTREND"
+        elif current_price < sma_20 and sma_20 < sma_50:
+            direction = "DOWNTREND"
+        else:
+            direction = "SIDEWAYS"
+        
+        # Add direction to the regime label
+        if prediction == 4:  # True Trend
+            full_label = f"{regime_label} {direction}"
+        else:
+            full_label = regime_label
+        
         # Adjust confidence display
         display_confidence = min(99, max(60, int(confidence * 100)))
         
-        return f"{regime_label} ({display_confidence}% confidence)"
+        return f"{full_label} ({display_confidence}% confidence)"
         
     except Exception as e:
         logger.error(f"❌ Error in predict_regime: {e}")
-        return simple_regime_detection(df)
+        return simple_regime_detection_with_direction(df)
+
+def simple_regime_detection_with_direction(df):
+    """Simple rule-based regime detection with trend direction"""
+    try:
+        if len(df) < 20:
+            return "Insufficient data"
+        
+        # Get regime from simple detection
+        base_result = simple_regime_detection(df)
+        
+        # Add direction
+        sma_20 = df['close'].rolling(20).mean().iloc[-1]
+        sma_50 = df['close'].rolling(50).mean().iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        if current_price > sma_20 and sma_20 > sma_50:
+            direction = "UPTREND"
+        elif current_price < sma_20 and sma_20 < sma_50:
+            direction = "DOWNTREND"
+        else:
+            direction = "SIDEWAYS"
+        
+        # If it's trending, add direction
+        if "Trending" in base_result:
+            return f"{base_result} {direction}"
+        
+        return base_result
+        
+    except Exception as e:
+        return f"Simple detection error: {str(e)}"
 
 # ---------------------------
 # Quick prediction (for testing)

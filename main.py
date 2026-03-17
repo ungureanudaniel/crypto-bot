@@ -22,6 +22,7 @@ print("=" * 60)
 print("\nStarting... Press Ctrl+C to stop\n")
 
 # Check trading mode
+trading_mode = 'paper'
 try:
     from config_loader import config
     trading_mode = config.config.get('trading_mode', 'paper')
@@ -29,14 +30,17 @@ try:
 except Exception as e:
     print(f"⚠️ Could not get trading mode: {e}")
 
-# Train model (only in paper/testnet mode to avoid live disruptions)
-try:
-    from modules.regime_switcher import train_model
-    print("🔄 Training regime detection model...")
-    train_model()
-    print("✅ Model trained")
-except Exception as e:
-    print(f"⚠️ Could not train model: {e}")
+# Train model only in paper/testnet mode — skip in live to avoid startup delay
+if trading_mode in ('paper', 'testnet'):
+    try:
+        from modules.regime_switcher import train_model
+        print("🔄 Training regime detection model...")
+        train_model()
+        print("✅ Model trained")
+    except Exception as e:
+        print(f"⚠️ Could not train model: {e}")
+else:
+    print("⏭️ Skipping model training in live mode")
 
 # Start bot
 print("\n🤖 Starting Telegram bot...")
@@ -52,5 +56,12 @@ except Exception as e:
     print(f"❌ Error: {e}")
     import traceback
     traceback.print_exc()
+finally:
+    # Ensure scheduler is stopped on any exit
+    try:
+        from services.scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        pass
 
 print("\n✅ System stopped")

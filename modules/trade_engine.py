@@ -10,10 +10,11 @@ from modules.data_feed import data_feed
 from modules.strategy_tools import generate_trade_signal
 from modules.regime_switcher import predict_regime, train_model
 from modules.portfolio import (
-    add_trade, load_portfolio, save_portfolio, 
-    get_cash, update_cash, get_positions, save_positions
+    add_trade, load_portfolio, save_portfolio,
+    get_cash, update_cash, get_positions, save_positions,
+    get_futures_positions, open_futures_position, close_futures_position
 )
-from config_loader import get_binance_client, config
+from config_loader import get_binance_client, get_futures_client, config
 
 # Setup logging
 logging.basicConfig(
@@ -164,6 +165,29 @@ class TradingEngine:
         # Initialize real trading client if needed
         self.binance_client = get_binance_client()
 
+        # Initialize futures client for short execution
+        try:
+            self.futures_client = get_futures_client()
+        except Exception as e:
+            logger.warning(f"⚠️ Futures client not available: {e}")
+            self.futures_client = None
+
+        # Load open futures positions
+        try:
+            self.open_futures_positions = get_futures_positions()
+            logger.info(f"📂 Loaded {len(self.open_futures_positions)} futures positions")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load futures positions: {e}")
+            self.open_futures_positions = {}
+
+        # Futures engine for short execution
+        try:
+            from modules.futures_engine import futures_engine as _fe
+            self.futures_engine = _fe
+        except Exception as e:
+            logger.warning(f"⚠️ FuturesEngine not available: {e}")
+            self.futures_engine = None
+
         # Track pending signals to avoid duplicates
         self.last_signals = {}
         
@@ -219,43 +243,39 @@ class TradingEngine:
     
     def check_stop_losses(self) -> bool:
         """
-        Check stop losses and take profits for all open positions
-        Returns True if any positions were closed
+        Check stop losses and take profits for all open positions.
+        Handles both spot (open_positions) and futures (open_futures_positions).
+        Returns True if any positions were closed.
         """
-        if not self.open_positions:
-            return False
-        
-        current_prices = self.get_current_prices()
         positions_closed = False
-        
-        for symbol, position in list(self.open_positions.items()):
-            current_price = current_prices.get(symbol)
-            
-            if not current_price:
-                logger.warning(f"⚠️ Could not get price for {symbol}, skipping stop check")
-                continue
-            
-            # Check stop loss and take profit
-            if position['side'] == 'long':
-                if current_price <= position['stop_loss']:
-                    logger.info(f"🛑 Stop loss triggered for {symbol} at ${current_price:.2f}")
-                    self.close_position(symbol, current_price, "stop_loss")
-                    positions_closed = True
-                elif current_price >= position['take_profit']:
-                    logger.info(f"🎯 Take profit triggered for {symbol} at ${current_price:.2f}")
-                    self.close_position(symbol, current_price, "take_profit")
-                    positions_closed = True
-                    
-            elif position['side'] == 'short':
-                if current_price >= position['stop_loss']:
-                    logger.info(f"🛑 Stop loss triggered for {symbol} at ${current_price:.2f}")
-                    self.close_position(symbol, current_price, "stop_loss")
-                    positions_closed = True
-                elif current_price <= position['take_profit']:
-                    logger.info(f"🎯 Take profit triggered for {symbol} at ${current_price:.2f}")
-                    self.close_position(symbol, current_price, "take_profit")
-                    positions_closed = True
-        
+
+        # --- Spot positions ---
+        if self.open_positions:
+            current_prices = self.get_current_prices()
+            for symbol, position in list(self.open_positions.items()):
+                current_price = current_prices.get(symbol)
+                if not current_price:
+                    logger.warning(f"⚠️ Could not get price for {symbol}, skipping")
+                    continue
+
+                if position['side'] == 'long':
+                    if current_price <= position['stop_loss']:
+                        logger.info(f"🛑 [SPOT] Stop loss triggered: {symbol} @ ${current_price:.2f}")
+                        self.close_position(symbol, current_price, "stop_loss")
+                        positions_closed = True
+                    elif current_price >= position['take_profit']:
+                        logger.info(f"🎯 [SPOT] Take profit triggered: {symbol} @ ${current_price:.2f}")
+                        self.close_position(symbol, current_price, "take_profit")
+                        positions_closed = True
+
+        # --- Futures positions ---
+        if self.futures_engine:
+            closed = self.futures_engine.check_stops()
+            if closed:
+                # Sync in-memory dict
+                self.open_futures_positions = get_futures_positions()
+                positions_closed = True
+
         return positions_closed
     
     def close_position(self, symbol: str, exit_price: float, reason: str) -> bool:
@@ -399,74 +419,42 @@ class TradingEngine:
             update_cash(quote_currency, cost, "subtract")
             execution_success = True
         
-        # LIVE/TESTNET MODE
+        # LIVE/TESTNET MODE — longs only (shorts route via futures_engine)
         elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
             try:
                 binance_symbol = symbol.replace('/', '')
-                
+
                 if side == 'long':
-                    # Check if we have enough USDT
                     usdt_balance = get_usdt_balance(self.binance_client)
                     cost = units * entry_price
-                    
+
                     logger.info(f"   USDT balance: ${usdt_balance:.2f}")
                     logger.info(f"   Required: ${cost:.2f}")
-                    
+
                     if usdt_balance < cost:
-                        logger.error(f"❌ Insufficient USDT balance: have ${usdt_balance:.2f}, need ${cost:.2f}")
+                        logger.error(f"❌ Insufficient USDT: have ${usdt_balance:.2f}, need ${cost:.2f}")
                         return False
-                    
-                    # VALIDATE AND ADJUST QUANTITY
+
                     is_valid, adjusted_units, error = self.validate_and_adjust_order(symbol, units)
-                    
                     if not is_valid:
                         logger.error(f"❌ Order validation failed: {error}")
                         return False
-                    
                     if adjusted_units != units:
-                        logger.info(f"🔄 Quantity adjusted from {units} to {adjusted_units}")
+                        logger.info(f"🔄 Quantity adjusted: {units} → {adjusted_units}")
                         units = adjusted_units
-                    
-                    # Place market buy order
-                    logger.info(f"📤 Placing market BUY order for {units} {binance_symbol}...")
+
                     order = self.binance_client.order_market_buy(
                         symbol=binance_symbol,
                         quantity=round(units, 6)
                     )
                     logger.info(f"✅ Live BUY order executed: {order['orderId']}")
                     execution_success = True
-                    
+
                 elif side == 'short':
-                    # Check if we have the asset to sell
-                    base_balance = get_asset_balance(self.binance_client, base_currency)
-                    
-                    logger.info(f"   {base_currency} balance: {base_balance:.6f}")
-                    logger.info(f"   Required: {units:.6f}")
-                    
-                    if base_balance < units:
-                        logger.error(f"❌ Insufficient {base_currency} balance: have {base_balance:.6f}, need {units:.6f}")
-                        return False
-                    
-                    # VALIDATE AND ADJUST QUANTITY
-                    is_valid, adjusted_units, error = self.validate_and_adjust_order(symbol, units)
-                    
-                    if not is_valid:
-                        logger.error(f"❌ Order validation failed: {error}")
-                        return False
-                    
-                    if adjusted_units != units:
-                        logger.info(f"🔄 Quantity adjusted from {units:.6f} to {adjusted_units:.6f}")
-                        units = adjusted_units
-                    
-                    # Place market sell order
-                    logger.info(f"📤 Placing market SELL order for {units} {binance_symbol}...")
-                    order = self.binance_client.order_market_sell(
-                        symbol=binance_symbol,
-                        quantity=round(units, 6)
-                    )
-                    logger.info(f"✅ Live SELL order executed for SHORT: {order['orderId']}")
-                    execution_success = True
-                    
+                    # Shorts must go through futures_engine — should not reach here
+                    logger.error("❌ open_position called with side='short' — use futures_engine instead")
+                    return False
+
             except Exception as e:
                 logger.error(f"❌ Failed to execute live order: {e}")
                 return False
@@ -711,8 +699,8 @@ class TradingEngine:
                 logger.info(f"⏱️ Too soon since last trade ({time_since_last:.0f}s < {min_time_between_trades}s). Waiting...")
                 return []
         
-        # Check if we can take new positions
-        current_positions = len(self.open_positions)
+        # Check if we can take new positions (spot + futures combined)
+        current_positions = len(self.open_positions) + len(self.open_futures_positions)
         if current_positions >= self.max_positions:
             logger.info(f"⏭️ At max positions ({current_positions}/{self.max_positions})")
             return []
@@ -730,8 +718,8 @@ class TradingEngine:
         
         for symbol in self.symbols:
             try:
-                # Skip if already in position
-                if symbol in self.open_positions:
+                # Skip if already in spot or futures position for this symbol
+                if symbol in self.open_positions or symbol in self.open_futures_positions:
                     continue
                 
                 # Fetch data
@@ -759,38 +747,15 @@ class TradingEngine:
                     logger.debug(f"Could not detect regime for {symbol}: {e}")
                     regime = "unknown"
                 
-                # Get available balance for shorts (base currency)
-                available_balance = None
-                base_currency = symbol.split('/')[0]
-                
-                # PAPER MODE: Get from portfolio positions
-                if self.trading_mode == 'paper':
-                    # For shorts, we need the base currency balance
-                    # In paper mode, we can check if we already have this asset in positions
-                    for pos_symbol, position in self.open_positions.items():
-                        if pos_symbol.split('/')[0] == base_currency and position['side'] == 'long':
-                            available_balance = position.get('amount', 0)
-                            break
-                
-                # LIVE/TESTNET MODE: Get from exchange
-                elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
-                    try:
-                        account = self.binance_client.get_account()
-                        for balance in account['balances']:
-                            if balance['asset'] == base_currency:
-                                available_balance = float(balance['free'])
-                                break
-                    except Exception as e:
-                        logger.debug(f"Could not get {base_currency} balance: {e}")
-                
-                # Generate signal with symbol and balance info
+                # Generate signal — regime passed so strategy selection is regime-aware
                 try:
                     signal = generate_trade_signal(
-                        df, 
-                        cash_balance, 
+                        df,
+                        cash_balance,
                         self.risk_per_trade,
                         symbol=symbol,
                         trading_engine=self,
+                        regime=regime,
                     )
                 except Exception as e:
                     logger.error(f"❌ Error generating signal for {symbol}: {e}")
@@ -852,77 +817,83 @@ class TradingEngine:
             logger.info(f"   Stop: ${signal.get('stop_loss', 0):.2f}")
             logger.info(f"   Target: ${signal.get('take_profit', 0):.2f}")
             
-            # Check if we already have a position
+            # Check if we already have a position (spot or futures)
             if symbol in self.open_positions:
-                logger.warning(f"⚠️ Already in position for {symbol}")
+                logger.warning(f"⚠️ Already in spot position for {symbol}")
                 return False
-            
-            # Check max positions
-            if len(self.open_positions) >= self.max_positions:
+            if symbol in self.open_futures_positions:
+                logger.warning(f"⚠️ Already in futures position for {symbol}")
+                return False
+
+            # Check max positions (combined)
+            total_positions = len(self.open_positions) + len(self.open_futures_positions)
+            if total_positions >= self.max_positions:
                 logger.warning(f"⚠️ At max positions ({self.max_positions})")
                 return False
-            
-            # Different checks based on side
-            if signal['side'] == 'long':
-                # For LONG positions, check quote currency balance
+
+            # ===== ROUTE BY MARKET =====
+            market = signal.get('market', 'spot')
+
+            # --- SHORT → Futures engine ---
+            if signal['side'] == 'short' or market == 'futures':
+                if not self.futures_engine:
+                    logger.error("❌ FuturesEngine not available — cannot execute short")
+                    return False
+
+                # Check we have enough cash margin
+                quote_currency = symbol.split('/')[1]
+                leverage = signal.get('leverage', 1)
+                margin_needed = (signal['units'] * signal['entry']) / leverage
+                cash = self.get_cash_balance(quote_currency)
+                logger.info(f"   Margin needed: ${margin_needed:.2f}, Cash: ${cash:.2f}")
+                if cash < margin_needed:
+                    logger.warning(f"⚠️ Insufficient margin: need ${margin_needed:.2f}, have ${cash:.2f}")
+                    return False
+
+                result = self.futures_engine.open_short(
+                    symbol=symbol,
+                    amount=signal['units'],
+                    entry_price=signal['entry'],
+                    stop_loss=signal['stop_loss'],
+                    take_profit=signal['take_profit'],
+                )
+                if result:
+                    # Sync in-memory futures positions
+                    self.open_futures_positions = get_futures_positions()
+                    logger.info(f"✅ Futures SHORT opened: {symbol}")
+                    # Notify
+                    if has_notifier:
+                        try:
+                            import asyncio
+                            asyncio.create_task(notifier.send_trade_notification({
+                                'symbol': symbol,
+                                'side': 'SHORT',
+                                'price': signal['entry'],
+                                'amount': signal['units'],
+                                'stop_loss': signal['stop_loss'],
+                                'take_profit': signal['take_profit'],
+                                'mode': self.trading_mode
+                            }))
+                        except Exception:
+                            pass
+                return result
+
+            # --- LONG → Spot execution (existing path) ---
+            elif signal['side'] == 'long':
                 quote_currency = symbol.split('/')[1]
                 cash = self.get_cash_balance(quote_currency)
                 cost = signal['units'] * signal['entry']
                 logger.info(f"   {quote_currency} balance: ${cash:.2f}, Cost: ${cost:.2f}")
-                
+
                 if cash < cost:
                     logger.warning(f"⚠️ Insufficient funds: Need ${cost:.2f}, have ${cash:.2f}")
                     return False
-                
-                # Check minimum order value
-                min_order = 10
-                if cost < min_order:
-                    logger.warning(f"⚠️ Order value ${cost:.2f} below minimum ${min_order}")
+
+                if cost < 10:
+                    logger.warning(f"⚠️ Order value ${cost:.2f} below minimum $10")
                     return False
-                    
-            elif signal['side'] == 'short':
-                # For SHORT positions, check base currency balance
-                base_currency = symbol.split('/')[0]
-                
-                # PAPER MODE: Check positions
-                if self.trading_mode == 'paper':
-                    # Find if we have this asset in any long position
-                    available = 0
-                    for pos_symbol, position in self.open_positions.items():
-                        if pos_symbol.split('/')[0] == base_currency and position['side'] == 'long':
-                            available = position.get('amount', 0)
-                            break
-                    
-                    logger.info(f"   Paper {base_currency} available: {available:.6f}, Required: {signal['units']:.6f}")
-                    
-                    if available < signal['units']:
-                        logger.warning(f"⚠️ Insufficient {base_currency}: have {available:.6f}, need {signal['units']:.6f}")
-                        return False
-                
-                # LIVE/TESTNET MODE: Check exchange
-                elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
-                    try:
-                        account = self.binance_client.get_account()
-                        asset_balance = 0
-                        for balance in account['balances']:
-                            if balance['asset'] == base_currency:
-                                asset_balance = float(balance['free'])
-                                break
-                        
-                        logger.info(f"   {base_currency} balance: {asset_balance:.6f}, Required: {signal['units']:.6f}")
-                        
-                        if asset_balance < signal['units']:
-                            logger.warning(f"⚠️ Insufficient {base_currency}: have {asset_balance:.6f}, need {signal['units']:.6f}")
-                            return False
-                            
-                    except Exception as e:
-                        logger.error(f"❌ Error checking {base_currency} balance: {e}")
-                        return False
-                else:
-                    logger.warning(f"⚠️ Cannot check short balance - no balance source available")
-                    return False
-            
-            # Execute the position opening
+
+            # Execute the spot long position
             result = self.open_position(
                 symbol=symbol,
                 side=signal['side'],
@@ -931,12 +902,12 @@ class TradingEngine:
                 stop_loss=signal['stop_loss'],
                 take_profit=signal['take_profit']
             )
-            
+
             if result:
-                logger.info(f"✅ Successfully opened position for {symbol}")
+                logger.info(f"✅ Successfully opened spot position for {symbol}")
             else:
-                logger.warning(f"❌ Failed to open position for {symbol}")
-            
+                logger.warning(f"❌ Failed to open spot position for {symbol}")
+
             return result
             
         except Exception as e:

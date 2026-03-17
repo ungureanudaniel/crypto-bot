@@ -46,11 +46,16 @@ class Config:
                 raise ValueError("❌ CRITICAL: Live trading requires BINANCE_LIVE_API_KEY and BINANCE_LIVE_API_SECRET in .env")
             env_config['binance_api_key'] = api_key
             env_config['binance_api_secret'] = api_secret
-            
+            # Futures keys — can reuse spot keys or use dedicated ones
+            env_config['binance_futures_api_key'] = os.getenv('BINANCE_FUTURES_API_KEY', api_key)
+            env_config['binance_futures_api_secret'] = os.getenv('BINANCE_FUTURES_API_SECRET', api_secret)
+
         elif trading_mode == 'paper':
             env_config['binance_api_key'] = ''
             env_config['binance_api_secret'] = ''
-            
+            env_config['binance_futures_api_key'] = ''
+            env_config['binance_futures_api_secret'] = ''
+
         elif trading_mode == 'testnet':
             api_key = os.getenv('BINANCE_TESTNET_API_KEY')
             api_secret = os.getenv('BINANCE_TESTNET_PRIVATE_KEY')
@@ -58,6 +63,9 @@ class Config:
                 raise ValueError("❌ CRITICAL: Testnet trading requires BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_PRIVATE_KEY in .env")
             env_config['binance_api_key'] = api_key
             env_config['binance_api_secret'] = api_secret
+            # Futures testnet uses the same credentials by default
+            env_config['binance_futures_api_key'] = os.getenv('BINANCE_FUTURES_TESTNET_API_KEY', api_key)
+            env_config['binance_futures_api_secret'] = os.getenv('BINANCE_FUTURES_TESTNET_API_SECRET', api_secret)
         else:
             raise ValueError(f"❌ CRITICAL: Invalid TRADING_MODE '{trading_mode}'. Must be 'live', 'testnet', or 'paper'")
         
@@ -67,19 +75,26 @@ class Config:
         # 5. Set derived values
         merged_config['live_trading'] = trading_mode == 'live'
         merged_config['paper_trading'] = trading_mode == 'paper'
-        
+
         # 6. Set API URLs
         if merged_config['paper_trading']:
             merged_config['binance_api_url'] = 'https://testnet.binance.vision/api'
+            merged_config['binance_futures_url'] = 'https://testnet.binancefuture.com'
         else:
             merged_config['binance_api_url'] = 'https://api.binance.com'
+            merged_config['binance_futures_url'] = 'https://fapi.binance.com'
+
+        # 7. Futures trading flag — enabled unless explicitly disabled in config.json
+        merged_config['enable_futures'] = merged_config.get('enable_futures', True)
         
         return merged_config
     
     def get(self, key: str, default=None):
-        """Get config value - NO DEFAULTS!"""
+        """Get config value with optional default (raises only if no default provided)"""
         if key not in self.config:
-            raise KeyError(f"❌ CRITICAL: Required config key '{key}' not found!")
+            if default is None:
+                raise KeyError(f"❌ CRITICAL: Required config key '{key}' not found!")
+            return default
         return self.config[key]
     
     def __getitem__(self, key):
@@ -115,8 +130,8 @@ def get_binance_client():
         return None
 
     # For live/testnet, require API keys
-    api_key = config.config.get('binance_api_key')
-    api_secret = config.config.get('binance_api_secret')
+    api_key = config.config.get('binance_api_key', '')
+    api_secret = config.config.get('binance_api_secret', '')
     
     if not api_key or not api_secret:
         raise ValueError(f"❌ CRITICAL: API keys required for {trading_mode} mode")
@@ -144,6 +159,61 @@ def get_binance_client():
 
     except (ImportError, BinanceAPIException, Exception) as e:
         logger.error(f"❌ Failed to initialize shared Binance client: {e}")
+        raise
+
+# -------------------------------------------------------------------
+# Shared Binance Futures client (singleton)
+# -------------------------------------------------------------------
+_futures_client = None
+
+def get_futures_client():
+    """
+    Return a singleton Binance USDT-M Futures client.
+    Returns None in paper mode — futures positions are simulated in portfolio.py.
+    Tries binance-futures-connector (UMFutures) first, falls back to python-binance.
+    """
+    global _futures_client
+    if _futures_client is not None:
+        return _futures_client
+
+    trading_mode = config.config['trading_mode'].lower()
+
+    if trading_mode == 'paper':
+        logger.info("📄 Paper mode — futures simulated, no real futures client needed")
+        return None
+
+    api_key = config.config.get('binance_futures_api_key', '')
+    api_secret = config.config.get('binance_futures_api_secret', '')
+
+    if not api_key or not api_secret:
+        raise ValueError(
+            f"❌ CRITICAL: Futures API keys required for {trading_mode} mode. "
+            f"Set BINANCE_FUTURES_API_KEY / BINANCE_FUTURES_API_SECRET in .env"
+        )
+
+    try:
+        # Preferred: binance-futures-connector pip package
+        from binance.um_futures import UMFutures
+        base_url = 'https://testnet.binancefuture.com' if trading_mode == 'testnet' else None
+        client = UMFutures(key=api_key, secret=api_secret, base_url=base_url)
+        client.ping()
+        logger.info("✅ Futures client (UMFutures) connected")
+        _futures_client = client
+        return client
+
+    except ImportError:
+        # Fallback: python-binance has futures methods too
+        logger.warning("⚠️ binance-futures-connector not found — using python-binance futures endpoints")
+        from binance.client import Client
+        from binance.exceptions import BinanceAPIException as _BinanceAPIException
+        client = Client(api_key, api_secret, testnet=(trading_mode == 'testnet'))
+        client.ping()
+        logger.info("✅ Futures client (python-binance fallback) connected")
+        _futures_client = client
+        return client
+
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Futures client: {e}")
         raise
 
 if __name__ == "__main__":

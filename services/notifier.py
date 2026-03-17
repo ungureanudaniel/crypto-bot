@@ -75,14 +75,23 @@ class Notifier:
     def send_message_sync(self, message: str) -> bool:
         """Synchronous wrapper for send_message"""
         try:
-            loop = asyncio.get_event_loop()
+            return asyncio.run(self.send_message(message))
         except RuntimeError:
-            # No event loop in this thread, create one
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        try:
-            return loop.run_until_complete(self.send_message(message))
+            # Already inside a running event loop (e.g. called from async context)
+            # Create a new thread with its own loop
+            import threading
+            result = [False]
+            def _run():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result[0] = loop.run_until_complete(self.send_message(message))
+                finally:
+                    loop.close()
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            t.join(timeout=15)
+            return result[0]
         except Exception as e:
             logger.error(f"❌ Sync send failed: {e}")
             return False
@@ -97,59 +106,52 @@ class Notifier:
         reason = trade_data.get('reason', '')
         mode = trade_data.get('mode', 'paper').upper()
         
-        # Determine message type
-        if side in ['BUY', 'LONG'] or 'BUY' in str(trade_data.get('side', '')).upper():
-            # Opening trade
+        if side in ['BUY', 'LONG']:
             stop_loss = trade_data.get('stop_loss', 0)
             take_profit = trade_data.get('take_profit', 0)
             
             message = (
-                f"🟢 *TRADE OPENED* [{mode}]\n"
+                f"🟢 <b>TRADE OPENED</b> [{mode}]\n"
                 f"━━━━━━━━━━━━━━━━\n"
-                f"📊 *{symbol}*\n"
+                f"📊 <b>{symbol}</b>\n"
                 f"💰 Side: LONG\n"
-                f"💵 Entry: `${price:.2f}`\n"
-                f"📦 Amount: `{amount:.6f}`\n"
-                f"💎 Value: `${price * amount:.2f}`\n"
+                f"💵 Entry: <code>${price:.2f}</code>\n"
+                f"📦 Amount: <code>{amount:.6f}</code>\n"
+                f"💎 Value: <code>${price * amount:.2f}</code>\n"
             )
-            
             if stop_loss:
                 stop_pct = ((stop_loss / price) - 1) * 100
-                message += f"🛑 Stop: `${stop_loss:.2f}` ({stop_pct:+.1f}%)\n"
-            
+                message += f"🛑 Stop: <code>${stop_loss:.2f}</code> ({stop_pct:+.1f}%)\n"
             if take_profit:
                 tp_pct = ((take_profit / price) - 1) * 100
-                message += f"🎯 Target: `${take_profit:.2f}` ({tp_pct:+.1f}%)\n"
-            
+                message += f"🎯 Target: <code>${take_profit:.2f}</code> ({tp_pct:+.1f}%)\n"
+
         elif side in ['SELL', 'SHORT'] and pnl == 0:
-            # Opening short trade
             stop_loss = trade_data.get('stop_loss', 0)
             take_profit = trade_data.get('take_profit', 0)
             
             message = (
-                f"🔴 *SHORT OPENED* [{mode}]\n"
+                f"🔴 <b>SHORT OPENED</b> [{mode}]\n"
                 f"━━━━━━━━━━━━━━━━\n"
-                f"📊 *{symbol}*\n"
+                f"📊 <b>{symbol}</b>\n"
                 f"💰 Side: SHORT\n"
-                f"💵 Entry: `${price:.2f}`\n"
-                f"📦 Amount: `{amount:.6f}`\n"
-                f"💎 Value: `${price * amount:.2f}`\n"
+                f"💵 Entry: <code>${price:.2f}</code>\n"
+                f"📦 Amount: <code>{amount:.6f}</code>\n"
+                f"💎 Value: <code>${price * amount:.2f}</code>\n"
             )
-            
             if stop_loss:
                 stop_pct = (1 - (stop_loss / price)) * 100
-                message += f"🛑 Stop: `${stop_loss:.2f}` ({stop_pct:+.1f}%)\n"
-            
+                message += f"🛑 Stop: <code>${stop_loss:.2f}</code> ({stop_pct:+.1f}%)\n"
             if take_profit:
                 tp_pct = (1 - (take_profit / price)) * 100
-                message += f"🎯 Target: `${take_profit:.2f}` ({tp_pct:+.1f}%)\n"
-            
+                message += f"🎯 Target: <code>${take_profit:.2f}</code> ({tp_pct:+.1f}%)\n"
+
         else:
-            # Closing trade
+            # Closing trade — determine direction from original side field
             entry_price = trade_data.get('entry_price', price)
-            pnl_pct = ((price / entry_price) - 1) * 100 if 'LONG' in side else (1 - (price / entry_price)) * 100
-            
-            # Choose emoji based on PnL
+            is_long = side in ['LONG', 'BUY'] or trade_data.get('original_side', '').upper() in ['LONG', 'BUY']
+            pnl_pct = ((price / entry_price) - 1) * 100 if is_long else (1 - (price / entry_price)) * 100
+
             if pnl > 0:
                 emoji = "✅"
                 pnl_sign = "+"
@@ -159,22 +161,19 @@ class Notifier:
             else:
                 emoji = "⚪"
                 pnl_sign = ""
-            
+
             reason_text = f" ({reason})" if reason else ""
-            
             message = (
-                f"{emoji} *TRADE CLOSED*{reason_text} [{mode}]\n"
+                f"{emoji} <b>TRADE CLOSED</b>{reason_text} [{mode}]\n"
                 f"━━━━━━━━━━━━━━━━\n"
-                f"📊 *{symbol}*\n"
+                f"📊 <b>{symbol}</b>\n"
                 f"💰 Side: {side}\n"
-                f"💵 Exit: `${price:.2f}`\n"
-                f"📈 PnL: `${pnl_sign}{pnl:.2f}` ({pnl_sign}{pnl_pct:.1f}%)\n"
+                f"💵 Exit: <code>${price:.2f}</code>\n"
+                f"📈 PnL: <code>${pnl_sign}{pnl:.2f}</code> ({pnl_sign}{pnl_pct:.1f}%)\n"
             )
-        
-        # Add timestamp
+
         from datetime import datetime
         message += f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
         return await self.send_message(message)
     
     async def send_alert(self, message: str, level: str = "INFO") -> bool:
@@ -186,21 +185,20 @@ class Notifier:
             "SUCCESS": "✅"
         }
         emoji = emoji_map.get(level.upper(), "📢")
-        
-        formatted = f"{emoji} *{level.upper()}*\n{message}"
+        formatted = f"{emoji} <b>{level.upper()}</b>\n{message}"
         return await self.send_message(formatted)
     
     async def send_daily_report(self, summary: dict) -> bool:
         """Send daily trading report"""
         message = (
-            f"📊 *Daily Trading Report*\n"
+            f"📊 <b>Daily Trading Report</b>\n"
             f"━━━━━━━━━━━━━━━━\n"
-            f"💰 Portfolio: `${summary.get('portfolio_value', 0):,.2f}`\n"
-            f"💵 Cash: `${summary.get('cash_balance', 0):,.2f}`\n"
-            f"📈 Return: `{summary.get('total_return_pct', 0):+.1f}%`\n"
-            f"🎯 Win Rate: `{summary.get('win_rate', 0):.1f}%`\n"
-            f"📊 Active: `{summary.get('active_positions', 0)}`\n"
-            f"📋 Total Trades: `{summary.get('total_trades', 0)}`"
+            f"💰 Portfolio: <code>${summary.get('portfolio_value', 0):,.2f}</code>\n"
+            f"💵 Cash: <code>${summary.get('cash_balance', 0):,.2f}</code>\n"
+            f"📈 Return: <code>{summary.get('total_return_pct', 0):+.1f}%</code>\n"
+            f"🎯 Win Rate: <code>{summary.get('win_rate', 0):.1f}%</code>\n"
+            f"📊 Active: <code>{summary.get('active_positions', 0)}</code>\n"
+            f"📋 Total Trades: <code>{summary.get('total_trades', 0)}</code>"
         )
         return await self.send_message(message)
 

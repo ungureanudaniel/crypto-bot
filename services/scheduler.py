@@ -57,19 +57,30 @@ def _import_modules():
 # -------------------------------------------------------------------
 def check_stop_losses_and_take_profits():
     """
-    JOB 1: Check stop losses - runs every minute
+    JOB 1: Check stop losses - runs every minute.
+    Checks both spot positions (via trade_engine) and futures positions (via futures_engine).
     """
     trading_engine, data_feed = _import_modules()
-    
+
     if not trading_engine:
         return
-    
+
+    # --- Spot stop losses ---
     try:
         positions_closed = trading_engine.check_stop_losses()
         if positions_closed:
-            logger.info(f"✅ Closed {positions_closed} positions via stop/take profit")
+            logger.info(f"✅ Spot: closed {positions_closed} position(s) via stop/take profit")
     except Exception as e:
-        logger.error(f"❌ Error in stop loss check: {e}")
+        logger.error(f"❌ Error in spot stop loss check: {e}")
+
+    # --- Futures stop losses ---
+    try:
+        from modules.futures_engine import futures_engine
+        futures_closed = futures_engine.check_stops()
+        if futures_closed:
+            logger.info(f"✅ Futures: closed {len(futures_closed)} position(s): {futures_closed}")
+    except Exception as e:
+        logger.error(f"❌ Error in futures stop loss check: {e}")
 
 def scan_for_trading_signals():
     """
@@ -128,18 +139,17 @@ def update_portfolio_summary():
         return
     
     try:
-        # Portfolio summary reads from portfolio.json; optionally provide current prices
         summary = get_portfolio_summary()
         
         logger.info(f"💰 Portfolio: ${summary.get('total_value', 0):,.2f}")
-        logger.info(f"   Cash: ${summary.get('cash', {}).get('total', 0):,.2f}")
+        logger.info(f"   Cash: ${summary.get('total_cash', 0):,.2f}")
         logger.info(f"   Positions: {summary.get('positions_count', 0)}")
         logger.info(f"   Return: {summary.get('total_return_pct', 0):+.1f}%")
         logger.info(f"   Win Rate: {summary.get('win_rate', 0):.1f}%")
         
-        # Send daily notification at 20:00
+        # Send daily notification at 20:00 (only fires when hourly job runs at :00)
         current_hour = datetime.now().hour
-        if current_hour == 20 and datetime.now().minute < 5:
+        if current_hour == 20:
             try:
                 from services.notifier import notifier
                 if hasattr(notifier, 'send_message_sync'):
@@ -190,12 +200,9 @@ def health_check():
         return
     
     try:
-        # You need to implement get_portfolio_health in portfolio.py
-        # For now, let's use a simple check
         summary = get_portfolio_summary()
-        
-        # Simple health check: if return is worse than -10%, it's unhealthy
-        is_healthy = summary.get('total_return_pct', 0) > -10
+        return_pct = summary.get('total_return_pct', 0)
+        is_healthy = return_pct > -10
         
         if not is_healthy:
             logger.warning("⚠️ Portfolio health check FAILED")
@@ -203,9 +210,9 @@ def health_check():
                 from services.notifier import notifier
                 if hasattr(notifier, 'send_message_sync'):
                     notifier.send_message_sync(
-                        f"⚠️ *Health Alert*\n"
+                        f"⚠️ <b>Health Alert</b>\n"
                         f"Portfolio may be at risk\n"
-                        f"Return: {summary.get('total_return_pct', 0):+.1f}%"
+                        f"Return: {return_pct:+.1f}%"
                     )
             except Exception as e:
                 logger.error(f"❌ Failed to send health alert: {e}")
@@ -230,7 +237,7 @@ def log_daily_performance():
             'date': datetime.now().strftime('%Y-%m-%d'),
             'time': datetime.now().strftime('%H:%M:%S'),
             'portfolio_value': summary.get('total_value', 0),
-            'cash_balance': summary.get('cash', {}).get('total', 0),
+            'cash_balance': summary.get('total_cash', 0),
             'return_pct': summary.get('total_return_pct', 0),
             'active_positions': summary.get('positions_count', 0),
             'win_rate': summary.get('win_rate', 0)

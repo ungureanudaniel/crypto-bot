@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,7 +11,11 @@ from typing import Dict, Optional, List, Mapping
 
 logger = logging.getLogger(__name__)
 
-PORTFOLIO_FILE = "portfolio.json"
+# Anchor portfolio file to the module's directory, not the working directory
+PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio.json")
+
+# Lock to prevent race conditions from concurrent read-modify-write operations
+_portfolio_lock = threading.RLock()
 
 # -------------------------------------------------------------------
 # CONFIG LOADING
@@ -24,35 +29,46 @@ TRADING_MODE = CONFIG.get('trading_mode', 'paper').lower()
 # -------------------------------------------------------------------
 def load_portfolio() -> Dict:
     """Load portfolio data from file"""
-    if os.path.exists(PORTFOLIO_FILE):
-        try:
-            with open(PORTFOLIO_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading portfolio: {e}")
-    
-    # Default portfolio with $100 USDT
-    return {
-        "positions": {},  # All open positions with full details
-        "cash": {
-            "USDT": 100.00,
-            "USDC": 0.00
-        },
-        "trade_history": [],
-        "performance_metrics": {
-            "total_trades": 0,
-            "winning_trades": 0,
-            "total_pnl": 0.0,
-            "win_rate": 0.0
-        },
-        "last_updated": datetime.now().isoformat()
-    }
+    with _portfolio_lock:
+        if os.path.exists(PORTFOLIO_FILE):
+            try:
+                with open(PORTFOLIO_FILE, "r") as f:
+                    data = json.load(f)
+                # Migrate old portfolios that don't have futures_positions yet
+                if 'futures_positions' not in data:
+                    data['futures_positions'] = {}
+                return data
+            except Exception as e:
+                logger.error(f"Error loading portfolio: {e}")
+
+        # Default portfolio with $100 USDT
+        return {
+            "positions": {},           # Spot long positions
+            "futures_positions": {},   # Futures short (and long) positions
+            "cash": {
+                "USDT": 100.00,
+                "USDC": 0.00
+            },
+            "initial_balance": 100.00,
+            "trade_history": [],
+            "performance_metrics": {
+                "total_trades": 0,
+                "winning_trades": 0,
+                "total_pnl": 0.0,
+                "win_rate": 0.0
+            },
+            "last_updated": datetime.now().isoformat()
+        }
 
 def save_portfolio(portfolio: Dict) -> None:
     """Save portfolio data to file"""
-    portfolio["last_updated"] = datetime.now().isoformat()
-    with open(PORTFOLIO_FILE, "w") as f:
-        json.dump(portfolio, f, indent=2)
+    with _portfolio_lock:
+        portfolio["last_updated"] = datetime.now().isoformat()
+        try:
+            with open(PORTFOLIO_FILE, "w") as f:
+                json.dump(portfolio, f, indent=2)
+        except Exception as e:
+            logger.error(f"❌ Failed to save portfolio: {e}")
 
 # -------------------------------------------------------------------
 # POSITION MANAGEMENT (just data access, no logic)
@@ -62,10 +78,128 @@ def get_positions() -> Dict:
     return load_portfolio().get("positions", {})
 
 def save_positions(positions: Dict) -> None:
-    """Save positions to file"""
+    """Save spot positions to file"""
     portfolio = load_portfolio()
     portfolio["positions"] = positions
     save_portfolio(portfolio)
+
+# -------------------------------------------------------------------
+# FUTURES POSITION MANAGEMENT
+# -------------------------------------------------------------------
+def get_futures_positions() -> Dict:
+    """Get all open futures positions (shorts and futures longs)"""
+    return load_portfolio().get("futures_positions", {})
+
+def save_futures_positions(futures_positions: Dict) -> None:
+    """Save futures positions to file"""
+    portfolio = load_portfolio()
+    portfolio["futures_positions"] = futures_positions
+    save_portfolio(portfolio)
+
+def open_futures_position(symbol: str, side: str, amount: float,
+                          entry_price: float, stop_loss: float,
+                          take_profit: float, quote_currency: str = "USDT",
+                          leverage: int = 1) -> bool:
+    """
+    Record opening a futures position (paper or live).
+    side: 'short' or 'long'
+    """
+    with _portfolio_lock:
+        portfolio = load_portfolio()
+        margin_used = (amount * entry_price) / leverage
+
+        if portfolio["cash"].get(quote_currency, 0) < margin_used:
+            logger.warning(f"⚠️ Insufficient margin for futures {side} on {symbol}")
+            return False
+
+        portfolio["cash"][quote_currency] = portfolio["cash"].get(quote_currency, 0) - margin_used
+        portfolio["futures_positions"][symbol] = {
+            "side": side,
+            "amount": amount,
+            "entry_price": entry_price,
+            "current_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "quote_currency": quote_currency,
+            "leverage": leverage,
+            "margin_used": margin_used,
+            "opened_at": datetime.now().isoformat(),
+            "market": "futures"
+        }
+        save_portfolio(portfolio)
+        logger.info(f"📉 Futures {side.upper()} opened: {symbol} @ ${entry_price:.2f} "
+                    f"| Amount: {amount} | Margin: ${margin_used:.2f}")
+        return True
+
+def close_futures_position(symbol: str, exit_price: float, reason: str = "") -> Optional[Dict]:
+    """
+    Close a futures position and return trade result dict, or None if not found.
+    Handles both short and long futures positions correctly.
+    """
+    with _portfolio_lock:
+        portfolio = load_portfolio()
+        pos = portfolio["futures_positions"].get(symbol)
+        if not pos:
+            logger.warning(f"⚠️ No futures position found for {symbol}")
+            return None
+
+        entry_price = pos["entry_price"]
+        amount = pos["amount"]
+        side = pos["side"]
+        leverage = pos.get("leverage", 1)
+        margin_used = pos.get("margin_used", (amount * entry_price) / leverage)
+        quote_currency = pos.get("quote_currency", "USDT")
+
+        # PnL calculation
+        if side == "short":
+            pnl = (entry_price - exit_price) * amount
+        else:  # futures long
+            pnl = (exit_price - entry_price) * amount
+
+        pnl_pct = (pnl / margin_used) * 100 if margin_used > 0 else 0
+
+        # Return margin + PnL to cash
+        returned = margin_used + pnl
+        portfolio["cash"][quote_currency] = portfolio["cash"].get(quote_currency, 0) + max(returned, 0)
+
+        # Remove position
+        del portfolio["futures_positions"][symbol]
+
+        # Record in trade history
+        trade_record = {
+            "action": "close",
+            "market": "futures",
+            "symbol": symbol,
+            "side": side,
+            "amount": amount,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "pnl": round(pnl, 6),
+            "pnl_pct": round(pnl_pct, 4),
+            "margin_used": margin_used,
+            "leverage": leverage,
+            "reason": reason,
+            "timestamp": datetime.now().isoformat()
+        }
+        portfolio["trade_history"].append(trade_record)
+        if len(portfolio["trade_history"]) > 1000:
+            portfolio["trade_history"] = portfolio["trade_history"][-1000:]
+
+        # Update metrics
+        metrics = portfolio["performance_metrics"]
+        metrics["total_trades"] = metrics.get("total_trades", 0) + 1
+        metrics["total_pnl"] = metrics.get("total_pnl", 0) + pnl
+        if pnl > 0:
+            metrics["winning_trades"] = metrics.get("winning_trades", 0) + 1
+        if metrics["total_trades"] > 0:
+            metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100
+
+        save_portfolio(portfolio)
+        emoji = "✅" if pnl > 0 else "❌"
+        logger.info(f"{emoji} Futures {side.upper()} closed: {symbol} | "
+                    f"Entry: ${entry_price:.2f} → Exit: ${exit_price:.2f} | "
+                    f"PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)")
+        return trade_record
 
 def get_cash() -> Dict[str, float]:
     """Get cash balances"""
@@ -152,58 +286,101 @@ def get_portfolio_summary(current_prices: Optional[Mapping[str, float]] = None) 
     perf = get_performance_summary()
     
     positions = portfolio.get("positions", {})
+    futures_positions = portfolio.get("futures_positions", {})
     cash = portfolio.get("cash", {"USDT": 0, "USDC": 0})
-    
+
     # Calculate cash total
     total_cash = cash.get("USDT", 0) + cash.get("USDC", 0)
-    
-    # Calculate positions value
+
+    # --- Spot positions ---
     positions_value = 0
     positions_pnl = 0
     enhanced_positions = {}
-    
+
     for symbol, pos in positions.items():
-        # Make a copy to avoid modifying stored data
         pos_copy = pos.copy()
-        
-        # Update current price if provided
         if current_prices and symbol in current_prices:
             pos_copy["current_price"] = current_prices[symbol]
         else:
             pos_copy["current_price"] = pos.get("current_price", pos["entry_price"])
-        
-        # Calculate current value and PnL
+
         current_price = pos_copy["current_price"]
         entry_price = pos["entry_price"]
         amount = pos["amount"]
-        
+
         pos_copy["value"] = amount * current_price
-        
         if pos["side"] == "long":
             pos_copy["pnl"] = (current_price - entry_price) * amount
             pos_copy["pnl_pct"] = (current_price / entry_price - 1) * 100
-        else:  # short
+        else:
             pos_copy["pnl"] = (entry_price - current_price) * amount
             pos_copy["pnl_pct"] = (1 - current_price / entry_price) * 100
-        
+
+        pos_copy["market"] = "spot"
         positions_value += pos_copy["value"]
         positions_pnl += pos_copy["pnl"]
         enhanced_positions[symbol] = pos_copy
-    
-    total_value = total_cash + positions_value
-    
+
+    # --- Futures positions ---
+    futures_value = 0
+    futures_pnl = 0
+    enhanced_futures = {}
+
+    for symbol, pos in futures_positions.items():
+        pos_copy = pos.copy()
+        # Use futures-prefixed symbol for price lookup if needed
+        lookup_symbol = symbol
+        if current_prices and lookup_symbol in current_prices:
+            pos_copy["current_price"] = current_prices[lookup_symbol]
+        else:
+            pos_copy["current_price"] = pos.get("current_price", pos["entry_price"])
+
+        current_price = pos_copy["current_price"]
+        entry_price = pos["entry_price"]
+        amount = pos["amount"]
+        leverage = pos.get("leverage", 1)
+        margin_used = pos.get("margin_used", (amount * entry_price) / leverage)
+
+        if pos["side"] == "short":
+            pos_copy["pnl"] = (entry_price - current_price) * amount
+        else:
+            pos_copy["pnl"] = (current_price - entry_price) * amount
+
+        pos_copy["pnl_pct"] = (pos_copy["pnl"] / margin_used * 100) if margin_used > 0 else 0
+        pos_copy["value"] = margin_used  # Margin locked, not notional
+        pos_copy["market"] = "futures"
+
+        futures_value += margin_used
+        futures_pnl += pos_copy["pnl"]
+        enhanced_futures[symbol] = pos_copy
+
+    total_value = total_cash + positions_value + futures_value
+    total_pnl_open = positions_pnl + futures_pnl
+
+    initial_balance = portfolio.get("initial_balance", 100.0)
+    total_return = total_value - initial_balance
+    total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0.0
+
     return {
         'trading_mode': TRADING_MODE,
         'total_value': total_value,
         'cash': cash,
         'total_cash': total_cash,
         'positions': enhanced_positions,
-        'positions_count': len(positions),
+        'futures_positions': enhanced_futures,
+        'positions_count': len(positions) + len(futures_positions),
+        'spot_count': len(positions),
+        'futures_count': len(futures_positions),
         "positions_pnl": positions_pnl,
+        "futures_pnl": futures_pnl,
+        "open_pnl": total_pnl_open,
         "total_trades": perf.get("total_trades", 0),
         "winning_trades": perf.get("winning_trades", 0),
         "win_rate": perf.get("win_rate", 0),
         "total_pnl": perf.get("total_pnl", 0),
+        "initial_balance": initial_balance,
+        "total_return": total_return,
+        "total_return_pct": total_return_pct,
         "last_updated": portfolio.get("last_updated")
     }
 
@@ -214,10 +391,12 @@ def reset_portfolio(initial_balance: float = 100.0) -> None:
     """Reset portfolio to initial state (for testing)"""
     portfolio = {
         "positions": {},
+        "futures_positions": {},
         "cash": {
             "USDT": initial_balance,
             "USDC": 0.00
         },
+        "initial_balance": initial_balance,
         "trade_history": [],
         "performance_metrics": {
             "total_trades": 0,

@@ -2,12 +2,10 @@ import sys
 import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from modules.ml_integration import MLStrategy
 import pandas as pd
 import numpy as np
 import logging
 from typing import Dict
-from modules.sentiment_agent import SentimentAgent
 from ta.volatility import BollingerBands
 from ta.trend import MACD
 from ta.momentum import RSIIndicator
@@ -22,6 +20,11 @@ sentiment_agent = None
 async def get_ml_prediction(symbol: str, df: pd.DataFrame) -> Dict:
     """Get ML prediction for a symbol"""
     global ml_strategies
+    try:
+        from modules.ml_integration import MLStrategy
+    except ImportError:
+        logger.warning("⚠️ ml_integration module not available")
+        return {}
     
     if symbol not in ml_strategies:
         ml_strategies[symbol] = MLStrategy(symbol)
@@ -55,45 +58,35 @@ def calculate_atr(df, length=14):
 
 def get_available_balance(symbol, trading_engine):
     """
-    Get available balance for short positions.
-    For shorts, we need to know how much of the base currency we have.
+    Get available balance for position sizing.
+    For shorts (futures): returns available USDT cash margin.
+    For longs (spot): returns available USDT cash.
     """
     if not trading_engine:
         return 0
-        
-    base_currency = symbol.split('/')[0]
 
-    # PAPER MODE: Check open positions for the asset
+    # PAPER MODE: use portfolio cash
     if trading_engine.trading_mode == 'paper':
         try:
-            # Look through open positions to find this asset
-            available = 0
-            for pos_symbol, position in trading_engine.open_positions.items():
-                if pos_symbol.split('/')[0] == base_currency and position['side'] == 'long':
-                    # If we already have a long position in this asset, we can use it for short
-                    available = position.get('amount', 0)
-                    break
-            
-            # Also check if we have the asset in cash? No, cash is only quote currencies
-            # For paper mode, we only have what's in positions
-            return available
-            
+            from modules.portfolio import get_cash
+            cash = get_cash()
+            return cash.get('USDT', 0) + cash.get('USDC', 0)
         except Exception as e:
-            logger.debug(f"Could not get paper balance for {base_currency}: {e}")
+            logger.debug(f"Could not get paper cash balance: {e}")
             return 0
-    
+
     # LIVE/TESTNET MODE: Check real exchange balance
     if not trading_engine.binance_client:
         return 0
-    
+
     try:
         account = trading_engine.binance_client.get_account()
         for balance in account['balances']:
-            if balance['asset'] == base_currency:
+            if balance['asset'] == 'USDT':
                 return float(balance['free'])
     except Exception as e:
-        logger.debug(f"Could not get live balance for {base_currency}: {e}")
-    
+        logger.debug(f"Could not get live balance: {e}")
+
     return 0
 
 # -------------------------------------------------------------------
@@ -328,7 +321,7 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
 def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_engine=None, regime=None):
     """
     Main function that combines multiple strategies
-    Now with regime-based strategy selection
+    Now with trend direction awareness
     """
     try:
         if df.empty or len(df) < 50:
@@ -341,9 +334,23 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         
         current_price = df['close'].iloc[-1]
         
-        # Parse regime to determine market condition
+        # ===== PARSE REGIME WITH DIRECTION =====
         regime_type = "unknown"
+        trend_direction = "unknown"
+        
         if regime:
+            # Extract direction if present
+            if "UPTREND" in regime:
+                trend_direction = "up"
+                regime = regime.replace(" UPTREND", "")
+            elif "DOWNTREND" in regime:
+                trend_direction = "down"
+                regime = regime.replace(" DOWNTREND", "")
+            elif "SIDEWAYS" in regime:
+                trend_direction = "side"
+                regime = regime.replace(" SIDEWAYS", "")
+            
+            # Determine regime type
             if "Range" in regime:
                 regime_type = "range"
             elif "Compression" in regime:
@@ -352,179 +359,198 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 regime_type = "expansion"
             elif "Breakout" in regime:
                 regime_type = "breakout"
-            elif "Trend" in regime:
+            elif "Trend" in regime or "Trending" in regime:
                 regime_type = "trend"
         
-        logger.debug(f"📊 Market regime for {symbol}: {regime_type}")
+        logger.debug(f"📊 {symbol}: {regime_type} | Direction: {trend_direction}")
         
         # ===== REGIME-BASED STRATEGY SELECTION =====
         signal = None
         signal_type = None
-        multiplier = 2.0  # Default ATR multiplier
+        multiplier = 2.0
+        
+        # TRENDING MARKET - Follow the trend, don't fight it
+        if regime_type == "trend":
+            logger.debug(f"📈 Trending market - following {trend_direction} trend")
+            
+            # UPTREND - ONLY take LONG signals
+            if trend_direction == "up":
+                # Try EMA crossover (bullish)
+                signal = ema_crossover_signal(df)
+                if signal == 'long':
+                    signal_type = "ema_trend_up"
+                    multiplier = 2.5
+                    logger.info(f"📊 EMA crossover LONG in uptrend")
+                else:
+                    signal = None
+                
+                # If no EMA, try MACD (bullish)
+                if not signal:
+                    signal = macd_signal(df)
+                    if signal == 'long':
+                        signal_type = "macd_trend_up"
+                        multiplier = 2.5
+                        logger.info(f"📊 MACD LONG in uptrend")
+                    else:
+                        signal = None
+                
+                # If still no signal, try breakout (bullish)
+                if not signal:
+                    signal = breakout_signal(df)
+                    if signal == 'long':
+                        signal_type = "breakout_trend_up"
+                        multiplier = 2.5
+                        logger.info(f"📊 Breakout LONG in uptrend")
+                    else:
+                        signal = None
+            
+            # DOWNTREND - ONLY take SHORT signals
+            elif trend_direction == "down":
+                # Try EMA crossover (bearish)
+                signal = ema_crossover_signal(df)
+                if signal == 'short':
+                    signal_type = "ema_trend_down"
+                    multiplier = 2.5
+                    logger.info(f"📊 EMA crossover SHORT in downtrend")
+                else:
+                    signal = None
+                
+                # If no EMA, try MACD (bearish)
+                if not signal:
+                    signal = macd_signal(df)
+                    if signal == 'short':
+                        signal_type = "macd_trend_down"
+                        multiplier = 2.5
+                        logger.info(f"📊 MACD SHORT in downtrend")
+                    else:
+                        signal = None
+                
+                # If still no signal, try breakout (bearish)
+                if not signal:
+                    signal = breakout_signal(df)
+                    if signal == 'short':
+                        signal_type = "breakout_trend_down"
+                        multiplier = 2.5
+                        logger.info(f"📊 Breakout SHORT in downtrend")
+                    else:
+                        signal = None
+            
+            # SIDEWAYS trend - use mean reversion
+            else:
+                # RSI
+                signal = rsi_signal(df)
+                if signal:
+                    signal_type = f"rsi_trend_side_{signal}"
+                    multiplier = 1.5
+                    logger.info(f"📊 RSI {signal} in sideways trend")
+                
+                # If no RSI, try Bollinger
+                if not signal:
+                    signal = bollinger_band_signal(df)
+                    if signal:
+                        signal_type = f"bollinger_trend_side_{signal}"
+                        multiplier = 1.5
+                        logger.info(f"📊 Bollinger {signal} in sideways trend")
         
         # RANGING MARKET - Mean reversion works best
-        if regime_type in ["range", "compression"]:
-            logger.debug(f"📈 Ranging market - favoring mean reversion strategies")
+        elif regime_type in ["range", "compression"]:
+            logger.debug(f"📊 Ranging market - favoring mean reversion")
             
-            # Try RSI first (best for oversold/overbought)
-            signal = rsi_signal(df, oversold=30, overbought=70)
+            # Try RSI first
+            signal = rsi_signal(df)
             if signal:
-                signal_type = "rsi_range"
-                multiplier = 1.5  # Tighter stops in range
-                logger.info(f"📊 RSI mean reversion signal in ranging market: {signal}")
+                signal_type = f"rsi_range_{signal}"
+                multiplier = 1.5
+                logger.info(f"📊 RSI {signal} in ranging market")
             
-            # If no RSI signal, try Bollinger Bands
+            # If no RSI, try Bollinger
             if not signal:
                 signal = bollinger_band_signal(df)
                 if signal:
-                    signal_type = "bollinger_range"
+                    signal_type = f"bollinger_range_{signal}"
                     multiplier = 1.5
-                    logger.info(f"📊 Bollinger Band signal in ranging market: {signal}")
-            
-            # If still no signal, try volume breakout (could indicate range breakout)
-            if not signal:
-                signal = volume_breakout_signal(df)
-                if signal:
-                    signal_type = "volume_breakout_range"
-                    multiplier = 2.0
-                    logger.info(f"📊 Volume breakout signal in ranging market: {signal}")
-        
-        # TRENDING MARKET - Trend following works best
-        elif regime_type == "trend":
-            logger.debug(f"📈 Trending market - favoring trend following strategies")
-            
-            # Try EMA crossover first
-            signal = ema_crossover_signal(df)
-            if signal:
-                signal_type = "ema_trend"
-                multiplier = 2.5  # Wider stops in trends
-                logger.info(f"📊 EMA crossover signal in trending market: {signal}")
-            
-            # If no EMA signal, try MACD
-            if not signal:
-                signal = macd_signal(df)
-                if signal:
-                    signal_type = "macd_trend"
-                    multiplier = 2.5
-                    logger.info(f"📊 MACD signal in trending market: {signal}")
-            
-            # If still no signal, try breakout (trend continuation)
-            if not signal:
-                signal = breakout_signal(df)
-                if signal:
-                    signal_type = "breakout_trend"
-                    multiplier = 2.5
-                    logger.info(f"📊 Breakout signal in trending market: {signal}")
+                    logger.info(f"📊 Bollinger {signal} in ranging market")
         
         # BREAKOUT MARKET - Breakout strategies work best
         elif regime_type == "breakout":
             logger.debug(f"🚀 Breakout market - favoring breakout strategies")
             
-            # Try breakout signal first
             signal = breakout_signal(df)
             if signal:
-                signal_type = "breakout_breakout"
-                multiplier = 3.0  # Wider stops for breakouts
-                logger.info(f"📊 Breakout signal in breakout market: {signal}")
+                signal_type = f"breakout_{signal}"
+                multiplier = 3.0
+                logger.info(f"📊 Breakout {signal} signal")
             
-            # If no breakout, try volume breakout
             if not signal:
                 signal = volume_breakout_signal(df)
                 if signal:
-                    signal_type = "volume_breakout_breakout"
+                    signal_type = f"volume_breakout_{signal}"
                     multiplier = 2.5
-                    logger.info(f"📊 Volume breakout signal in breakout market: {signal}")
-            
-            # If still no signal, try momentum indicators
-            if not signal:
-                signal = macd_signal(df)
-                if signal:
-                    signal_type = "macd_breakout"
-                    multiplier = 2.5
-                    logger.info(f"📊 MACD signal in breakout market: {signal}")
+                    logger.info(f"📊 Volume breakout {signal}")
         
         # EXPANSION (HIGH VOLATILITY) - Be cautious
         elif regime_type == "expansion":
-            logger.debug(f"🌪️ High volatility market - being cautious")
+            logger.debug(f"🌪️ High volatility - being cautious")
+            adjusted_risk = risk_per_trade * 0.5
             
-            # Reduce position size in high volatility
-            risk_per_trade = risk_per_trade * 0.5  # Half the normal risk
-            
-            # Only take very strong signals
             signal = breakout_signal(df, volume_confirmation=True)
             if signal:
-                signal_type = "breakout_expansion"
-                multiplier = 3.0  # Wider stops for volatility
-                logger.info(f"📊 Strong breakout signal in high volatility: {signal}")
-            
-            if not signal:
-                signal = volume_breakout_signal(df)
-                if signal and abs(df['close'].pct_change().iloc[-1]) > 0.02:
-                    signal_type = "volume_expansion"
-                    multiplier = 2.5
-                    logger.info(f"📊 Volume breakout in high volatility: {signal}")
+                signal_type = f"breakout_expansion_{signal}"
+                multiplier = 3.0
+                risk_per_trade = adjusted_risk
+                logger.info(f"📊 Strong breakout in high volatility")
         
-        # UNKNOWN REGIME - Try all strategies in order
+        # UNKNOWN REGIME - Try all strategies, take first signal
         else:
             logger.debug(f"❓ Unknown regime - trying all strategies")
-            
-            # Try breakout first (most powerful)
-            signal = breakout_signal(df)
-            if signal:
-                signal_type = "breakout"
-                multiplier = 2.5
-            else:
-                # Then volume breakout
-                signal = volume_breakout_signal(df)
+            for strategy_fn, stype, mult in [
+                (lambda: breakout_signal(df), "breakout_unknown", 2.0),
+                (lambda: ema_crossover_signal(df), "ema_unknown", 2.0),
+                (lambda: macd_signal(df), "macd_unknown", 2.0),
+                (lambda: rsi_signal(df), "rsi_unknown", 1.5),
+                (lambda: bollinger_band_signal(df), "bollinger_unknown", 1.5),
+                (lambda: volume_breakout_signal(df), "volume_unknown", 2.0),
+            ]:
+                signal = strategy_fn()
                 if signal:
-                    signal_type = "volume_breakout"
-                    multiplier = 2.0
-                else:
-                    # Then EMA crossover
-                    signal = ema_crossover_signal(df)
-                    if signal:
-                        signal_type = "ema_crossover"
-                        multiplier = 2.0
-                    else:
-                        # Then MACD
-                        signal = macd_signal(df)
-                        if signal:
-                            signal_type = "macd_crossover"
-                            multiplier = 2.0
-                        else:
-                            # Then RSI
-                            signal = rsi_signal(df)
-                            if signal:
-                                signal_type = "rsi"
-                                multiplier = 1.5
-                            else:
-                                # Finally Bollinger
-                                signal = bollinger_band_signal(df)
-                                if signal:
-                                    signal_type = "bollinger"
-                                    multiplier = 1.5
+                    signal_type = stype
+                    multiplier = mult
+                    break
         
         # If we have a signal, calculate position size
         if signal:
+            # Shorts always go to futures; longs go to spot
+            market = "futures" if signal == "short" else "spot"
+
+            # For futures, read leverage from config (default 1x = no leverage)
+            try:
+                from config_loader import config as _cfg
+                leverage = int(_cfg.config.get('futures_leverage', 1))
+            except Exception:
+                leverage = 1
+
+            # Effective equity for sizing: for futures use full cash (margin); for spot use cash
+            sizing_equity = equity * leverage if market == "futures" else equity
+
             units, sl, tp = calculate_position_units(
-                current_price, 
-                equity, 
-                risk_per_trade, 
-                current_atr, 
+                current_price,
+                sizing_equity,
+                risk_per_trade,
+                current_atr,
                 multiplier
             )
-            
+
             if units > 0:
-                # For short signals, cap by available balance
+                # Cap short units by available cash margin
                 if signal == 'short' and trading_engine:
-                    available = get_available_balance(symbol, trading_engine)
-                    if units > available:
-                        original_units = units
-                        units = available
-                        logger.info(f"🔄 Short position capped: {original_units:.6f} -> {units:.6f}")
-                        if units <= 0:
-                            return None
-                
+                    available_cash = get_available_balance(symbol, trading_engine)
+                    max_units_by_cash = (available_cash * leverage) / current_price if current_price > 0 else 0
+                    if units > max_units_by_cash:
+                        units = max_units_by_cash
+                        logger.info(f"🔄 Short capped to cash margin: {units:.6f} units")
+                    if units <= 0:
+                        return None
+
                 return {
                     'side': signal,
                     'entry': current_price,
@@ -532,8 +558,10 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     'stop_loss': sl,
                     'take_profit': tp,
                     'signal_type': signal_type,
-                    'regime': regime_type,
-                    'confidence': get_confidence_from_regime(regime_type, signal_type)
+                    'regime': f"{regime_type}_{trend_direction}",
+                    'market': market,
+                    'leverage': leverage,
+                    'confidence': get_confidence_from_regime(regime_type, signal_type or '')
                 }
         
         logger.debug("No signals detected")

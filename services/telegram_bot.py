@@ -169,69 +169,40 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"   binance_client exists: {trading_engine.binance_client is not None}")
         
         if trading_engine.trading_mode == 'paper':
-            logger.info("   Getting balance from portfolio file (paper mode)")
-
             try:
-                from modules.portfolio import load_portfolio
-                from modules.portfolio import get_performance_summary
-                portfolio = load_portfolio()
-                perf = get_performance_summary()
+                from modules.portfolio import get_portfolio_summary
+                summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
+                perf = summary
 
-                
-                # Get cash from
-                cash = portfolio.get('cash', {'USDT': 0, 'USDC': 0})
-                cash_total = cash.get('USDT', 0) + cash.get('USDC', 0)
-                
-                # Get initial balance from portfolio
-                initial_balance = portfolio.get('initial_balance', cash)
-
-                positions = portfolio.get('positions', {})
-
-                # Calculate total value from positions
-                positions_value = 0
-                for symbol, position in positions.items():
-                    positions_value += position.get('value', position['amount'] * position['entry_price'])
-                
-                
-                # Get current prices for positions (optional)
-                current_prices = trading_engine.get_current_prices()
-                
-                # Update position values with current prices
-                updated_positions_value = 0
-                for symbol, position in positions.items():
-                    current_price = current_prices.get(symbol, position.get('current_price', position['entry_price']))
-                    position_value = position['amount'] * current_price
-                    updated_positions_value += position_value
-                
-                total_value = cash_total + updated_positions_value
-                
-                # Get initial balance (you might want to store this in portfolio)
-                initial_balance = 100  # Default, or store in portfolio
-                
-                total_return = total_value - initial_balance
-                total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
+                total_value = summary.get('total_value', 0)
+                cash_total = summary.get('total_cash', 0)
+                total_return_pct = summary.get('total_return_pct', 0)
+                positions = summary.get('positions', {})
 
                 response = (
                     f"💰 *Portfolio Balance*\n\n"
                     f"Total Value: `${total_value:,.2f}`\n"
                     f"Cash: `${cash_total:,.2f}`\n"
                     f"Return: `{total_return_pct:+.1f}%`\n"
-                    f"Win Rate: `{perf.get('win_rate', 0):.1f}%`\n"
-                    f"Trades: `{perf.get('total_trades', 0)}`\n"
+                    f"Win Rate: `{summary.get('win_rate', 0):.1f}%`\n"
+                    f"Trades: `{summary.get('total_trades', 0)}`\n"
                 )
-                
-                # Add positions
+
                 if positions:
                     response += "\n📊 *Positions:*\n"
-                    for symbol, position in positions.items():
-                        current_price = current_prices.get(symbol, position.get('current_price', position['entry_price']))
-                        pnl = (current_price - position['entry_price']) * position['amount'] if position['side'] == 'long' else (position['entry_price'] - current_price) * position['amount']
+                    for symbol, pos in positions.items():
+                        pnl = pos.get('pnl', 0)
                         pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-                        response += f"   {pnl_emoji} {symbol}: {position['amount']:.4f} @ ${position['entry_price']:.2f} → ${current_price:.2f} (PnL: ${pnl:+.2f})\n"
+                        response += (
+                            f"   {pnl_emoji} {symbol}: {pos.get('amount', 0):.4f} "
+                            f"@ ${pos.get('entry_price', 0):.2f} → "
+                            f"${pos.get('current_price', 0):.2f} "
+                            f"(PnL: ${pnl:+.2f})\n"
+                        )
 
                 await update.message.reply_text(response, parse_mode='Markdown')
                 return
-                
+
             except Exception as e:
                 logger.error(f"❌ Paper balance error: {e}")
                 await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
@@ -286,71 +257,27 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("⚠️ Summary command triggered without message object")
         return
     try:
-        # PAPER MODE
-        if trading_engine.trading_mode == 'paper':
-            try:
-                from modules.portfolio import load_portfolio, get_performance_summary
-                portfolio = load_portfolio()
-                perf = get_performance_summary()
-                
-                # Get cash from portfolio
-                cash_dict = portfolio.get('cash', {"USDT": 0, "USDC": 0})
-                total_cash = cash_dict.get('USDT', 0) + cash_dict.get('USDC', 0)
-                
-                # Get positions
-                positions = portfolio.get('positions', {})
-                
-                # Calculate total value from positions with current prices
-                positions_value = 0
-                current_prices = trading_engine.get_current_prices()
-                
-                for symbol, position in positions.items():
-                    current_price = current_prices.get(symbol, position.get('current_price', position['entry_price']))
-                    positions_value += position['amount'] * current_price
-                
-                total_value = total_cash + positions_value
-                
-                # Get initial balance (you might want to store this in portfolio)
-                initial_balance = portfolio.get('initial_balance', 100)
-                
-                total_return = total_value - initial_balance
-                total_return_pct = (total_return / initial_balance * 100) if initial_balance > 0 else 0
-                pnl_emoji = "🟢" if total_return_pct >= 0 else "🔴"
-                
-                message = (
-                    f"{pnl_emoji} *Portfolio*: `${total_value:,.0f}` "
-                    f"({total_return_pct:+.1f}%) | "
-                    f"💵 Cash: `${total_cash:,.0f}` | "
-                    f"📊 {len(positions)} positions | "
-                    f"🎯 {perf.get('win_rate', 0):.0f}% win rate"
-                )
-                
-                await update.message.reply_text(message, parse_mode='Markdown')
-                return
-                
-            except Exception as e:
-                logger.error(f"❌ Paper summary error: {e}")
-                await update.message.reply_text("❌ Error getting paper summary")
-                return
-        
-        # LIVE/TESTNET MODE
         from modules.portfolio import get_portfolio_summary
-        summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
-        
-        pnl_emoji = "🟢" if summary.get('total_return_pct', 0) >= 0 else "🔴"
-        
+        summary_data = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
+
+        total_value = summary_data.get('total_value', 0)
+        total_cash = summary_data.get('total_cash', 0)
+        total_return_pct = summary_data.get('total_return_pct', 0)
+        pnl_emoji = "🟢" if total_return_pct >= 0 else "🔴"
+
         message = (
-            f"{pnl_emoji} *Portfolio*: `${summary.get('total_value', 0):,.0f}` "
-            f"({summary.get('total_return_pct', 0):+.1f}%) | "
-            f"💵 Cash: `${summary.get('total_cash', 0):,.0f}` | "
-            f"📊 {summary.get('positions_count', 0)} positions"
+            f"{pnl_emoji} *Portfolio*: `${total_value:,.0f}` "
+            f"({total_return_pct:+.1f}%) | "
+            f"💵 Cash: `${total_cash:,.0f}` | "
+            f"📊 {summary_data.get('positions_count', 0)} positions | "
+            f"🎯 {summary_data.get('win_rate', 0):.0f}% win rate"
         )
-        
+
         await update.message.reply_text(message, parse_mode='Markdown')
-        
+
     except Exception as e:
         logger.error(f"❌ Summary error: {e}")
-        await update.message.reply_text("❌ Error")
+        await update.message.reply_text("❌ Error getting summary")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""
@@ -1210,9 +1137,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='HTML')
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop the bot"""
+    """Stop the bot gracefully"""
     await update.message.reply_text("🛑 Stopping bot...", parse_mode='Markdown')
-    raise SystemExit(0)
+    logger.info("🛑 Stop command received - shutting down gracefully")
+    try:
+        from services.scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception as e:
+        logger.error(f"Error stopping scheduler: {e}")
+    if stop_event:
+        stop_event.set()
+    # Ask the application to stop polling
+    context.application.stop_running()
 
 # -------------------------------------------------------------------
 # MAIN FUNCTION
