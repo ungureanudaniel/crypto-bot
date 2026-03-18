@@ -78,11 +78,17 @@ def _paper_close(symbol: str, exit_price: float, reason: str = "") -> Optional[D
 
 def _paper_check_stops() -> list:
     """
-    Check all open paper futures positions against current prices.
+    Check all open paper futures positions using exit_manager
+    (trailing stop + signal reversal) plus plain SL/TP fallback.
     Returns list of symbols that were closed.
     """
-    from modules.portfolio import get_futures_positions
+    from modules.portfolio import get_futures_positions, save_futures_positions
     from modules.data_feed import get_current_price
+
+    try:
+        from modules.exit_manager import evaluate_exit
+    except ImportError:
+        evaluate_exit = None
 
     closed = []
     positions = get_futures_positions()
@@ -93,23 +99,41 @@ def _paper_check_stops() -> list:
             if current_price is None:
                 continue
 
-            side = pos['side']
-            sl = pos.get('stop_loss')
-            tp = pos.get('take_profit')
+            should_exit = False
+            reason      = ''
 
-            hit_sl = hit_tp = False
-            if side == 'short':
-                hit_sl = sl and current_price >= sl
-                hit_tp = tp and current_price <= tp
-            else:  # futures long
-                hit_sl = sl and current_price <= sl
-                hit_tp = tp and current_price >= tp
+            if evaluate_exit:
+                try:
+                    from modules.data_feed import fetch_ohlcv
+                    df = fetch_ohlcv(symbol, interval='1h', limit=100)
+                except Exception:
+                    df = None
 
-            if hit_tp:
-                _paper_close(symbol, current_price, reason='take_profit')
-                closed.append(symbol)
-            elif hit_sl:
-                _paper_close(symbol, current_price, reason='stop_loss')
+                should_exit, reason = evaluate_exit(symbol, pos, current_price, df)
+
+                # Persist trailing stop update back to portfolio
+                if not should_exit and pos.get('trailing_stop_active'):
+                    positions[symbol] = pos
+                    save_futures_positions(positions)
+
+            else:
+                side = pos['side']
+                sl   = pos.get('stop_loss')
+                tp   = pos.get('take_profit')
+                if side == 'short':
+                    if sl and current_price >= sl:
+                        should_exit, reason = True, 'stop_loss'
+                    elif tp and current_price <= tp:
+                        should_exit, reason = True, 'take_profit'
+                else:
+                    if sl and current_price <= sl:
+                        should_exit, reason = True, 'stop_loss'
+                    elif tp and current_price >= tp:
+                        should_exit, reason = True, 'take_profit'
+
+            if should_exit:
+                logger.info(f"🚪 Futures exit: {symbol} @ ${current_price:.4f} | {reason}")
+                _paper_close(symbol, current_price, reason=reason)
                 closed.append(symbol)
 
         except Exception as e:
@@ -284,13 +308,23 @@ class FuturesEngine:
                     f"Leverage: {self.leverage}x")
 
     def open_short(self, symbol: str, amount: float, entry_price: float,
-                   stop_loss: float, take_profit: float) -> bool:
+                   stop_loss: float, take_profit: float,
+                   signal_type: str = '') -> bool:
         """Open a short position (futures sell)."""
         logger.info(f"📉 Opening SHORT: {symbol} | Amount: {amount:.6f} "
                     f"@ ${entry_price:.2f} | SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
         if self.trading_mode == 'paper':
-            return _paper_open(symbol, 'short', amount, entry_price,
-                               stop_loss, take_profit, self.leverage)
+            ok = _paper_open(symbol, 'short', amount, entry_price,
+                             stop_loss, take_profit, self.leverage)
+            if ok and signal_type:
+                # Store signal_type for exit_manager
+                from modules.portfolio import get_futures_positions, save_futures_positions
+                pos = get_futures_positions()
+                if symbol in pos:
+                    pos[symbol]['signal_type'] = signal_type
+                    pos[symbol]['trailing_stop_active'] = False
+                    save_futures_positions(pos)
+            return ok
         return _live_open(symbol, 'short', amount, stop_loss, take_profit, self.leverage)
 
     def open_long(self, symbol: str, amount: float, entry_price: float,

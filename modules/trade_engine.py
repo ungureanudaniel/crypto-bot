@@ -243,36 +243,75 @@ class TradingEngine:
     
     def check_stop_losses(self) -> bool:
         """
-        Check stop losses and take profits for all open positions.
-        Handles both spot (open_positions) and futures (open_futures_positions).
+        Check exits for all open positions each minute.
+        Layer 1 (signal reversal) + Layer 2 (trailing stop) via exit_manager.
+        Falls back to plain SL/TP if exit_manager is unavailable.
         Returns True if any positions were closed.
         """
         positions_closed = False
 
         # --- Spot positions ---
         if self.open_positions:
+            try:
+                from modules.exit_manager import evaluate_exit
+            except ImportError:
+                evaluate_exit = None
+
             current_prices = self.get_current_prices()
+
             for symbol, position in list(self.open_positions.items()):
                 current_price = current_prices.get(symbol)
                 if not current_price:
                     logger.warning(f"⚠️ Could not get price for {symbol}, skipping")
                     continue
 
-                if position['side'] == 'long':
-                    if current_price <= position['stop_loss']:
-                        logger.info(f"🛑 [SPOT] Stop loss triggered: {symbol} @ ${current_price:.2f}")
-                        self.close_position(symbol, current_price, "stop_loss")
-                        positions_closed = True
-                    elif current_price >= position['take_profit']:
-                        logger.info(f"🎯 [SPOT] Take profit triggered: {symbol} @ ${current_price:.2f}")
-                        self.close_position(symbol, current_price, "take_profit")
-                        positions_closed = True
+                should_exit = False
+                reason      = ''
+
+                if evaluate_exit:
+                    try:
+                        df = self.data_feed.get_ohlcv(
+                            symbol=symbol,
+                            interval=self.timeframe,
+                            limit=100
+                        )
+                    except Exception:
+                        df = None
+
+                    should_exit, reason = evaluate_exit(
+                        symbol, position, current_price, df
+                    )
+
+                    # Persist updated trailing stop back to file
+                    if not should_exit and position.get('trailing_stop_active'):
+                        self.open_positions[symbol] = position
+                        save_positions_to_file(self.open_positions)
+
+                else:
+                    # Plain SL/TP fallback
+                    side = position['side']
+                    sl   = position.get('stop_loss', 0)
+                    tp   = position.get('take_profit', 0)
+                    if side == 'long':
+                        if sl and current_price <= sl:
+                            should_exit, reason = True, 'stop_loss'
+                        elif tp and current_price >= tp:
+                            should_exit, reason = True, 'take_profit'
+                    else:
+                        if sl and current_price >= sl:
+                            should_exit, reason = True, 'stop_loss'
+                        elif tp and current_price <= tp:
+                            should_exit, reason = True, 'take_profit'
+
+                if should_exit:
+                    logger.info(f"🚪 Exiting {symbol} @ ${current_price:.4f} | Reason: {reason}")
+                    self.close_position(symbol, current_price, reason)
+                    positions_closed = True
 
         # --- Futures positions ---
         if self.futures_engine:
             closed = self.futures_engine.check_stops()
             if closed:
-                # Sync in-memory dict
                 self.open_futures_positions = get_futures_positions()
                 positions_closed = True
 
@@ -361,8 +400,9 @@ class TradingEngine:
         logger.info(f"✅ Closed {symbol}: PnL ${pnl:.2f} ({pnl_pct:+.1f}%) ({self.trading_mode})")
         return True
 
-    def open_position(self, symbol: str, side: str, entry_price: float, 
-                     units: float, stop_loss: float, take_profit: float) -> bool:
+    def open_position(self, symbol: str, side: str, entry_price: float,
+                     units: float, stop_loss: float, take_profit: float,
+                     signal_type: str = '') -> bool:
         """Open a new position with stop loss and take profit"""
         # DEBUG
         logger.info(f"🔍 OPEN POSITION ATTEMPT:")
@@ -465,7 +505,7 @@ class TradingEngine:
         
         # ===== ONLY IF EXECUTION SUCCEEDED =====
         if execution_success:
-            # Add to open positions
+            # Add to open positions — store signal_type for exit_manager Layer 1
             self.open_positions[symbol] = {
                 'side': side,
                 'amount': units,
@@ -477,6 +517,8 @@ class TradingEngine:
                 'value': units * entry_price,
                 'pnl': 0.0,
                 'pnl_pct': 0.0,
+                'signal_type': signal_type if signal_type else '',
+                'trailing_stop_active': False,
                 'entry_time': datetime.now().isoformat(),
                 'mode': self.trading_mode
             }
@@ -856,6 +898,7 @@ class TradingEngine:
                     entry_price=signal['entry'],
                     stop_loss=signal['stop_loss'],
                     take_profit=signal['take_profit'],
+                    signal_type=signal.get('signal_type', '')
                 )
                 if result:
                     # Sync in-memory futures positions
@@ -900,7 +943,8 @@ class TradingEngine:
                 entry_price=signal['entry'],
                 units=signal['units'],
                 stop_loss=signal['stop_loss'],
-                take_profit=signal['take_profit']
+                take_profit=signal['take_profit'],
+                signal_type=signal.get('signal_type', '')
             )
 
             if result:
