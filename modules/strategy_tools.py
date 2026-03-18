@@ -262,55 +262,75 @@ def volume_breakout_signal(df):
 # -------------------------------------------------------------------
 # Position Sizing (Only calculates, but execution in trade_engine.py)
 # -------------------------------------------------------------------
-def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None, stop_atr_multiplier: float = 2):
+def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
+                              stop_atr_multiplier: float = 2, trading_fee: float = 0.0005):
     """
-    Calculate position size based on risk
+    Calculate position size based on risk.
+    Calibrated for 1h timeframe — stops are wider to avoid noise-triggered exits.
     Returns: units, stop_loss_price, take_profit_price
     """
     try:
-        # Calculate stop loss distance
+        # Calculate stop loss distance from ATR
         if atr and atr > 0:
             stop_distance = atr * stop_atr_multiplier
             stop_loss_pct = stop_distance / entry_price
         else:
-            stop_loss_pct = 0.02  # Default 2%
-        
-        # Ensure stop isn't too tight or too wide
-        stop_loss_pct = max(stop_loss_pct, 0.005)  # Min 0.5%
-        stop_loss_pct = min(stop_loss_pct, 0.05)   # Max 5%
-        
-        # Calculate stop price
-        stop_loss_price = entry_price * (1 - stop_loss_pct)
-        
-        # Take profit (2:1 reward:risk)
-        take_profit_pct = stop_loss_pct * 3 # 3:1 reward:risk
+            stop_loss_pct = 0.03  # Default 3% for 1h (was 2% on 15m)
+
+        # 1h-appropriate stop bounds: min 1.5%, max 8%
+        # Min 1.5% ensures the trade has room to breathe past normal 1h noise
+        # Max 8% prevents catastrophic loss on a single trade
+        stop_loss_pct = max(stop_loss_pct, 0.015)  # Min 1.5% (was 0.5%)
+        stop_loss_pct = min(stop_loss_pct, 0.08)   # Max 8%  (was 5%)
+
+        # Fee cost for round trip (entry + exit)
+        round_trip_fee = trading_fee * 2
+
+        # With trailing stops active, the fixed TP is now a ceiling — not the primary exit.
+        # Set it wide enough that the trailing stop can run freely before hitting it.
+        # Rule: TP = max(4x stop, 5x round-trip fee). Minimum absolute floor of 2%.
+        # This means on a strong trend the trailing stop will exit well before TP is hit,
+        # capturing more profit. TP only fires if price gaps straight to it.
+        min_rr = 4.0  # wider than before (was 2.5) because trailing stop is primary exit
+        take_profit_pct = max(stop_loss_pct * min_rr, round_trip_fee * 5)
+        take_profit_pct = max(take_profit_pct, 0.02)  # Absolute minimum 2% TP ceiling
+
+        stop_loss_price   = entry_price * (1 - stop_loss_pct)
         take_profit_price = entry_price * (1 + take_profit_pct)
-        
-        # Calculate units based on risk
-        risk_amount = equity * risk_per_trade
-        risk_per_unit = entry_price * stop_loss_pct
-        
-        if risk_per_unit <= 0:
-            logger.warning(f"⚠️ Risk per unit is zero or negative")
+
+        # Fee-adjusted net profit check — skip trades where fees exceed 20% of expected gain
+        expected_gain = equity * risk_per_trade * min_rr
+        fee_cost = equity * risk_per_trade * (round_trip_fee / stop_loss_pct)
+        if fee_cost > expected_gain * 0.20:
+            logger.debug(f"⏭️ Fee ratio too high: fees ${fee_cost:.4f} vs gain ${expected_gain:.4f}")
             return 0, None, None
-        
+
+        # Position sizing: risk a fixed % of equity per trade
+        risk_amount   = equity * risk_per_trade
+        risk_per_unit = entry_price * stop_loss_pct
+
+        if risk_per_unit <= 0:
+            logger.warning("⚠️ Risk per unit is zero or negative")
+            return 0, None, None
+
         units = risk_amount / risk_per_unit
-        
-        # Cap at 20% of equity
-        max_units = (equity * 0.2) / entry_price
+
+        # Cap at 15% of equity per position
+        max_units = (equity * 0.15) / entry_price
         units = min(units, max_units)
-        
+
         # Minimum trade size ($10)
         min_units = 10 / entry_price
         if units < min_units:
             logger.debug(f"Position too small: {units:.6f}, required: {min_units:.6f}")
             return 0, None, None
-        
+
         logger.info(f"Position calc: Entry=${entry_price:.2f}, SL={stop_loss_pct:.2%}, "
-                    f"TP={take_profit_pct:.2%}, Units={units:.6f}, Risk=${risk_amount:.2f}")
-        
+                    f"TP={take_profit_pct:.2%} (R:R {take_profit_pct/stop_loss_pct:.1f}x), "
+                    f"Units={units:.6f}, Risk=${risk_amount:.2f}")
+
         return units, stop_loss_price, take_profit_price
-        
+
     except Exception as e:
         logger.error(f"Error in calculate_position_units: {e}")
         return 0, None, None
@@ -320,13 +340,22 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
 # -------------------------------------------------------------------
 def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_engine=None, regime=None):
     """
-    Main function that combines multiple strategies
-    Now with trend direction awareness
+    Main function that combines multiple strategies.
+    Calibrated for 1h timeframe — regime-aware, fee-conscious.
     """
     try:
         if df.empty or len(df) < 50:
             logger.debug("Insufficient data")
             return None
+
+        # Load fee from config for fee-adjusted sizing
+        try:
+            from config_loader import config as _cfg
+            trading_fee = float(_cfg.config.get('trading_fee', 0.0005))
+            min_hold_candles = int(_cfg.config.get('min_hold_candles', 3))
+        except Exception:
+            trading_fee = 0.0005
+            min_hold_candles = 3
         
         # Calculate ATR for position sizing
         atr_series = calculate_atr(df)
@@ -537,7 +566,8 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 sizing_equity,
                 risk_per_trade,
                 current_atr,
-                multiplier
+                multiplier,
+                trading_fee=trading_fee
             )
 
             if units > 0:
@@ -557,7 +587,8 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     'units': units,
                     'stop_loss': sl,
                     'take_profit': tp,
-                    'signal_type': signal_type,
+                    'signal_type': signal_type or 'unknown',
+                    'atr': current_atr,
                     'regime': f"{regime_type}_{trend_direction}",
                     'market': market,
                     'leverage': leverage,

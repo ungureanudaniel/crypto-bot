@@ -385,16 +385,14 @@ class TradingEngine:
         # Send notification
         if has_notifier:
             try:
-                asyncio.create_task(notifier.send_trade_notification({
-                    'symbol': symbol,
-                    'side': 'SELL' if position['side'] == 'long' else 'COVER',
-                    'price': exit_price,
-                    'amount': amount,
-                    'pnl': pnl,
-                    'reason': reason,
-                    'mode': self.trading_mode
-                }))
-            except:
+                notifier.send_message_sync(
+                    f"{'✅' if pnl > 0 else '❌'} <b>TRADE CLOSED</b> ({reason}) [{self.trading_mode.upper()}]\n"
+                    f"📊 <b>{symbol}</b>\n"
+                    f"💰 Side: {position['side'].upper()}\n"
+                    f"💵 Exit: <code>${exit_price:.4f}</code>\n"
+                    f"📈 PnL: <code>${pnl:+.4f}</code> ({pnl_pct:+.2f}%)"
+                )
+            except Exception:
                 pass
         
         logger.info(f"✅ Closed {symbol}: PnL ${pnl:.2f} ({pnl_pct:+.1f}%) ({self.trading_mode})")
@@ -402,7 +400,7 @@ class TradingEngine:
 
     def open_position(self, symbol: str, side: str, entry_price: float,
                      units: float, stop_loss: float, take_profit: float,
-                     signal_type: str = '') -> bool:
+                     signal_type: str = '', **kwargs) -> bool:
         """Open a new position with stop loss and take profit"""
         # DEBUG
         logger.info(f"🔍 OPEN POSITION ATTEMPT:")
@@ -505,7 +503,7 @@ class TradingEngine:
         
         # ===== ONLY IF EXECUTION SUCCEEDED =====
         if execution_success:
-            # Add to open positions — store signal_type for exit_manager Layer 1
+            # Add to open positions — store signal_type and atr for exit_manager
             self.open_positions[symbol] = {
                 'side': side,
                 'amount': units,
@@ -517,7 +515,8 @@ class TradingEngine:
                 'value': units * entry_price,
                 'pnl': 0.0,
                 'pnl_pct': 0.0,
-                'signal_type': signal_type if signal_type else '',
+                'signal_type': signal_type if signal_type else 'unknown',
+                'atr': kwargs.get('atr', 0.0),
                 'trailing_stop_active': False,
                 'entry_time': datetime.now().isoformat(),
                 'mode': self.trading_mode
@@ -542,16 +541,16 @@ class TradingEngine:
             # Send notification
             if has_notifier:
                 try:
-                    asyncio.create_task(notifier.send_trade_notification({
-                        'symbol': symbol,
-                        'side': 'SHORT' if side == 'short' else 'LONG',
-                        'price': entry_price,
-                        'amount': units,
-                        'stop_loss': stop_loss,
-                        'take_profit': take_profit,
-                        'mode': self.trading_mode
-                    }))
-                except:
+                    notifier.send_message_sync(
+                        f"{'📈' if side == 'long' else '📉'} <b>TRADE OPENED</b> [{self.trading_mode.upper()}]\n"
+                        f"📊 <b>{symbol}</b>\n"
+                        f"💰 Side: {side.upper()}\n"
+                        f"💵 Entry: <code>${entry_price:.4f}</code>\n"
+                        f"📦 Units: <code>{units:.6f}</code>\n"
+                        f"🛑 Stop: <code>${stop_loss:.4f}</code>\n"
+                        f"🎯 Target: <code>${take_profit:.4f}</code>"
+                    )
+                except Exception:
                     pass
             
             logger.info(f"✅ Opened {side.upper()} position: {units:.6f} {symbol} at ${entry_price:.2f}")
@@ -663,7 +662,9 @@ class TradingEngine:
                     entry_price=price,
                     units=quantity,
                     stop_loss=stop_loss,
-                    take_profit=take_profit
+                    take_profit=take_profit,
+                    signal_type='manual',
+                    atr=0.0
                 )
                 return success, "Paper limit order simulated" if success else "Failed to place paper order"
             
@@ -732,7 +733,7 @@ class TradingEngine:
         # ===== MINIMUM TIME BETWEEN TRADES =====
         import time
         current_time = time.time()
-        min_time_between_trades = 900  # 15 minutes in seconds
+        min_time_between_trades = 3600  # 1 hour — matches trading timeframe
         
         # Check if enough time has passed since last trade
         if hasattr(self, 'last_trade_time') and self.last_trade_time:
@@ -898,7 +899,8 @@ class TradingEngine:
                     entry_price=signal['entry'],
                     stop_loss=signal['stop_loss'],
                     take_profit=signal['take_profit'],
-                    signal_type=signal.get('signal_type', '')
+                    signal_type=signal.get('signal_type', 'unknown'),
+                    atr=signal.get('atr', 0.0)
                 )
                 if result:
                     # Sync in-memory futures positions
@@ -907,16 +909,14 @@ class TradingEngine:
                     # Notify
                     if has_notifier:
                         try:
-                            import asyncio
-                            asyncio.create_task(notifier.send_trade_notification({
-                                'symbol': symbol,
-                                'side': 'SHORT',
-                                'price': signal['entry'],
-                                'amount': signal['units'],
-                                'stop_loss': signal['stop_loss'],
-                                'take_profit': signal['take_profit'],
-                                'mode': self.trading_mode
-                            }))
+                            notifier.send_message_sync(
+                                f"📉 <b>SHORT OPENED</b> [{self.trading_mode.upper()}]\n"
+                                f"📊 <b>{symbol}</b>\n"
+                                f"💵 Entry: <code>${signal['entry']:.4f}</code>\n"
+                                f"📦 Units: <code>{signal['units']:.6f}</code>\n"
+                                f"🛑 Stop: <code>${signal['stop_loss']:.4f}</code>\n"
+                                f"🎯 Target: <code>${signal['take_profit']:.4f}</code>"
+                            )
                         except Exception:
                             pass
                 return result
@@ -944,7 +944,8 @@ class TradingEngine:
                 units=signal['units'],
                 stop_loss=signal['stop_loss'],
                 take_profit=signal['take_profit'],
-                signal_type=signal.get('signal_type', '')
+                signal_type=signal.get('signal_type', 'unknown'),
+                atr=signal.get('atr', 0.0)
             )
 
             if result:

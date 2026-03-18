@@ -193,7 +193,15 @@ def evaluate_exit(
     if current_price <= 0:
         return False, ''
 
-    atr = _calculate_atr(df) if df is not None and not df.empty else 0.0
+    # Use ATR stored at entry time first — only recalculate if not available
+    # This ensures trailing stop distances are consistent with entry sizing
+    stored_atr = position.get('atr', 0.0)
+    if stored_atr > 0:
+        atr = stored_atr
+    elif df is not None and not df.empty:
+        atr = _calculate_atr(df)
+    else:
+        atr = 0.0
 
     # --- Layer 2: update trailing stop first (mutates position in-place) ---
     if atr > 0:

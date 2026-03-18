@@ -45,7 +45,7 @@ def _to_futures_symbol(symbol: str) -> str:
 # -------------------------------------------------------------------
 def _paper_open(symbol: str, side: str, amount: float, entry_price: float,
                 stop_loss: float, take_profit: float,
-                leverage: int = DEFAULT_LEVERAGE) -> bool:
+                leverage: int = DEFAULT_LEVERAGE, atr: float = 0.0) -> bool:
     """Simulate opening a futures position in paper mode."""
     from modules.portfolio import open_futures_position
     fee = amount * entry_price * FUTURES_FEE
@@ -58,7 +58,8 @@ def _paper_open(symbol: str, side: str, amount: float, entry_price: float,
         entry_price=net_entry,
         stop_loss=stop_loss,
         take_profit=take_profit,
-        leverage=leverage
+        leverage=leverage,
+        atr=atr
     )
     if success:
         logger.info(f"📄 [PAPER] Futures {side.upper()} opened: {symbol} "
@@ -309,20 +310,20 @@ class FuturesEngine:
 
     def open_short(self, symbol: str, amount: float, entry_price: float,
                    stop_loss: float, take_profit: float,
-                   signal_type: str = '') -> bool:
+                   signal_type: str = '', atr: float = 0.0) -> bool:
         """Open a short position (futures sell)."""
         logger.info(f"📉 Opening SHORT: {symbol} | Amount: {amount:.6f} "
                     f"@ ${entry_price:.2f} | SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
         if self.trading_mode == 'paper':
             ok = _paper_open(symbol, 'short', amount, entry_price,
-                             stop_loss, take_profit, self.leverage)
+                             stop_loss, take_profit, self.leverage, atr=atr)
             if ok and signal_type:
-                # Store signal_type for exit_manager
                 from modules.portfolio import get_futures_positions, save_futures_positions
                 pos = get_futures_positions()
                 if symbol in pos:
                     pos[symbol]['signal_type'] = signal_type
                     pos[symbol]['trailing_stop_active'] = False
+                    pos[symbol]['atr'] = atr
                     save_futures_positions(pos)
             return ok
         return _live_open(symbol, 'short', amount, stop_loss, take_profit, self.leverage)
