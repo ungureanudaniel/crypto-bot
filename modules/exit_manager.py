@@ -126,46 +126,48 @@ def update_trailing_stop(
     side         = position.get('side', 'long')
 
     if side == 'long':
-        profit      = current_price - entry_price
-        breakeven   = entry_price
-        trail_stop  = current_price - atr          # 1x ATR below current price
+        profit         = current_price - entry_price
+        breakeven      = entry_price
+        min_trail_dist = max(atr, current_price * 0.01)
+        trail_stop     = current_price - min_trail_dist
 
-        if profit >= 2 * atr:
-            # Trail: stop follows price, never moves backward
+        # 3x ATR profit → start trailing 1x ATR behind price
+        # 2x ATR profit → move stop to breakeven only
+        # Rationale: on 1h candles, 1x ATR is just normal candle noise.
+        # Waiting for 2x ATR confirms the move is real before protecting it.
+        if profit >= 3 * atr:
             if trail_stop > current_stop:
                 logger.info(
-                    f"📈 Trailing stop updated: ${current_stop:.4f} → ${trail_stop:.4f} "
-                    f"(price ${current_price:.4f}, ATR ${atr:.4f})"
+                    f"📈 Trailing stop updated: ${current_stop:.6f} → ${trail_stop:.6f} "
+                    f"(price ${current_price:.6f}, dist ${min_trail_dist:.6f})"
                 )
                 return trail_stop, 'trailing'
 
-        elif profit >= atr:
-            # Breakeven: only move stop up to entry, never backward
+        elif profit >= 2 * atr:
             if breakeven > current_stop:
                 logger.info(
-                    f"⚖️  Stop moved to breakeven: ${current_stop:.4f} → ${breakeven:.4f}"
+                    f"⚖️  Stop moved to breakeven: ${current_stop:.6f} → ${breakeven:.6f}"
                 )
                 return breakeven, 'breakeven'
 
     else:  # short
-        profit      = entry_price - current_price
-        breakeven   = entry_price
-        trail_stop  = current_price + atr          # 1x ATR above current price
+        profit         = entry_price - current_price
+        breakeven      = entry_price
+        min_trail_dist = max(atr, current_price * 0.01)
+        trail_stop     = current_price + min_trail_dist
 
-        if profit >= 2 * atr:
-            # Trail: stop follows price downward, never moves backward (upward)
+        if profit >= 3 * atr:
             if trail_stop < current_stop:
                 logger.info(
-                    f"📉 Trailing stop updated: ${current_stop:.4f} → ${trail_stop:.4f} "
-                    f"(price ${current_price:.4f}, ATR ${atr:.4f})"
+                    f"📉 Trailing stop updated: ${current_stop:.6f} → ${trail_stop:.6f} "
+                    f"(price ${current_price:.6f}, dist ${min_trail_dist:.6f})"
                 )
                 return trail_stop, 'trailing'
 
-        elif profit >= atr:
-            # Breakeven: only move stop down to entry, never backward
+        elif profit >= 2 * atr:
             if breakeven < current_stop:
                 logger.info(
-                    f"⚖️  Short stop moved to breakeven: ${current_stop:.4f} → ${breakeven:.4f}"
+                    f"⚖️  Short stop moved to breakeven: ${current_stop:.6f} → ${breakeven:.6f}"
                 )
                 return breakeven, 'breakeven'
 

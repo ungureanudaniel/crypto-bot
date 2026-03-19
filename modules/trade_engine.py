@@ -193,6 +193,18 @@ class TradingEngine:
         
         # Initial balance for return calculation (from first sync)
         self.initial_total_value = None
+
+        # Restore last_trade_time from portfolio to survive restarts
+        try:
+            portfolio = load_portfolio()
+            saved_time = portfolio.get('last_trade_time', 0)
+            self.last_trade_time = saved_time
+            if saved_time:
+                import time as _time
+                age = _time.time() - saved_time
+                logger.info(f"⏱️ Last trade was {age/60:.0f} min ago (restored from portfolio)")
+        except Exception:
+            self.last_trade_time = 0
         
         logger.info(f"🚀 Trading Engine initialized for {self.trading_mode.upper()} mode")
         logger.info(f"📊 Monitoring {len(self.symbols)} symbols on {self.timeframe}")
@@ -823,9 +835,15 @@ class TradingEngine:
             except Exception as e:
                 logger.error(f"❌ Error scanning {symbol}: {e}")
         
-        # If we found signals, update the last trade time
+        # If we found signals, update the last trade time and persist it
         if signals_found:
             self.last_trade_time = current_time
+            try:
+                portfolio = load_portfolio()
+                portfolio['last_trade_time'] = current_time
+                save_portfolio(portfolio)
+            except Exception as e:
+                logger.warning(f"Could not persist last_trade_time: {e}")
             logger.info(f"⏱️ Updated last trade time to {time.strftime('%H:%M:%S', time.localtime(current_time))}")
         
         logger.info(f"📊 Scan complete: Found {len(signals_found)} signals")

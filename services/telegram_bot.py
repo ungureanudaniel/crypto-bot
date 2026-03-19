@@ -324,16 +324,25 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 amount = position.get('amount', 0)
                 pnl = position.get('pnl', 0)
                 pnl_pct = position.get('pnl_pct', 0)
-                
+
                 pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-                
+
+                # Smart price formatting — enough decimals for any coin price
+                def fmt(p):
+                    if p == 0: return "0"
+                    if p >= 100:  return f"{p:.2f}"
+                    if p >= 1:    return f"{p:.3f}"
+                    if p >= 0.01: return f"{p:.4f}"
+                    return f"{p:.6f}"
+
+                trailing = " 🔄" if position.get('trailing_stop_active') else ""
                 message_lines.append(
                     f"\n{pnl_emoji} *{symbol}* ({position.get('side', 'unknown').upper()})"
-                    f"\n   Entry: `${entry_price:.2f}`"
-                    f"\n   Current: `${current_price:.2f}`"
-                    f"\n   P&L: `${pnl:+.2f}` ({pnl_pct:+.1f}%)"
-                    f"\n   Stop: `${position.get('stop_loss', 0):.2f}`"
-                    f"\n   Target: `${position.get('take_profit', 0):.2f}`"
+                    f"\n   Entry: `${fmt(entry_price)}`"
+                    f"\n   Current: `${fmt(current_price)}`"
+                    f"\n   P&L: `${pnl:+.4f}` ({pnl_pct:+.2f}%)"
+                    f"\n   Stop: `${fmt(position.get('stop_loss', 0))}`{trailing}"
+                    f"\n   Target: `${fmt(position.get('take_profit', 0))}`"
                 )
         
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
