@@ -4,11 +4,11 @@ services:
     container_name: binance_trader_bot
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python3", "-c", "import requests; print('healthy')"]
+      test: ["CMD", "python3", "healthcheck.py", "--quick"]
       interval: 60s
-      timeout: 10s
+      timeout: 15s
       retries: 3
-      start_period: 40s
+      start_period: 120s
     volumes:
       - ./config.json:/app/config.json
       - ./portfolio.json:/app/portfolio.json
