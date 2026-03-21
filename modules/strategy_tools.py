@@ -749,7 +749,7 @@ if __name__ == "__main__":
             stop_atr_multiplier=2
         )
         
-        if units > 0:
+        if units > 0 and sl is not None and tp is not None:
             print(f"   ✅ Units: {units:.6f}")
             print(f"   ✅ Stop Loss: ${sl:.2f} ({(1-sl/price)*100:.1f}% loss)")
             print(f"   ✅ Take Profit: ${tp:.2f} ({(tp/price-1)*100:.1f}% gain)")

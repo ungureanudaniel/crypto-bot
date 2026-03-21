@@ -55,8 +55,7 @@ TIMEFRAME      = CONFIG.get('trading_timeframe', '1h')
 RISK_PER_TRADE = float(CONFIG.get('risk_per_trade', 0.02))
 FEE            = float(CONFIG.get('trading_fee', 0.0005))
 MAX_POSITIONS  = int(CONFIG.get('max_positions', 5))
-INITIAL_EQUITY = 100.0
-
+INITIAL_EQUITY = int(CONFIG.get('cash', 5000))
 # -------------------------------------------------------------------
 # Import strategy stack (same as production)
 # -------------------------------------------------------------------
@@ -142,7 +141,7 @@ class Backtester:
         end_idx      = min(entry_idx + max_candles + 1, len(df))
 
         for i in range(entry_idx + 1, end_idx):
-            current_price = df.at[i, 'close']
+            current_price = float(df.iloc[i]['close'])
             candles_held  = i - entry_idx
 
             # Track candles held so exit_manager reversal guard works
@@ -163,7 +162,7 @@ class Backtester:
 
         if exit_price is None:
             last_idx     = min(entry_idx + max_candles, len(df) - 1)
-            exit_price   = df.at[last_idx, 'close']
+            exit_price   = float(df.iloc[last_idx]['close'])
             candles_held = last_idx - entry_idx
 
         gross_pnl = ((exit_price - entry_price) if side == 'long'
@@ -203,13 +202,22 @@ class Backtester:
         warmup        = 100
         i             = warmup
 
-        # Production scans every 30 min on 1h candles = every 0.5 candles
-        # But regime+signal computation is expensive — scan every 2 candles
-        # Min gap between trades: 6 candles (6h) — prevents overtrading same coin
-        SCAN_STEP       = 2   # check signal every N candles
-        MIN_TRADE_GAP   = 6   # minimum candles between two trades on same coin
+        SCAN_STEP     = 2    # check every 2 candles
+        MIN_TRADE_GAP = 24   # minimum 24h between trades on same coin
+
+        # Drawdown circuit breaker — stop trading if equity drops too far
+        max_dd_pct    = float(CONFIG.get('max_drawdown', 0.06))
+        peak_equity   = self.equity
 
         while i < len(df) - 2:
+
+            # Update peak and check drawdown
+            if self.equity > peak_equity:
+                peak_equity = self.equity
+            current_dd = (self.equity - peak_equity) / peak_equity
+            if current_dd < -max_dd_pct:
+                self._log(f"  🛑 Drawdown circuit breaker hit: {current_dd:.1%} — stopping {symbol}")
+                break
             w_start = max(0, i - 99)
             window  = df.iloc[w_start: i + 1].copy()
 

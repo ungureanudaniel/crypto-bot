@@ -44,17 +44,20 @@ def _calculate_atr(df: pd.DataFrame, length: int = 14) -> float:
 def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
     """
     Re-run the indicator that generated the entry signal.
-    Returns True if the indicator now fires the OPPOSITE direction
-    (i.e. the trade thesis has broken down and we should exit).
+    Returns True only if ALL of:
+      1. Indicator fires the opposite direction
+      2. Price is actually moving against the trade (momentum confirmation)
+      3. For mean-reversion signals (bollinger/rsi): previous candle also reversed
+         — prevents single-candle noise from closing a valid position
 
-    position dict must contain 'signal_type' and 'side'.
+    position dict must contain 'signal_type', 'side' and 'entry_price'.
     """
-    signal_type = position.get('signal_type', '')
-    side        = position.get('side', 'long')
-    opposite    = 'short' if side == 'long' else 'long'
+    signal_type  = position.get('signal_type', '')
+    side         = position.get('side', 'long')
+    opposite     = 'short' if side == 'long' else 'long'
+    entry_price  = position.get('entry_price', 0.0)
 
     try:
-        # Import signal functions lazily to avoid circular imports
         from modules.strategy_tools import (
             ema_crossover_signal,
             macd_signal,
@@ -67,6 +70,26 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
         if len(df) < 50:
             return False
 
+        current_price = float(df['close'].iloc[-1])
+        prev_price    = float(df['close'].iloc[-2])
+
+        # Price momentum must confirm the reversal direction
+        # For long exits: price must be falling (current < previous)
+        # For short exits: price must be rising (current > previous)
+        if side == 'long' and current_price >= prev_price:
+            return False  # Price still rising — don't exit long
+        if side == 'short' and current_price <= prev_price:
+            return False  # Price still falling — don't exit short
+
+        # Also require price to have moved at least 0.3% against position
+        # Filters out flat/sideways candles that briefly touch the wrong side
+        if entry_price > 0:
+            move_against = ((entry_price - current_price) / entry_price
+                           if side == 'long'
+                           else (current_price - entry_price) / entry_price)
+            if move_against < 0.003:
+                return False
+
         reversal_signal = None
 
         if 'ema' in signal_type:
@@ -77,18 +100,25 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
             reversal_signal = rsi_signal(df)
         elif 'bollinger' in signal_type:
             reversal_signal = bollinger_band_signal(df)
+            # For mean-reversion signals, require previous candle also reversed
+            # (two consecutive confirmations to avoid single-candle whipsaws)
+            if reversal_signal == opposite:
+                prev_window = df.iloc[:-1]
+                if len(prev_window) >= 50:
+                    prev_reversal = bollinger_band_signal(prev_window)
+                    if prev_reversal != opposite:
+                        return False  # Only one candle — not confirmed
         elif 'breakout' in signal_type:
             reversal_signal = breakout_signal(df)
         elif 'volume' in signal_type:
             reversal_signal = volume_breakout_signal(df)
         else:
-            # Unknown signal type — don't force exit
             return False
 
         if reversal_signal == opposite:
             logger.info(
-                f"🔄 Signal reversal detected: was {side}, now {reversal_signal} "
-                f"(indicator: {signal_type})"
+                f"🔄 Signal reversal confirmed: was {side}, now {reversal_signal} "
+                f"(indicator: {signal_type}, price move: {move_against:.2%})"
             )
             return True
 
@@ -108,66 +138,68 @@ def update_trailing_stop(
     atr: float,
 ) -> Tuple[Optional[float], str]:
     """
-    Update the trailing stop for an open position.
+    Percentage-based trailing stop — scales correctly regardless of account size or asset price.
 
     Rules:
-      - Profit >= 1x ATR → move stop to breakeven (entry price)
-      - Profit >= 2x ATR → trail stop 1x ATR behind current price
+      - Profit >= 1.5% → move stop to breakeven
+      - Profit >= 3.0% → trail stop 1.5% behind current price (ratchets up, never back)
 
-    Returns:
-      (new_stop_loss, reason_string) if stop should be updated,
-      (None, '')                     if no update needed.
+    ATR is still used to set the minimum trail distance so the stop isn't
+    tighter than the asset's natural noise on 1h candles.
     """
-    if atr <= 0:
-        return None, ''
-
     entry_price  = position.get('entry_price', current_price)
     current_stop = position.get('stop_loss', 0.0)
     side         = position.get('side', 'long')
 
-    if side == 'long':
-        profit         = current_price - entry_price
-        breakeven      = entry_price
-        min_trail_dist = max(atr, current_price * 0.01)
-        trail_stop     = current_price - min_trail_dist
+    # Percentage thresholds
+    breakeven_threshold = 0.015   # 1.5% profit → move to breakeven
+    trail_threshold     = 0.030   # 3.0% profit → start trailing
+    trail_distance_pct  = 0.020   # trail 2.0% behind price (was 1.5%)
 
-        # 3x ATR profit → start trailing 1x ATR behind price
-        # 2x ATR profit → move stop to breakeven only
-        # Rationale: on 1h candles, 1x ATR is just normal candle noise.
-        # Waiting for 2x ATR confirms the move is real before protecting it.
-        if profit >= 3 * atr:
+    # Minimum trail distance: larger of 1.5% or 1x ATR as % of price
+    # Prevents stop being tighter than normal 1h noise
+    atr_pct = (atr / entry_price) if entry_price > 0 else 0
+    effective_trail_pct = max(trail_distance_pct, atr_pct)
+
+    if side == 'long':
+        profit_pct = (current_price - entry_price) / entry_price
+        breakeven  = entry_price
+        trail_stop = current_price * (1 - effective_trail_pct)
+
+        if profit_pct >= trail_threshold:
             if trail_stop > current_stop:
                 logger.info(
                     f"📈 Trailing stop updated: ${current_stop:.6f} → ${trail_stop:.6f} "
-                    f"(price ${current_price:.6f}, dist ${min_trail_dist:.6f})"
+                    f"(profit {profit_pct:.2%}, trail dist {effective_trail_pct:.2%})"
                 )
                 return trail_stop, 'trailing'
 
-        elif profit >= 2 * atr:
+        elif profit_pct >= breakeven_threshold:
             if breakeven > current_stop:
                 logger.info(
-                    f"⚖️  Stop moved to breakeven: ${current_stop:.6f} → ${breakeven:.6f}"
+                    f"⚖️  Stop moved to breakeven: ${current_stop:.6f} → ${breakeven:.6f} "
+                    f"(profit {profit_pct:.2%})"
                 )
                 return breakeven, 'breakeven'
 
     else:  # short
-        profit         = entry_price - current_price
-        breakeven      = entry_price
-        min_trail_dist = max(atr, current_price * 0.01)
-        trail_stop     = current_price + min_trail_dist
+        profit_pct = (entry_price - current_price) / entry_price
+        breakeven  = entry_price
+        trail_stop = current_price * (1 + effective_trail_pct)
 
-        if profit >= 3 * atr:
+        if profit_pct >= trail_threshold:
             if trail_stop < current_stop:
                 logger.info(
                     f"📉 Trailing stop updated: ${current_stop:.6f} → ${trail_stop:.6f} "
-                    f"(price ${current_price:.6f}, dist ${min_trail_dist:.6f})"
+                    f"(profit {profit_pct:.2%}, trail dist {effective_trail_pct:.2%})"
                 )
                 return trail_stop, 'trailing'
 
-        elif profit >= 2 * atr:
+        elif profit_pct >= breakeven_threshold:
             if breakeven < current_stop:
                 logger.info(
-                    f"⚖️  Short stop moved to breakeven: ${current_stop:.6f} → ${breakeven:.6f}"
+                    f"⚖️  Short stop moved to breakeven: ${current_stop:.6f} → ${breakeven:.6f} "
+                    f"(profit {profit_pct:.2%})"
                 )
                 return breakeven, 'breakeven'
 
@@ -231,11 +263,11 @@ def evaluate_exit(
             return True, 'take_profit'
 
     # --- Layer 1: signal reversal (only after minimum hold period) ---
-    # Don't allow reversal exit in first 3 candles — trade needs time to develop
-    # Avoids getting whipsawed out of valid setups by immediate noise
+    # Minimum 6 candles (6h on 1h tf) before reversal can trigger
+    # Gives the trade time to develop past entry noise
     if df is not None and not df.empty:
         candles_held = position.get('candles_held', 0)
-        if candles_held >= 3:
+        if candles_held >= 6:
             if check_signal_reversal(df, position):
                 return True, 'signal_reversal'
 
