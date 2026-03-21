@@ -210,25 +210,50 @@ def ema_crossover_signal(df, fast=9, slow=21):
 
 def bollinger_band_signal(df, deviation=2):
     """
-    Bollinger Band signal
+    Bollinger Band mean reversion signal — tightened to reduce false positives.
+
+    Requires ALL of:
+      1. Close outside the band (not just touching it)
+      2. Previous candle also outside (confirms sustained extreme, not a spike)
+      3. RSI confirmation (oversold < 35 for long, overbought > 65 for short)
+
     Returns: 'long', 'short', or None
     """
     try:
-        bb = BollingerBands(df['close'], window=20, window_dev=deviation)
+        if len(df) < 22:
+            return None
+
+        bb    = BollingerBands(df['close'], window=20, window_dev=deviation)
         upper = bb.bollinger_hband()
         lower = bb.bollinger_lband()
-        
+
         current_close = df['close'].iloc[-1]
-        
-        # LONG: Price touches lower band
-        if current_close <= lower.iloc[-1]:
-            return 'long'
-        # SHORT: Price touches upper band
-        elif current_close >= upper.iloc[-1]:
-            return 'short'
-        else:
+        prev_close    = df['close'].iloc[-2]
+        current_upper = upper.iloc[-1]
+        current_lower = lower.iloc[-1]
+        prev_upper    = upper.iloc[-2]
+        prev_lower    = lower.iloc[-2]
+
+        # RSI confirmation
+        rsi = RSIIndicator(df['close'], window=14).rsi()
+        current_rsi = rsi.iloc[-1]
+        if pd.isna(current_rsi):
             return None
-            
+
+        # LONG: close below lower band, prev candle also below, RSI oversold
+        if (current_close < current_lower and
+                prev_close < prev_lower and
+                current_rsi < 35):
+            return 'long'
+
+        # SHORT: close above upper band, prev candle also above, RSI overbought
+        elif (current_close > current_upper and
+              prev_close > prev_upper and
+              current_rsi > 65):
+            return 'short'
+
+        return None
+
     except Exception as e:
         logger.error(f"Error in bollinger_band_signal: {e}")
         return None
@@ -263,10 +288,12 @@ def volume_breakout_signal(df):
 # Position Sizing (Only calculates, but execution in trade_engine.py)
 # -------------------------------------------------------------------
 def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
-                              stop_atr_multiplier: float = 2, trading_fee: float = 0.0005):
+                              stop_atr_multiplier: float = 2, trading_fee: float = 0.0005,
+                              side: str = 'long'):
     """
     Calculate position size based on risk.
     Calibrated for 1h timeframe — stops are wider to avoid noise-triggered exits.
+    Correctly handles both long and short stop/TP direction.
     Returns: units, stop_loss_price, take_profit_price
     """
     try:
@@ -275,44 +302,46 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
             stop_distance = atr * stop_atr_multiplier
             stop_loss_pct = stop_distance / entry_price
         else:
-            stop_loss_pct = 0.03  # Default 3% for 1h (was 2% on 15m)
+            stop_loss_pct = 0.03  # Default 3% for 1h
 
         # 1h-appropriate stop bounds: min 1.5%, max 8%
-        # Min 1.5% ensures the trade has room to breathe past normal 1h noise
-        # Max 8% prevents catastrophic loss on a single trade
-        stop_loss_pct = max(stop_loss_pct, 0.015)  # Min 1.5% (was 0.5%)
-        stop_loss_pct = min(stop_loss_pct, 0.08)   # Max 8%  (was 5%)
+        stop_loss_pct = max(stop_loss_pct, 0.015)
+        stop_loss_pct = min(stop_loss_pct, 0.08)
 
-        # Fee cost for round trip (entry + exit)
+        # Fee cost for round trip
         round_trip_fee = trading_fee * 2
 
-        # With trailing stops active, the fixed TP is now a ceiling — not the primary exit.
-        # Set it wide enough that the trailing stop can run freely before hitting it.
-        # Rule: TP = max(4x stop, 5x round-trip fee). Minimum absolute floor of 2%.
-        # This means on a strong trend the trailing stop will exit well before TP is hit,
-        # capturing more profit. TP only fires if price gaps straight to it.
-        min_rr = 4.0  # wider than before (was 2.5) because trailing stop is primary exit
+        # TP is a ceiling — wide enough for trailing stop to run freely
+        min_rr = 4.0
         take_profit_pct = max(stop_loss_pct * min_rr, round_trip_fee * 5)
-        take_profit_pct = max(take_profit_pct, 0.02)  # Absolute minimum 2% TP ceiling
+        take_profit_pct = max(take_profit_pct, 0.02)
 
-        stop_loss_price   = entry_price * (1 - stop_loss_pct)
-        take_profit_price = entry_price * (1 + take_profit_pct)
+        # --- Direction-aware SL/TP ---
+        # Long:  stop BELOW entry, target ABOVE entry
+        # Short: stop ABOVE entry, target BELOW entry
+        if side == 'short':
+            stop_loss_price   = entry_price * (1 + stop_loss_pct)
+            take_profit_price = entry_price * (1 - take_profit_pct)
+        else:
+            stop_loss_price   = entry_price * (1 - stop_loss_pct)
+            take_profit_price = entry_price * (1 + take_profit_pct)
 
-        # Fee-adjusted net profit check — skip trades where fees exceed 20% of expected gain
-        expected_gain = equity * risk_per_trade * min_rr
-        fee_cost = equity * risk_per_trade * (round_trip_fee / stop_loss_pct)
-        if fee_cost > expected_gain * 0.20:
-            logger.debug(f"⏭️ Fee ratio too high: fees ${fee_cost:.4f} vs gain ${expected_gain:.4f}")
-            return 0, None, None
-
-        # Position sizing: risk a fixed % of equity per trade
+        # Fee-adjusted net profit check — uses actual position value for accuracy
+        # Skip trades where round-trip fees exceed 20% of the expected gain
         risk_amount   = equity * risk_per_trade
         risk_per_unit = entry_price * stop_loss_pct
-
         if risk_per_unit <= 0:
             logger.warning("⚠️ Risk per unit is zero or negative")
             return 0, None, None
+        units_estimate  = min(risk_amount / risk_per_unit, (equity * 0.15) / entry_price)
+        position_value  = units_estimate * entry_price
+        actual_fee_cost = position_value * round_trip_fee
+        expected_gain   = position_value * stop_loss_pct * min_rr
+        if actual_fee_cost > expected_gain * 0.20:
+            logger.debug(f"⏭️ Fee ratio too high: fees ${actual_fee_cost:.4f} vs gain ${expected_gain:.4f}")
+            return 0, None, None
 
+        # Position sizing
         units = risk_amount / risk_per_unit
 
         # Cap at 15% of equity per position
@@ -325,9 +354,13 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
             logger.debug(f"Position too small: {units:.6f}, required: {min_units:.6f}")
             return 0, None, None
 
-        logger.info(f"Position calc: Entry=${entry_price:.2f}, SL={stop_loss_pct:.2%}, "
-                    f"TP={take_profit_pct:.2%} (R:R {take_profit_pct/stop_loss_pct:.1f}x), "
-                    f"Units={units:.6f}, Risk=${risk_amount:.2f}")
+        logger.info(
+            f"Position calc [{side.upper()}]: Entry=${entry_price:.4f}, "
+            f"SL=${stop_loss_price:.4f} ({stop_loss_pct:.2%}), "
+            f"TP=${take_profit_price:.4f} ({take_profit_pct:.2%}), "
+            f"R:R={take_profit_pct/stop_loss_pct:.1f}x, "
+            f"Units={units:.6f}, Risk=${risk_amount:.2f}"
+        )
 
         return units, stop_loss_price, take_profit_price
 
@@ -352,10 +385,8 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         try:
             from config_loader import config as _cfg
             trading_fee = float(_cfg.config.get('trading_fee', 0.0005))
-            min_hold_candles = int(_cfg.config.get('min_hold_candles', 3))
         except Exception:
             trading_fee = 0.0005
-            min_hold_candles = 3
         
         # Calculate ATR for position sizing
         atr_series = calculate_atr(df)
@@ -532,18 +563,18 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         # UNKNOWN REGIME - Try all strategies, take first signal
         else:
             logger.debug(f"❓ Unknown regime - trying all strategies")
-            for strategy_fn, stype, mult in [
-                (lambda: breakout_signal(df), "breakout_unknown", 2.0),
-                (lambda: ema_crossover_signal(df), "ema_unknown", 2.0),
-                (lambda: macd_signal(df), "macd_unknown", 2.0),
-                (lambda: rsi_signal(df), "rsi_unknown", 1.5),
-                (lambda: bollinger_band_signal(df), "bollinger_unknown", 1.5),
-                (lambda: volume_breakout_signal(df), "volume_unknown", 2.0),
+            for fn, stype, mult in [
+                (breakout_signal,       "breakout_unknown", 2.0),
+                (ema_crossover_signal,  "ema_unknown",      2.0),
+                (macd_signal,           "macd_unknown",     2.0),
+                (rsi_signal,            "rsi_unknown",      1.5),
+                (bollinger_band_signal, "bollinger_unknown", 1.5),
+                (volume_breakout_signal,"volume_unknown",   2.0),
             ]:
-                signal = strategy_fn()
+                signal = fn(df)
                 if signal:
                     signal_type = stype
-                    multiplier = mult
+                    multiplier  = mult
                     break
         
         # If we have a signal, calculate position size
@@ -567,7 +598,8 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 risk_per_trade,
                 current_atr,
                 multiplier,
-                trading_fee=trading_fee
+                trading_fee=trading_fee,
+                side=signal  # signal is 'long' or 'short' at this point
             )
 
             if units > 0:
@@ -634,7 +666,7 @@ if __name__ == "__main__":
     
     # Test configuration
     test_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-    test_timeframes = ["15m", "1h", "4h"]
+    test_timeframes = ["1h", "4h"]
     test_equity = 10000
     
     # Create a mock trading engine for balance tests

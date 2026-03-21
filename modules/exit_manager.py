@@ -230,9 +230,13 @@ def evaluate_exit(
         if tp and current_price <= tp:
             return True, 'take_profit'
 
-    # --- Layer 1: signal reversal (only if we have fresh data) ---
+    # --- Layer 1: signal reversal (only after minimum hold period) ---
+    # Don't allow reversal exit in first 3 candles — trade needs time to develop
+    # Avoids getting whipsawed out of valid setups by immediate noise
     if df is not None and not df.empty:
-        if check_signal_reversal(df, position):
-            return True, 'signal_reversal'
+        candles_held = position.get('candles_held', 0)
+        if candles_held >= 3:
+            if check_signal_reversal(df, position):
+                return True, 'signal_reversal'
 
     return False, ''
