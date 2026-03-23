@@ -45,14 +45,14 @@ try:
 except Exception:
     CONFIG = {
         'coins': ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'],
-        'risk_per_trade': 0.02,
+        'risk_per_trade': 0.04,
         'trading_fee': 0.0005,
         'max_positions': 5,
         'trading_timeframe': '1h',
     }
 
 TIMEFRAME      = CONFIG.get('trading_timeframe', '1h')
-RISK_PER_TRADE = float(CONFIG.get('risk_per_trade', 0.02))
+RISK_PER_TRADE = float(CONFIG.get('risk_per_trade', 0.04))
 FEE            = float(CONFIG.get('trading_fee', 0.0005))
 MAX_POSITIONS  = int(CONFIG.get('max_positions', 5))
 INITIAL_EQUITY = int(CONFIG.get('cash', 5000))

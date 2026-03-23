@@ -12,6 +12,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 from sklearn.preprocessing import StandardScaler
 
+from modules.data_feed import fetch_historical_data
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -235,6 +237,48 @@ def ensure_features(df):
         df['volatility'] = df['returns'].rolling(20, min_periods=1).std()
         df.fillna(0, inplace=True)
         return df
+
+def detect_trend(df, lookback=50):
+    """Return (direction, strength, confidence) using multiple timeframes."""
+    # Use 20/50 EMA cross for timely direction (faster than SMA)
+    ema20 = df['close'].ewm(span=20).mean()
+    ema50 = df['close'].ewm(span=50).mean()
+
+    # Direction
+    if ema20.iloc[-1] > ema50.iloc[-1]:
+        direction = "up"
+    elif ema20.iloc[-1] < ema50.iloc[-1]:
+        direction = "down"
+    else:
+        direction = "side"
+
+    # Strength (ADX)
+    adx = ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
+    strength = adx.iloc[-1] / 100  # 0-1
+
+    # Additional check: price relative to 200-period EMA (long‑term trend)
+    ema200 = df['close'].ewm(span=200).mean()
+    long_trend = "up" if df['close'].iloc[-1] > ema200.iloc[-1] else "down"
+
+    # Confidence: higher if both short and long trend agree
+    confidence = 0.7 if direction == long_trend else 0.5
+    if strength > 0.3: confidence += 0.2  # strong trend boosts confidence
+
+    return direction, strength, confidence
+
+def confirm_trend_with_higher_tf(symbol, df_1h):
+    """Return True if 4h and 1h trends agree."""
+    try:
+        # Fetch 4h data (use a function that caches results to avoid too many calls)
+        df_4h = fetch_historical_data(symbol, interval='4h', days=30)
+        if df_4h.empty: return True  # fallback
+        ema20_4h = df_4h['close'].ewm(span=20).mean()
+        ema50_4h = df_4h['close'].ewm(span=50).mean()
+        trend_4h = "up" if ema20_4h.iloc[-1] > ema50_4h.iloc[-1] else "down"
+        trend_1h, _, _ = detect_trend(df_1h)
+        return trend_1h == trend_4h
+    except:
+        return True
 
 # ---------------------------
 # Model Training

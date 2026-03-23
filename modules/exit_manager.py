@@ -1,16 +1,22 @@
 """
 exit_manager.py
 ===============
-Indicator-based and trailing stop exit logic.
+Indicator-based and hybrid Chandelier exit logic.
 
 Used by both trade_engine (spot longs) and futures_engine (shorts).
 
 Two layers:
   Layer 1 — Signal reversal: re-checks the entry indicator each cycle.
-             If it now fires the opposite direction, exit immediately.
-  Layer 2 — Trailing stop: activates once profit >= 1x ATR.
-             Moves stop to breakeven at 1x ATR profit.
-             Trails 1x ATR behind price once profit >= 2x ATR.
+             Only fires after minimum hold + price momentum confirmation.
+
+  Layer 2 — Hybrid Chandelier trailing stop:
+             Anchors to PEAK (long) or TROUGH (short) since entry.
+             Trail distance = ATR% of entry price, capped between 2% and 4%.
+               BTC ATR ~1%  → 2% trail (floor)
+               ETH ATR ~2.5% → 2.5% trail
+               SOL ATR ~3.5% → 3.5% trail (near ceiling)
+             Breakeven protection at 1.5% profit.
+             Stop only moves in profitable direction (ratchet).
 """
 
 import logging
@@ -21,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------------------------------------------------------
-# ATR helper (standalone, no ta dependency)
+# ATR helper
 # -------------------------------------------------------------------
 def _calculate_atr(df: pd.DataFrame, length: int = 14) -> float:
     """Return the most recent ATR value from a DataFrame."""
@@ -48,23 +54,16 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
       1. Indicator fires the opposite direction
       2. Price is actually moving against the trade (momentum confirmation)
       3. For mean-reversion signals (bollinger/rsi): previous candle also reversed
-         — prevents single-candle noise from closing a valid position
-
-    position dict must contain 'signal_type', 'side' and 'entry_price'.
     """
-    signal_type  = position.get('signal_type', '')
-    side         = position.get('side', 'long')
-    opposite     = 'short' if side == 'long' else 'long'
-    entry_price  = position.get('entry_price', 0.0)
+    signal_type = position.get('signal_type', '')
+    side        = position.get('side', 'long')
+    opposite    = 'short' if side == 'long' else 'long'
+    entry_price = position.get('entry_price', 0.0)
 
     try:
         from modules.strategy_tools import (
-            ema_crossover_signal,
-            macd_signal,
-            rsi_signal,
-            bollinger_band_signal,
-            breakout_signal,
-            volume_breakout_signal,
+            ema_crossover_signal, macd_signal, rsi_signal,
+            bollinger_band_signal, breakout_signal, volume_breakout_signal,
         )
 
         if len(df) < 50:
@@ -73,22 +72,21 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
         current_price = float(df['close'].iloc[-1])
         prev_price    = float(df['close'].iloc[-2])
 
-        # Price momentum must confirm the reversal direction
-        # For long exits: price must be falling (current < previous)
-        # For short exits: price must be rising (current > previous)
+        # Price momentum must confirm
         if side == 'long' and current_price >= prev_price:
-            return False  # Price still rising — don't exit long
+            return False
         if side == 'short' and current_price <= prev_price:
-            return False  # Price still falling — don't exit short
+            return False
 
-        # Also require price to have moved at least 0.3% against position
-        # Filters out flat/sideways candles that briefly touch the wrong side
+        # Require at least 0.3% adverse move from entry
         if entry_price > 0:
             move_against = ((entry_price - current_price) / entry_price
-                           if side == 'long'
-                           else (current_price - entry_price) / entry_price)
+                            if side == 'long'
+                            else (current_price - entry_price) / entry_price)
             if move_against < 0.003:
                 return False
+        else:
+            move_against = 0.0
 
         reversal_signal = None
 
@@ -100,14 +98,11 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
             reversal_signal = rsi_signal(df)
         elif 'bollinger' in signal_type:
             reversal_signal = bollinger_band_signal(df)
-            # For mean-reversion signals, require previous candle also reversed
-            # (two consecutive confirmations to avoid single-candle whipsaws)
             if reversal_signal == opposite:
                 prev_window = df.iloc[:-1]
                 if len(prev_window) >= 50:
-                    prev_reversal = bollinger_band_signal(prev_window)
-                    if prev_reversal != opposite:
-                        return False  # Only one candle — not confirmed
+                    if bollinger_band_signal(prev_window) != opposite:
+                        return False
         elif 'breakout' in signal_type:
             reversal_signal = breakout_signal(df)
         elif 'volume' in signal_type:
@@ -118,7 +113,7 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
         if reversal_signal == opposite:
             logger.info(
                 f"🔄 Signal reversal confirmed: was {side}, now {reversal_signal} "
-                f"(indicator: {signal_type}, price move: {move_against:.2%})"
+                f"(indicator: {signal_type}, move: {move_against:.2%})"
             )
             return True
 
@@ -130,84 +125,86 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
 
 
 # -------------------------------------------------------------------
-# Layer 2 — Trailing stop management
+# Layer 2 — Chandelier Exit
 # -------------------------------------------------------------------
-def update_trailing_stop(
+def update_chandelier_stop(
     position: dict,
     current_price: float,
     atr: float,
 ) -> Tuple[Optional[float], str]:
     """
-    Percentage-based trailing stop — scales correctly regardless of account size or asset price.
+    Hybrid trailing stop:
+    - Uses peak/trough anchoring from Chandelier concept
+    - Uses percentage-based distance (not ATR multiplier) for consistency
+    - Adapts distance to asset volatility via ATR% with 2% floor
 
-    Rules:
-      - Profit >= 1.5% → move stop to breakeven
-      - Profit >= 3.0% → trail stop 1.5% behind current price (ratchets up, never back)
+    Long:  stop = peak_since_entry × (1 - trail_pct)
+    Short: stop = trough_since_entry × (1 + trail_pct)
 
-    ATR is still used to set the minimum trail distance so the stop isn't
-    tighter than the asset's natural noise on 1h candles.
+    Breakeven floor at 1.5% profit.
+    Stop only moves in profitable direction (ratchet).
     """
+    if current_price <= 0:
+        return None, ''
+
     entry_price  = position.get('entry_price', current_price)
     current_stop = position.get('stop_loss', 0.0)
     side         = position.get('side', 'long')
 
-    # Percentage thresholds
-    breakeven_threshold = 0.015   # 1.5% profit → move to breakeven
-    trail_threshold     = 0.030   # 3.0% profit → start trailing
-    trail_distance_pct  = 0.020   # trail 2.0% behind price (was 1.5%)
+    # Adaptive trail: ATR% with 2% floor, 4% ceiling
+    # BTC ATR ~1% → 2% trail (floor)
+    # ETH ATR ~2.5% → 2.5% trail
+    # SOL ATR ~3.5% → 3.5% trail (capped at 4%)
+    atr_pct    = (atr / entry_price) if (atr > 0 and entry_price > 0) else 0.02
+    trail_pct  = min(max(atr_pct, 0.02), 0.04)
 
-    # Minimum trail distance: larger of 1.5% or 1x ATR as % of price
-    # Prevents stop being tighter than normal 1h noise
-    atr_pct = (atr / entry_price) if entry_price > 0 else 0
-    effective_trail_pct = max(trail_distance_pct, atr_pct)
+    breakeven_threshold = 0.015  # 1.5% profit → breakeven floor activates
 
     if side == 'long':
-        profit_pct = (current_price - entry_price) / entry_price
-        breakeven  = entry_price
-        trail_stop = current_price * (1 - effective_trail_pct)
+        peak = max(position.get('peak_price', entry_price), current_price)
+        position['peak_price'] = peak
 
-        if profit_pct >= trail_threshold:
-            if trail_stop > current_stop:
-                logger.info(
-                    f"📈 Trailing stop updated: ${current_stop:.6f} → ${trail_stop:.6f} "
-                    f"(profit {profit_pct:.2%}, trail dist {effective_trail_pct:.2%})"
-                )
-                return trail_stop, 'trailing'
+        profit_pct      = (current_price - entry_price) / entry_price
+        chandelier_stop = peak * (1 - trail_pct)
 
-        elif profit_pct >= breakeven_threshold:
-            if breakeven > current_stop:
-                logger.info(
-                    f"⚖️  Stop moved to breakeven: ${current_stop:.6f} → ${breakeven:.6f} "
-                    f"(profit {profit_pct:.2%})"
-                )
-                return breakeven, 'breakeven'
+        if profit_pct >= breakeven_threshold:
+            chandelier_stop = max(chandelier_stop, entry_price)
+
+        if chandelier_stop > current_stop:
+            is_be  = (abs(chandelier_stop - entry_price) < 1e-6)
+            reason = 'breakeven' if is_be else 'trailing'
+            logger.info(
+                f"📈 Trail LONG: peak=${peak:.4f} stop ${current_stop:.4f}"
+                f" → ${chandelier_stop:.4f} (trail {trail_pct:.2%})"
+            )
+            position['trailing_stop_active'] = True
+            return chandelier_stop, reason
 
     else:  # short
-        profit_pct = (entry_price - current_price) / entry_price
-        breakeven  = entry_price
-        trail_stop = current_price * (1 + effective_trail_pct)
+        trough = min(position.get('trough_price', entry_price), current_price)
+        position['trough_price'] = trough
 
-        if profit_pct >= trail_threshold:
-            if trail_stop < current_stop:
-                logger.info(
-                    f"📉 Trailing stop updated: ${current_stop:.6f} → ${trail_stop:.6f} "
-                    f"(profit {profit_pct:.2%}, trail dist {effective_trail_pct:.2%})"
-                )
-                return trail_stop, 'trailing'
+        profit_pct      = (entry_price - current_price) / entry_price
+        chandelier_stop = trough * (1 + trail_pct)
 
-        elif profit_pct >= breakeven_threshold:
-            if breakeven < current_stop:
-                logger.info(
-                    f"⚖️  Short stop moved to breakeven: ${current_stop:.6f} → ${breakeven:.6f} "
-                    f"(profit {profit_pct:.2%})"
-                )
-                return breakeven, 'breakeven'
+        if profit_pct >= breakeven_threshold:
+            chandelier_stop = min(chandelier_stop, entry_price)
+
+        if chandelier_stop < current_stop:
+            is_be  = (abs(chandelier_stop - entry_price) < 1e-6)
+            reason = 'breakeven' if is_be else 'trailing'
+            logger.info(
+                f"📉 Trail SHORT: trough=${trough:.4f} stop ${current_stop:.4f}"
+                f" → ${chandelier_stop:.4f} (trail {trail_pct:.2%})"
+            )
+            position['trailing_stop_active'] = True
+            return chandelier_stop, reason
 
     return None, ''
 
 
 # -------------------------------------------------------------------
-# Combined exit check — call this once per position per cycle
+# Combined exit check — call once per position per cycle
 # -------------------------------------------------------------------
 def evaluate_exit(
     symbol: str,
@@ -219,32 +216,35 @@ def evaluate_exit(
     Run both exit layers for a position.
 
     Returns:
-      (True, reason)  — exit the position now
-      (False, '')     — hold, but position['stop_loss'] may have been updated in-place
+      (True, reason)  — exit now
+      (False, '')     — hold; position dict may be mutated (stop / peak / trough updated)
 
-    'position' dict is mutated in-place if the trailing stop moves.
+    Order:
+      1. Recalculate ATR from fresh df (best accuracy for Chandelier)
+      2. Update Chandelier stop (mutates position in-place)
+      3. Check if stop or TP was hit
+      4. Check signal reversal (only after 6 candle minimum hold)
     """
     if current_price <= 0:
         return False, ''
 
-    # Use ATR stored at entry time first — only recalculate if not available
-    # This ensures trailing stop distances are consistent with entry sizing
-    stored_atr = position.get('atr', 0.0)
-    if stored_atr > 0:
-        atr = stored_atr
-    elif df is not None and not df.empty:
+    # Always recalculate ATR from current window for accurate Chandelier anchoring
+    # Falls back to stored entry ATR if no df provided
+    if df is not None and not df.empty:
         atr = _calculate_atr(df)
     else:
-        atr = 0.0
+        atr = position.get('atr', 0.0)
 
-    # --- Layer 2: update trailing stop first (mutates position in-place) ---
+    # Attach symbol to position for logging
+    position.setdefault('symbol', symbol)
+
+    # --- Layer 2: Chandelier stop update ---
     if atr > 0:
-        new_stop, stop_reason = update_trailing_stop(position, current_price, atr)
+        new_stop, _ = update_chandelier_stop(position, current_price, atr)
         if new_stop is not None:
             position['stop_loss'] = new_stop
-            position['trailing_stop_active'] = True
 
-    # --- Check if updated stop was hit ---
+    # --- Check if stop or TP was hit ---
     side = position.get('side', 'long')
     stop = position.get('stop_loss', 0.0)
     tp   = position.get('take_profit', 0.0)
@@ -262,9 +262,7 @@ def evaluate_exit(
         if tp and current_price <= tp:
             return True, 'take_profit'
 
-    # --- Layer 1: signal reversal (only after minimum hold period) ---
-    # Minimum 6 candles (6h on 1h tf) before reversal can trigger
-    # Gives the trade time to develop past entry noise
+    # --- Layer 1: signal reversal (min 6 candles) ---
     if df is not None and not df.empty:
         candles_held = position.get('candles_held', 0)
         if candles_held >= 6:

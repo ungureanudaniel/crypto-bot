@@ -7,7 +7,7 @@ import numpy as np
 import logging
 from typing import Dict
 from ta.volatility import BollingerBands
-from ta.trend import MACD
+from ta.trend import MACD, ADXIndicator
 from ta.momentum import RSIIndicator
 from modules.data_feed import fetch_ohlcv
 
@@ -374,32 +374,59 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
 def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_engine=None, regime=None):
     """
     Main function that combines multiple strategies.
-    Calibrated for 1h timeframe — regime-aware, fee-conscious.
+    Enhanced with trend detection to filter counter‑trend signals.
     """
     try:
         if df.empty or len(df) < 50:
             logger.debug("Insufficient data")
             return None
 
-        # Load fee from config for fee-adjusted sizing
-        try:
-            from config_loader import config as _cfg
-            trading_fee = float(_cfg.config.get('trading_fee', 0.0005))
-        except Exception:
-            trading_fee = 0.0005
-        
-        # Calculate ATR for position sizing
+        # --- Trend detection (always) ---
+        def detect_trend(df):
+            """Return (direction, strength, confidence)."""
+            try:
+                # Use EMA for faster reaction
+                ema20 = df['close'].ewm(span=20).mean()
+                ema50 = df['close'].ewm(span=50).mean()
+                if ema20.iloc[-1] > ema50.iloc[-1]:
+                    direction = "up"
+                elif ema20.iloc[-1] < ema50.iloc[-1]:
+                    direction = "down"
+                else:
+                    direction = "side"
+
+                # ADX for trend strength
+                adx = ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
+                strength = adx.iloc[-1] / 100   # 0–1
+
+                # Long‑term EMA (200) for higher confidence
+                ema200 = df['close'].ewm(span=200).mean()
+                long_trend = "up" if df['close'].iloc[-1] > ema200.iloc[-1] else "down"
+                confidence = 0.7 if direction == long_trend else 0.5
+                if strength > 0.3:
+                    confidence += 0.2
+                confidence = min(confidence, 0.95)
+
+                return direction, strength, confidence
+            except Exception as e:
+                logger.debug(f"Trend detection error: {e}")
+                return "side", 0.0, 0.5
+
+        trend_dir, trend_strength, trend_conf = detect_trend(df)
+        logger.debug(f"Trend: {trend_dir} (strength={trend_strength:.2f}, conf={trend_conf:.2f})")
+
+        # Adjust risk based on trend strength (weaker trend → smaller position)
+        adjusted_risk = risk_per_trade * (0.5 + trend_strength * 0.5)
+
+        # ATR for position sizing
         atr_series = calculate_atr(df)
         current_atr = atr_series.iloc[-1] if not atr_series.empty else 0
-        
         current_price = df['close'].iloc[-1]
-        
-        # ===== PARSE REGIME WITH DIRECTION =====
+
+        # Parse regime (from input)
         regime_type = "unknown"
         trend_direction = "unknown"
-        
         if regime:
-            # Extract direction if present
             if "UPTREND" in regime:
                 trend_direction = "up"
                 regime = regime.replace(" UPTREND", "")
@@ -409,8 +436,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             elif "SIDEWAYS" in regime:
                 trend_direction = "side"
                 regime = regime.replace(" SIDEWAYS", "")
-            
-            # Determine regime type
+
             if "Range" in regime:
                 regime_type = "range"
             elif "Compression" in regime:
@@ -421,199 +447,167 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 regime_type = "breakout"
             elif "Trend" in regime or "Trending" in regime:
                 regime_type = "trend"
-        
-        logger.debug(f"📊 {symbol}: {regime_type} | Direction: {trend_direction}")
-        
-        # ===== REGIME-BASED STRATEGY SELECTION =====
+
+        # --- Strategy selection (same as before, but with trend‑awareness) ---
         signal = None
         signal_type = None
-        multiplier = 2.0
-        
-        # TRENDING MARKET - Follow the trend, don't fight it
+        multiplier = 2.0  # default ATR multiplier for stop
+
+        # TRENDING MARKET – follow the trend
         if regime_type == "trend":
-            logger.debug(f"📈 Trending market - following {trend_direction} trend")
-            
-            # UPTREND - ONLY take LONG signals
+            logger.debug(f"📈 Trending market – following {trend_direction} trend")
             if trend_direction == "up":
-                # Try EMA crossover (bullish)
+                # only long signals
                 signal = ema_crossover_signal(df)
                 if signal == 'long':
                     signal_type = "ema_trend_up"
                     multiplier = 2.5
-                    logger.info(f"📊 EMA crossover LONG in uptrend")
                 else:
-                    signal = None
-                
-                # If no EMA, try MACD (bullish)
-                if not signal:
                     signal = macd_signal(df)
                     if signal == 'long':
                         signal_type = "macd_trend_up"
                         multiplier = 2.5
-                        logger.info(f"📊 MACD LONG in uptrend")
                     else:
-                        signal = None
-                
-                # If still no signal, try breakout (bullish)
-                if not signal:
-                    signal = breakout_signal(df)
-                    if signal == 'long':
-                        signal_type = "breakout_trend_up"
-                        multiplier = 2.5
-                        logger.info(f"📊 Breakout LONG in uptrend")
-                    else:
-                        signal = None
-            
-            # DOWNTREND - ONLY take SHORT signals
+                        signal = breakout_signal(df)
+                        if signal == 'long':
+                            signal_type = "breakout_trend_up"
+                            multiplier = 2.5
             elif trend_direction == "down":
-                # Try EMA crossover (bearish)
+                # only short signals
                 signal = ema_crossover_signal(df)
                 if signal == 'short':
                     signal_type = "ema_trend_down"
                     multiplier = 2.5
-                    logger.info(f"📊 EMA crossover SHORT in downtrend")
                 else:
-                    signal = None
-                
-                # If no EMA, try MACD (bearish)
-                if not signal:
                     signal = macd_signal(df)
                     if signal == 'short':
                         signal_type = "macd_trend_down"
                         multiplier = 2.5
-                        logger.info(f"📊 MACD SHORT in downtrend")
                     else:
-                        signal = None
-                
-                # If still no signal, try breakout (bearish)
-                if not signal:
-                    signal = breakout_signal(df)
-                    if signal == 'short':
-                        signal_type = "breakout_trend_down"
-                        multiplier = 2.5
-                        logger.info(f"📊 Breakout SHORT in downtrend")
-                    else:
-                        signal = None
-            
-            # SIDEWAYS trend - use mean reversion
+                        signal = breakout_signal(df)
+                        if signal == 'short':
+                            signal_type = "breakout_trend_down"
+                            multiplier = 2.5
             else:
-                # RSI
+                # sideways – mean reversion
                 signal = rsi_signal(df)
                 if signal:
                     signal_type = f"rsi_trend_side_{signal}"
                     multiplier = 1.5
-                    logger.info(f"📊 RSI {signal} in sideways trend")
-                
-                # If no RSI, try Bollinger
                 if not signal:
                     signal = bollinger_band_signal(df)
                     if signal:
                         signal_type = f"bollinger_trend_side_{signal}"
                         multiplier = 1.5
-                        logger.info(f"📊 Bollinger {signal} in sideways trend")
-        
-        # RANGING MARKET - Mean reversion works best
+
+        # RANGING MARKET – mean reversion
         elif regime_type in ["range", "compression"]:
-            logger.debug(f"📊 Ranging market - favoring mean reversion")
-            
-            # Try RSI first
+            logger.debug(f"📊 Ranging market – favoring mean reversion")
             signal = rsi_signal(df)
             if signal:
                 signal_type = f"rsi_range_{signal}"
                 multiplier = 1.5
-                logger.info(f"📊 RSI {signal} in ranging market")
-            
-            # If no RSI, try Bollinger
             if not signal:
                 signal = bollinger_band_signal(df)
                 if signal:
                     signal_type = f"bollinger_range_{signal}"
                     multiplier = 1.5
-                    logger.info(f"📊 Bollinger {signal} in ranging market")
-        
-        # BREAKOUT MARKET - Breakout strategies work best
+
+        # BREAKOUT MARKET – breakout strategies
         elif regime_type == "breakout":
-            logger.debug(f"🚀 Breakout market - favoring breakout strategies")
-            
+            logger.debug(f"🚀 Breakout market")
             signal = breakout_signal(df)
             if signal:
                 signal_type = f"breakout_{signal}"
                 multiplier = 3.0
-                logger.info(f"📊 Breakout {signal} signal")
-            
             if not signal:
                 signal = volume_breakout_signal(df)
                 if signal:
                     signal_type = f"volume_breakout_{signal}"
                     multiplier = 2.5
-                    logger.info(f"📊 Volume breakout {signal}")
-        
-        # EXPANSION (HIGH VOLATILITY) - Be cautious
+
+        # EXPANSION (high volatility) – be cautious
         elif regime_type == "expansion":
-            logger.debug(f"🌪️ High volatility - being cautious")
+            logger.debug(f"🌪️ High volatility – cautious")
             adjusted_risk = risk_per_trade * 0.5
-            
             signal = breakout_signal(df, volume_confirmation=True)
             if signal:
                 signal_type = f"breakout_expansion_{signal}"
                 multiplier = 3.0
-                risk_per_trade = adjusted_risk
-                logger.info(f"📊 Strong breakout in high volatility")
-        
-        # UNKNOWN REGIME - Try all strategies, take first signal
+            if not signal:
+                signal = volume_breakout_signal(df)
+                if signal and abs(df['close'].pct_change().iloc[-1]) > 0.02:
+                    signal_type = f"volume_expansion_{signal}"
+                    multiplier = 2.5
+
+        # UNKNOWN REGIME – try all in order
         else:
-            logger.debug(f"❓ Unknown regime - trying all strategies")
+            logger.debug(f"❓ Unknown regime – trying all strategies")
             for fn, stype, mult in [
-                (breakout_signal,       "breakout_unknown", 2.0),
-                (ema_crossover_signal,  "ema_unknown",      2.0),
-                (macd_signal,           "macd_unknown",     2.0),
-                (rsi_signal,            "rsi_unknown",      1.5),
+                (breakout_signal, "breakout_unknown", 2.0),
+                (ema_crossover_signal, "ema_unknown", 2.0),
+                (macd_signal, "macd_unknown", 2.0),
+                (rsi_signal, "rsi_unknown", 1.5),
                 (bollinger_band_signal, "bollinger_unknown", 1.5),
-                (volume_breakout_signal,"volume_unknown",   2.0),
+                (volume_breakout_signal, "volume_unknown", 2.0),
             ]:
-                signal = fn(df)
-                if signal:
+                sig = fn(df)
+                if sig:
+                    signal = sig
                     signal_type = stype
-                    multiplier  = mult
+                    multiplier = mult
                     break
-        
+
         # If we have a signal, calculate position size
         if signal:
-            # Shorts always go to futures; longs go to spot
+            # Optional: skip if trend is weak (ADX < 20) and signal is counter‑trend
+            if trend_strength < 0.2 and signal != trend_dir:
+                logger.debug(f"⏭️ Skipping {signal} – trend too weak (ADX {trend_strength*100:.0f})")
+                return None
+
+            # Determine market type (spot/futures)
             market = "futures" if signal == "short" else "spot"
 
-            # For futures, read leverage from config (default 1x = no leverage)
+            # Leverage (for futures)
             try:
                 from config_loader import config as _cfg
                 leverage = int(_cfg.config.get('futures_leverage', 1))
-            except Exception:
+            except:
                 leverage = 1
 
-            # Effective equity for sizing: for futures use full cash (margin); for spot use cash
             sizing_equity = equity * leverage if market == "futures" else equity
 
             units, sl, tp = calculate_position_units(
                 current_price,
                 sizing_equity,
-                risk_per_trade,
+                adjusted_risk,           # risk already adjusted by trend strength
                 current_atr,
                 multiplier,
-                trading_fee=trading_fee,
-                side=signal  # signal is 'long' or 'short' at this point
+                side=signal
             )
 
             if units > 0:
-                # Cap short units by available cash margin
+                # Cap short units by available cash (paper) or margin (live)
                 if signal == 'short' and trading_engine:
-                    available_cash = get_available_balance(symbol, trading_engine)
-                    max_units_by_cash = (available_cash * leverage) / current_price if current_price > 0 else 0
-                    if units > max_units_by_cash:
-                        units = max_units_by_cash
-                        logger.info(f"🔄 Short capped to cash margin: {units:.6f} units")
+                    available = get_available_balance(symbol, trading_engine)
+                    # For futures, we need margin; simplified here
+                    if available > 0:
+                        max_units_by_cash = (available * leverage) / current_price if current_price > 0 else 0
+                        if units > max_units_by_cash:
+                            units = max_units_by_cash
+                            logger.info(f"🔄 Short capped to margin: {units:.6f}")
                     if units <= 0:
                         return None
 
-                return {
+                # Build result
+                # Compute confidence based on trend alignment
+                if signal == trend_dir:
+                    base_conf = 85 + int(trend_strength * 15)
+                else:
+                    base_conf = 60
+                confidence = min(base_conf, 95)
+
+                result = {
                     'side': signal,
                     'entry': current_price,
                     'units': units,
@@ -624,12 +618,15 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     'regime': f"{regime_type}_{trend_direction}",
                     'market': market,
                     'leverage': leverage,
-                    'confidence': get_confidence_from_regime(regime_type, signal_type or '')
+                    'confidence': confidence,
+                    'trend_strength': trend_strength,
                 }
-        
+                logger.debug(f"📊 Signal confidence: {confidence}% (trend: {trend_dir}, strength: {trend_strength:.2f})")
+                return result
+
         logger.debug("No signals detected")
         return None
-        
+
     except Exception as e:
         logger.error(f"Error in generate_trade_signal: {e}")
         return None
