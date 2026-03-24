@@ -368,9 +368,9 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
         logger.error(f"Error in calculate_position_units: {e}")
         return 0, None, None
 
-# -------------------------------------------------------------------
-# Main Signal Generator
-# -------------------------------------------------------------------
+# ===========================================================================
+# Main signal GeneratorExit
+# ===========================================================================
 def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_engine=None, regime=None):
     """
     Main function that combines multiple strategies.
@@ -381,49 +381,52 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             logger.debug("Insufficient data")
             return None
 
-        # --- Trend detection (always) ---
+        # Load fee from config
+        try:
+            from config_loader import config as _cfg
+            trading_fee = float(_cfg.config.get('trading_fee', 0.0005))
+        except Exception:
+            trading_fee = 0.0005
+
+        # --- Trend detection ---
         def detect_trend(df):
-            """Return (direction, strength, confidence)."""
             try:
-                # Use EMA for faster reaction
-                ema20 = df['close'].ewm(span=20).mean()
-                ema50 = df['close'].ewm(span=50).mean()
-                if ema20.iloc[-1] > ema50.iloc[-1]:
-                    direction = "up"
-                elif ema20.iloc[-1] < ema50.iloc[-1]:
-                    direction = "down"
-                else:
-                    direction = "side"
-
-                # ADX for trend strength
-                adx = ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
-                strength = adx.iloc[-1] / 100   # 0–1
-
-                # Long‑term EMA (200) for higher confidence
-                ema200 = df['close'].ewm(span=200).mean()
-                long_trend = "up" if df['close'].iloc[-1] > ema200.iloc[-1] else "down"
-                confidence = 0.7 if direction == long_trend else 0.5
+                ema20  = df['close'].ewm(span=20).mean()
+                ema50  = df['close'].ewm(span=50).mean()
+                direction = ("up" if ema20.iloc[-1] > ema50.iloc[-1]
+                             else "down" if ema20.iloc[-1] < ema50.iloc[-1]
+                             else "side")
+                adx      = ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
+                strength = float(adx.iloc[-1]) / 100.0
+                ema200   = df['close'].ewm(span=min(200, len(df)-1)).mean()
+                long_dir = "up" if df['close'].iloc[-1] > ema200.iloc[-1] else "down"
+                confidence = 0.7 if direction == long_dir else 0.5
                 if strength > 0.3:
                     confidence += 0.2
-                confidence = min(confidence, 0.95)
-
-                return direction, strength, confidence
+                return direction, min(strength, 1.0), min(confidence, 0.95)
             except Exception as e:
                 logger.debug(f"Trend detection error: {e}")
                 return "side", 0.0, 0.5
 
         trend_dir, trend_strength, trend_conf = detect_trend(df)
-        logger.debug(f"Trend: {trend_dir} (strength={trend_strength:.2f}, conf={trend_conf:.2f})")
-
-        # Adjust risk based on trend strength (weaker trend → smaller position)
-        adjusted_risk = risk_per_trade * (0.5 + trend_strength * 0.5)
+        
+        # Adjust risk based on trend strength
+        if trend_strength > 0.4:
+            risk_multiplier = 1.2
+        elif trend_strength > 0.25:
+            risk_multiplier = 1.0
+        else:
+            risk_multiplier = 0.6
+        
+        adjusted_risk = risk_per_trade * risk_multiplier
+        logger.debug(f"Trend: {trend_dir} | strength={trend_strength:.2f}")
 
         # ATR for position sizing
         atr_series = calculate_atr(df)
         current_atr = atr_series.iloc[-1] if not atr_series.empty else 0
         current_price = df['close'].iloc[-1]
 
-        # Parse regime (from input)
+        # Parse regime
         regime_type = "unknown"
         trend_direction = "unknown"
         if regime:
@@ -448,16 +451,15 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             elif "Trend" in regime or "Trending" in regime:
                 regime_type = "trend"
 
-        # --- Strategy selection (same as before, but with trend‑awareness) ---
+        # --- Strategy selection with trend filtering ---
         signal = None
         signal_type = None
-        multiplier = 2.0  # default ATR multiplier for stop
+        multiplier = 2.0
 
-        # TRENDING MARKET – follow the trend
+        # ===== TRENDING MARKET =====
         if regime_type == "trend":
-            logger.debug(f"📈 Trending market – following {trend_direction} trend")
+            logger.debug(f"📈 Trending market - following {trend_direction} trend")
             if trend_direction == "up":
-                # only long signals
                 signal = ema_crossover_signal(df)
                 if signal == 'long':
                     signal_type = "ema_trend_up"
@@ -473,7 +475,6 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                             signal_type = "breakout_trend_up"
                             multiplier = 2.5
             elif trend_direction == "down":
-                # only short signals
                 signal = ema_crossover_signal(df)
                 if signal == 'short':
                     signal_type = "ema_trend_down"
@@ -489,7 +490,6 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                             signal_type = "breakout_trend_down"
                             multiplier = 2.5
             else:
-                # sideways – mean reversion
                 signal = rsi_signal(df)
                 if signal:
                     signal_type = f"rsi_trend_side_{signal}"
@@ -500,47 +500,90 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                         signal_type = f"bollinger_trend_side_{signal}"
                         multiplier = 1.5
 
-        # RANGING MARKET – mean reversion
+        # ===== RANGING MARKET - ADD TREND FILTER =====
         elif regime_type in ["range", "compression"]:
             logger.debug(f"📊 Ranging market – favoring mean reversion")
+            
+            # In range markets, only take signals that align with short-term trend
+            # or when trend is weak
             signal = rsi_signal(df)
             if signal:
-                signal_type = f"rsi_range_{signal}"
-                multiplier = 1.5
+                signal_dir = 'up' if signal == 'long' else 'down'
+                # Allow range trades only if trend is weak OR signal aligns with trend
+                if trend_strength < 0.25 or signal_dir == trend_dir or trend_dir == 'side':
+                    signal_type = f"rsi_range_{signal}"
+                    multiplier = 1.5
+                    logger.debug(f"✅ Range RSI {signal} (trend: {trend_dir}, strength: {trend_strength:.2f})")
+                else:
+                    signal = None
+                    logger.debug(f"⏭️ Skipping range RSI {signal} - against {trend_dir} trend")
+            
             if not signal:
                 signal = bollinger_band_signal(df)
                 if signal:
-                    signal_type = f"bollinger_range_{signal}"
-                    multiplier = 1.5
+                    signal_dir = 'up' if signal == 'long' else 'down'
+                    if trend_strength < 0.25 or signal_dir == trend_dir or trend_dir == 'side':
+                        signal_type = f"bollinger_range_{signal}"
+                        multiplier = 1.5
+                        logger.debug(f"✅ Range Bollinger {signal}")
+                    else:
+                        signal = None
 
-        # BREAKOUT MARKET – breakout strategies
+        # ===== BREAKOUT MARKET - ADD TREND FILTER =====
         elif regime_type == "breakout":
             logger.debug(f"🚀 Breakout market")
+            
+            # Breakouts should align with trend direction
             signal = breakout_signal(df)
             if signal:
-                signal_type = f"breakout_{signal}"
-                multiplier = 3.0
+                signal_dir = 'up' if signal == 'long' else 'down'
+                if signal_dir == trend_dir or trend_strength < 0.2:
+                    signal_type = f"breakout_{signal}"
+                    multiplier = 3.0
+                    logger.debug(f"✅ Breakout {signal} with trend")
+                else:
+                    signal = None
+                    logger.debug(f"⏭️ Skipping breakout {signal} - against {trend_dir} trend")
+            
             if not signal:
                 signal = volume_breakout_signal(df)
                 if signal:
-                    signal_type = f"volume_breakout_{signal}"
-                    multiplier = 2.5
+                    signal_dir = 'up' if signal == 'long' else 'down'
+                    if signal_dir == trend_dir or trend_strength < 0.2:
+                        signal_type = f"volume_breakout_{signal}"
+                        multiplier = 2.5
+                        logger.debug(f"✅ Volume breakout {signal}")
+                    else:
+                        signal = None
 
-        # EXPANSION (high volatility) – be cautious
+        # ===== EXPANSION MARKET - ADD TREND FILTER =====
         elif regime_type == "expansion":
             logger.debug(f"🌪️ High volatility – cautious")
             adjusted_risk = risk_per_trade * 0.5
+            
+            # Only take signals with the trend in high volatility
             signal = breakout_signal(df, volume_confirmation=True)
             if signal:
-                signal_type = f"breakout_expansion_{signal}"
-                multiplier = 3.0
+                signal_dir = 'up' if signal == 'long' else 'down'
+                if signal_dir == trend_dir:
+                    signal_type = f"breakout_expansion_{signal}"
+                    multiplier = 3.0
+                    logger.debug(f"✅ Breakout in high volatility with trend")
+                else:
+                    signal = None
+            
             if not signal:
                 signal = volume_breakout_signal(df)
                 if signal and abs(df['close'].pct_change().iloc[-1]) > 0.02:
-                    signal_type = f"volume_expansion_{signal}"
-                    multiplier = 2.5
+                    signal_dir = 'up' if signal == 'long' else 'down'
+                    if signal_dir == trend_dir:
+                        signal_type = f"volume_expansion_{signal}"
+                        multiplier = 2.5
+                        logger.debug(f"✅ Volume breakout in high volatility")
+                    else:
+                        signal = None
 
-        # UNKNOWN REGIME – try all in order
+        # ===== UNKNOWN REGIME - ADD TREND FILTER =====
         else:
             logger.debug(f"❓ Unknown regime – trying all strategies")
             for fn, stype, mult in [
@@ -553,19 +596,31 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             ]:
                 sig = fn(df)
                 if sig:
+                    signal_dir = 'up' if sig == 'long' else 'down'
+                    # In unknown regime, only take signals with the trend if trend is clear
+                    if trend_strength > 0.25 and signal_dir != trend_dir and trend_dir != 'side':
+                        logger.debug(f"⏭️ Skipping {stype} - counter-trend")
+                        continue
                     signal = sig
                     signal_type = stype
                     multiplier = mult
                     break
 
-        # If we have a signal, calculate position size
+        # ===== FINAL TREND VALIDATION =====
         if signal:
-            # Optional: skip if trend is weak (ADX < 20) and signal is counter‑trend
-            if trend_strength < 0.2 and signal != trend_dir:
+            signal_dir = 'up' if signal == 'long' else 'down'
+            
+            # Strong trend: NEVER trade against it
+            if trend_strength > 0.25 and signal_dir != trend_dir and trend_dir != 'side':
+                logger.warning(f"❌ REJECTED: {signal} signal against {trend_dir} trend (ADX={trend_strength*100:.0f})")
+                return None
+            
+            # Weak trend: skip counter-trend trades
+            if trend_strength < 0.2 and signal_dir != trend_dir and trend_dir != 'side':
                 logger.debug(f"⏭️ Skipping {signal} – trend too weak (ADX {trend_strength*100:.0f})")
                 return None
 
-            # Determine market type (spot/futures)
+            # Determine market type
             market = "futures" if signal == "short" else "spot"
 
             # Leverage (for futures)
@@ -580,17 +635,17 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             units, sl, tp = calculate_position_units(
                 current_price,
                 sizing_equity,
-                adjusted_risk,           # risk already adjusted by trend strength
+                adjusted_risk,
                 current_atr,
                 multiplier,
+                trading_fee=trading_fee,
                 side=signal
             )
 
             if units > 0:
-                # Cap short units by available cash (paper) or margin (live)
+                # Cap short units
                 if signal == 'short' and trading_engine:
                     available = get_available_balance(symbol, trading_engine)
-                    # For futures, we need margin; simplified here
                     if available > 0:
                         max_units_by_cash = (available * leverage) / current_price if current_price > 0 else 0
                         if units > max_units_by_cash:
@@ -599,13 +654,11 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     if units <= 0:
                         return None
 
-                # Build result
-                # Compute confidence based on trend alignment
-                if signal == trend_dir:
-                    base_conf = 85 + int(trend_strength * 15)
+                # Confidence based on trend alignment
+                if signal_dir == trend_dir:
+                    confidence = min(85 + int(trend_strength * 15), 95)
                 else:
-                    base_conf = 60
-                confidence = min(base_conf, 95)
+                    confidence = 60
 
                 result = {
                     'side': signal,
@@ -621,7 +674,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     'confidence': confidence,
                     'trend_strength': trend_strength,
                 }
-                logger.debug(f"📊 Signal confidence: {confidence}% (trend: {trend_dir}, strength: {trend_strength:.2f})")
+                logger.debug(f"📊 Signal: {signal} | confidence: {confidence}% | trend: {trend_dir} ({trend_strength*100:.0f} ADX)")
                 return result
 
         logger.debug("No signals detected")

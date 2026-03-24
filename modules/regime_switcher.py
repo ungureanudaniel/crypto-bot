@@ -266,8 +266,19 @@ def detect_trend(df, lookback=50):
 
     return direction, strength, confidence
 
+# 4h cache for trend confirmation
+_4h_cache = {} 
+
 def confirm_trend_with_higher_tf(symbol, df_1h):
     """Return True if 4h and 1h trends agree."""
+    global _4h_cache
+    import time
+    now = time.time()
+
+    if symbol in _4h_cache:
+        cached_time, cached_result = _4h_cache[symbol]
+        if now - cached_time < 3600:  # cache valid for 1 hour
+            return cached_result
     try:
         # Fetch 4h data (use a function that caches results to avoid too many calls)
         df_4h = fetch_historical_data(symbol, interval='4h', days=30)
@@ -276,7 +287,10 @@ def confirm_trend_with_higher_tf(symbol, df_1h):
         ema50_4h = df_4h['close'].ewm(span=50).mean()
         trend_4h = "up" if ema20_4h.iloc[-1] > ema50_4h.iloc[-1] else "down"
         trend_1h, _, _ = detect_trend(df_1h)
-        return trend_1h == trend_4h
+        result = trend_1h == trend_4h
+        _4h_cache[symbol] = (now, result)
+        return result
+
     except:
         return True
 
@@ -597,18 +611,9 @@ def predict_regime(df):
         regime_label = regime_map.get(prediction, f"Unknown ({prediction})")
         
         # ===== ADD TREND DIRECTION =====
-        # Calculate moving averages for trend direction
-        sma_20 = df['close'].rolling(20).mean().iloc[-1]
-        sma_50 = df['close'].rolling(50).mean().iloc[-1]
-        current_price = df['close'].iloc[-1]
-        
-        # Determine trend direction
-        if current_price > sma_20 and sma_20 > sma_50:
-            direction = "UPTREND"
-        elif current_price < sma_20 and sma_20 < sma_50:
-            direction = "DOWNTREND"
-        else:
-            direction = "SIDEWAYS"
+        # ===== ADD TREND DIRECTION =====
+        trend_dir, trend_strength, _ = detect_trend(df)
+        direction = {"up": "UPTREND", "down": "DOWNTREND", "side": "SIDEWAYS"}.get(trend_dir, "SIDEWAYS")
         
         # Add direction to the regime label
         if prediction == 4:  # True Trend

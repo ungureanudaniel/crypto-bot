@@ -2,18 +2,21 @@
 backtest.py
 ===========
 Backtests the bot's actual strategy stack (regime detection + signal generation
-+ exit manager) against 1 year of historical 1h OHLCV data from Binance.
++ exit manager) against historical OHLCV data from Binance.
 
 Uses the SAME code as production:
   - regime_switcher.predict_regime()
+  - regime_switcher.detect_trend()
+  - regime_switcher.confirm_trend_with_higher_tf()
   - strategy_tools.generate_trade_signal()
-  - exit_manager.evaluate_exit() (trailing stop + signal reversal)
+  - exit_manager.evaluate_exit()
 
 Run from project root:
     python backtest.py                        # all coins, 1 year
     python backtest.py --coins BTC/USDT       # single coin
     python backtest.py --days 90              # 90 days
     python backtest.py --no-regime            # skip regime filter (faster)
+    python --no-trend                         # skip trend filter
 """
 
 import sys
@@ -33,7 +36,7 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 sys.path.insert(0, os.path.join(project_root, 'modules'))
 
-logging.basicConfig(level=logging.WARNING)  # Suppress noise during backtest
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
@@ -45,17 +48,18 @@ try:
 except Exception:
     CONFIG = {
         'coins': ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'],
-        'risk_per_trade': 0.04,
+        'risk_per_trade': 0.03,
         'trading_fee': 0.0005,
         'max_positions': 5,
         'trading_timeframe': '1h',
     }
 
 TIMEFRAME      = CONFIG.get('trading_timeframe', '1h')
-RISK_PER_TRADE = float(CONFIG.get('risk_per_trade', 0.04))
+RISK_PER_TRADE = float(CONFIG.get('risk_per_trade', 0.03))
 FEE            = float(CONFIG.get('trading_fee', 0.0005))
 MAX_POSITIONS  = int(CONFIG.get('max_positions', 5))
 INITIAL_EQUITY = int(CONFIG.get('cash', 5000))
+
 # -------------------------------------------------------------------
 # Import strategy stack (same as production)
 # -------------------------------------------------------------------
@@ -69,9 +73,12 @@ except ImportError as e:
 
 try:
     from modules.regime_switcher import predict_regime, train_model, model as regime_model
+    from modules.regime_switcher import detect_trend, confirm_trend_with_higher_tf
     HAS_REGIME = True
+    HAS_TREND = True
 except ImportError:
     HAS_REGIME = False
+    HAS_TREND = False
     print("⚠️  Regime switcher not available — running without regime filter")
 
 try:
@@ -86,10 +93,12 @@ except ImportError:
 # -------------------------------------------------------------------
 class Backtester:
     def __init__(self, coins: List[str], days: int = 365,
-                 use_regime: bool = True, verbose: bool = False):
+                 use_regime: bool = True, use_trend: bool = True,
+                 verbose: bool = False):
         self.coins       = coins
         self.days        = days
         self.use_regime  = use_regime and HAS_REGIME
+        self.use_trend   = use_trend and HAS_TREND
         self.verbose     = verbose
         self.equity      = INITIAL_EQUITY
         self.trades      = []
@@ -123,7 +132,7 @@ class Backtester:
         entry_price = signal['entry']
         units       = signal['units']
         atr         = signal.get('atr', 0.0)
-        max_candles = 168  # 7 days on 1h, 2 days on 15m
+        max_candles = 168  # 7 days on 1h
 
         position = {
             'side':                 side,
@@ -144,10 +153,8 @@ class Backtester:
             current_price = float(df.iloc[i]['close'])
             candles_held  = i - entry_idx
 
-            # Track candles held so exit_manager reversal guard works
             position['candles_held'] = candles_held
 
-            # Slice pre-loaded df — no HTTP request
             w_start = max(0, i - 49)
             window  = df.iloc[w_start: i + 1]
 
@@ -187,11 +194,12 @@ class Backtester:
             'exit_reason':  exit_reason,
             'signal_type':  signal.get('signal_type', 'unknown'),
             'regime':       signal.get('regime', 'unknown'),
+            'trend_strength': signal.get('trend_strength', 0),
         }
 
     # ------------------------------------------------------------------
     def run_coin(self, symbol: str) -> List[dict]:
-        """Run backtest for one coin. Advances index past each trade — no re-scanning."""
+        """Run backtest for one coin with trend filtering."""
         self._log(f"\n  📊 {symbol}")
         df = self._fetch(symbol)
         if df is None:
@@ -202,22 +210,29 @@ class Backtester:
         warmup        = 100
         i             = warmup
 
-        SCAN_STEP     = 2    # check every 2 candles
-        MIN_TRADE_GAP = 24   # minimum 24h between trades on same coin
+        SCAN_STEP     = 2
+        MIN_TRADE_GAP = 24
 
-        # Drawdown circuit breaker — stop trading if equity drops too far
         max_dd_pct    = float(CONFIG.get('max_drawdown', 0.06))
         peak_equity   = self.equity
 
-        while i < len(df) - 2:
+        # Cache higher timeframe data if needed (optional)
+        df_4h = None
+        if self.use_trend:
+            try:
+                df_4h = fetch_historical_data(symbol, interval='4h', days=self.days)
+            except:
+                pass
 
-            # Update peak and check drawdown
+        while i < len(df) - 2:
+            # Drawdown check
             if self.equity > peak_equity:
                 peak_equity = self.equity
             current_dd = (self.equity - peak_equity) / peak_equity
             if current_dd < -max_dd_pct:
                 self._log(f"  🛑 Drawdown circuit breaker hit: {current_dd:.1%} — stopping {symbol}")
                 break
+
             w_start = max(0, i - 99)
             window  = df.iloc[w_start: i + 1].copy()
 
@@ -225,7 +240,7 @@ class Backtester:
                 i += SCAN_STEP
                 continue
 
-            # Regime on pre-loaded slice
+            # ===== REGIME DETECTION =====
             regime = 'unknown'
             if self.use_regime:
                 try:
@@ -233,7 +248,36 @@ class Backtester:
                 except Exception:
                     regime = 'unknown'
 
-            # Signal on pre-loaded slice
+            # ===== TREND FILTERING =====
+            skip_trade = False
+            trend_strength = 0
+            trend_direction = "side"
+
+            if self.use_trend:
+                try:
+                    direction, strength, conf = detect_trend(window)
+                    trend_strength = strength
+                    trend_direction = direction
+
+                    # Skip if trend is too weak (ADX < 20)
+                    if strength < 0.2:
+                        self._log(f"  ⏭️  {symbol}: trend too weak (ADX={strength*100:.0f})")
+                        skip_trade = True
+
+                    # Skip if higher timeframe doesn't align
+                    # if not skip_trade and df_4h is not None and not df_4h.empty:
+                    #     if not confirm_trend_with_higher_tf(symbol, window):
+                    #         self._log(f"  ⏭️  {symbol}: 4h trend doesn't align with 1h")
+                    #         skip_trade = True
+
+                except Exception as e:
+                    self._log(f"  ⚠️  Trend detection error: {e}")
+
+            if skip_trade:
+                i += SCAN_STEP
+                continue
+
+            # ===== SIGNAL GENERATION =====
             try:
                 signal = generate_trade_signal(
                     df=window,
@@ -251,17 +295,21 @@ class Backtester:
                 i += SCAN_STEP
                 continue
 
+            # Add trend strength to signal for later analysis
+            signal['trend_strength'] = trend_strength
+
             cost = signal['units'] * signal['entry']
             if cost > self.equity * 0.95 or cost < 1.0:
                 i += SCAN_STEP
                 continue
 
+            # ===== SIMULATE POSITION =====
             result = self._simulate_position(symbol, signal, df, i)
             self.equity += result['net_pnl']
             self.equity_curve.append(self.equity)
             coin_trades.append(result)
 
-            # Jump past trade + minimum gap before next entry on this coin
+            # Jump past trade + minimum gap
             i += max(result['candles_held'], 1) + MIN_TRADE_GAP
 
             self._log(
@@ -270,18 +318,20 @@ class Backtester:
                 f"${result['exit_price']:.4f} | "
                 f"PnL: ${result['net_pnl']:+.4f} | "
                 f"{result['exit_reason']} | {result['candles_held']}c"
+                f"{f' | trend={trend_direction}/{trend_strength:.2f}' if self.use_trend else ''}"
             )
 
         return coin_trades
 
     # ------------------------------------------------------------------
     def run(self) -> dict:
-        """Run full backtest across all coins. Returns summary stats."""
+        """Run full backtest across all coins."""
         print(f"\n{'='*60}")
         print(f"  🔁 Backtest — {len(self.coins)} coins | {self.days} days | {TIMEFRAME}")
         print(f"  Initial equity: ${INITIAL_EQUITY:.2f}")
         print(f"  Risk/trade: {RISK_PER_TRADE:.1%} | Fee: {FEE:.3%} | Max pos: {MAX_POSITIONS}")
         print(f"  Regime filter: {'on' if self.use_regime else 'off'}")
+        print(f"  Trend filter:  {'on' if self.use_trend else 'off'}")
         print(f"{'='*60}\n")
 
         # Train regime model if needed
@@ -329,7 +379,7 @@ class Backtester:
         avg_hold_h    = df['hours_held'].mean()
         max_hold_h    = df['hours_held'].max()
 
-        # Max drawdown from equity curve
+        # Max drawdown
         curve  = np.array(self.equity_curve)
         peak   = np.maximum.accumulate(curve)
         dd     = (curve - peak) / peak * 100
@@ -346,10 +396,7 @@ class Backtester:
                           win_rate=('net_pnl', lambda x: (x > 0).mean() * 100))
                      .sort_values('net_pnl', ascending=False))
 
-        # Exit reason breakdown
         exit_reasons = df['exit_reason'].value_counts().to_dict()
-
-        # Signal type breakdown
         signal_types = df['signal_type'].value_counts().head(5).to_dict()
 
         summary = {
@@ -444,7 +491,9 @@ if __name__ == '__main__':
     parser.add_argument('--days',      type=int,  default=365,
                         help='Number of days to backtest (default: 365)')
     parser.add_argument('--no-regime', action='store_true',
-                        help='Disable regime filter (faster but less accurate)')
+                        help='Disable regime filter')
+    parser.add_argument('--no-trend',  action='store_true',
+                        help='Disable trend filter')
     parser.add_argument('--verbose',   action='store_true',
                         help='Print every trade as it happens')
     args = parser.parse_args()
@@ -455,6 +504,7 @@ if __name__ == '__main__':
         coins=coins,
         days=args.days,
         use_regime=not args.no_regime,
+        use_trend=not args.no_trend,
         verbose=args.verbose,
     )
     bt.run()
