@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from modules.trade_engine import trading_engine
+from modules.trade_engine import trading_engine, save_positions_to_file
 import concurrent.futures
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -286,7 +286,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         from modules.portfolio import get_portfolio_summary
-        from modules.trade_engine import trading_engine
         
         # Get fresh data
         summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
@@ -1091,12 +1090,13 @@ async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trading_engine.open_positions[symbol]['stop_loss'] = stop_price
         if take_profit:
             trading_engine.open_positions[symbol]['take_profit'] = take_profit
+        save_positions_to_file(trading_engine.open_positions)
         
         response = f"✅ *Stop Loss Set for {symbol}*\n\n"
         response += f"Stop: `${stop_price:.2f}`\n"
         if take_profit:
             response += f"Target: `${take_profit:.2f}`\n"
-        
+
         await update.message.reply_text(response, parse_mode='Markdown')
         
     except Exception as e:
