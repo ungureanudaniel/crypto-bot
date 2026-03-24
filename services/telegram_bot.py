@@ -14,6 +14,20 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from modules.trade_engine import trading_engine, save_positions_to_file
 import concurrent.futures
 
+_price_cache = {}
+_price_cache_time = 0
+CACHE_DURATION = 10  # seconds
+
+def get_cached_prices():
+    """Return cached current prices if fresh, otherwise fetch new ones."""
+    global _price_cache, _price_cache_time
+    now = time.time()
+    if now - _price_cache_time > CACHE_DURATION:
+        _price_cache = trading_engine.get_current_prices()
+        _price_cache_time = now
+    return _price_cache
+
+
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 stop_event = None
@@ -130,7 +144,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         from modules.portfolio import get_portfolio_summary
-        summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
+        summary = get_portfolio_summary(current_prices=get_cached_prices())
         
         await update.message.reply_text(
             f"🤖 *Trading Bot Started!*\n\n"
@@ -171,7 +185,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if trading_engine.trading_mode == 'paper':
             try:
                 from modules.portfolio import get_portfolio_summary
-                summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
+                summary = get_portfolio_summary(current_prices=get_cached_prices())
                 perf = summary
 
                 total_value = summary.get('total_value', 0)
@@ -215,7 +229,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # LIVE MODE - use get_portfolio_summary from portfolio.py
         try:
             from modules.portfolio import get_portfolio_summary
-            summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
+            summary = get_portfolio_summary(current_prices=get_cached_prices())
             logger.info(f"   get_portfolio_summary() returned: {summary is not None}")
         except Exception as e:
             logger.error(f"   ❌ get_portfolio_summary() failed: {e}")
@@ -258,7 +272,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         from modules.portfolio import get_portfolio_summary
-        summary_data = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
+        summary_data = get_portfolio_summary(current_prices=get_cached_prices())
 
         total_value = summary_data.get('total_value', 0)
         total_cash = summary_data.get('total_cash', 0)
@@ -288,7 +302,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from modules.portfolio import get_portfolio_summary
         
         # Get fresh data
-        summary = get_portfolio_summary(current_prices=trading_engine.get_current_prices())
+        summary = get_portfolio_summary(current_prices=get_cached_prices())
         
         # Get trade history for win rate
         from modules.portfolio import load_portfolio
@@ -566,7 +580,7 @@ async def emergency_sell_all(update: Update, context: ContextTypes.DEFAULT_TYPE)
         for symbol, position in list(trading_engine.open_positions.items()):
             try:
                 # Get current price
-                current_price = trading_engine.get_current_prices().get(symbol)
+                current_price = get_cached_prices().get(symbol)
                 if not current_price:
                     failed.append(f"{symbol} (no price)")
                     continue
@@ -676,7 +690,7 @@ async def holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         # Get current prices
-        current_prices = trading_engine.get_current_prices()
+        current_prices = get_cached_prices()
         
         message_lines = [f"📊 *Current Holdings:*\n"]
         
@@ -715,7 +729,7 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("📭 No active positions", parse_mode='Markdown')
             return
         
-        current_prices = trading_engine.get_current_prices()
+        current_prices = get_cached_prices()
         
         message_lines = [f"📊 *Active Positions ({len(trading_engine.open_positions)}):*\n"]
         
@@ -924,7 +938,7 @@ async def current_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     
     try:
-        price = trading_engine.get_current_prices().get(symbol)
+        price = get_cached_prices().get(symbol)
         
         if price:
             await update.message.reply_text(
