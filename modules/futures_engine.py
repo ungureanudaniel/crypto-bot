@@ -45,7 +45,9 @@ def _to_futures_symbol(symbol: str) -> str:
 # -------------------------------------------------------------------
 def _paper_open(symbol: str, side: str, amount: float, entry_price: float,
                 stop_loss: float, take_profit: float,
-                leverage: int = DEFAULT_LEVERAGE, atr: float = 0.0) -> bool:
+                leverage: int = DEFAULT_LEVERAGE, atr: float = 0.0,
+                trailing_min: Optional[float] = None,
+                trailing_max: Optional[float] = None) -> bool:
     """Simulate opening a futures position in paper mode."""
     from modules.portfolio import open_futures_position
     fee = amount * entry_price * FUTURES_FEE
@@ -59,7 +61,9 @@ def _paper_open(symbol: str, side: str, amount: float, entry_price: float,
         stop_loss=stop_loss,
         take_profit=take_profit,
         leverage=leverage,
-        atr=atr
+        atr=atr,
+        trailing_min_pct=trailing_min,
+        trailing_max_pct=trailing_max
     )
     if success:
         logger.info(f"📄 [PAPER] Futures {side.upper()} opened: {symbol} "
@@ -165,7 +169,9 @@ def _live_set_leverage(client, symbol: str, leverage: int) -> bool:
 
 def _live_open(symbol: str, side: str, amount: float,
                stop_loss: float, take_profit: float,
-               leverage: int = DEFAULT_LEVERAGE) -> bool:
+               leverage: int = DEFAULT_LEVERAGE,
+               trailing_min_pct: Optional[float] = None,
+               trailing_max_pct: Optional[float] = None) -> bool:
     """Open a real futures position on Binance."""
     client = get_futures_client()
     if not client:
@@ -209,7 +215,9 @@ def _live_open(symbol: str, side: str, amount: float,
             entry_price=fill_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            leverage=leverage
+            leverage=leverage,
+            trailing_min_pct=trailing_min_pct,
+            trailing_max_pct=trailing_max_pct
         )
         return True
 
@@ -309,14 +317,26 @@ class FuturesEngine:
                     f"Leverage: {self.leverage}x")
 
     def open_short(self, symbol: str, amount: float, entry_price: float,
-                   stop_loss: float, take_profit: float,
-                   signal_type: str = '', atr: float = 0.0) -> bool:
+               stop_loss: float, take_profit: float,
+               signal_type: str = '', atr: float = 0.0) -> bool:
         """Open a short position (futures sell)."""
         logger.info(f"📉 Opening SHORT: {symbol} | Amount: {amount:.6f} "
                     f"@ ${entry_price:.2f} | SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
+
+        # Fetch per‑pair trailing bounds
+        trailing_min = trailing_max = None
+        try:
+            from config_loader import get_pair_config
+            pair_cfg = get_pair_config(symbol)
+            trailing_min = pair_cfg.get('trailing_min_pct')
+            trailing_max = pair_cfg.get('trailing_max_pct')
+        except Exception:
+            pass
+
         if self.trading_mode == 'paper':
             ok = _paper_open(symbol, 'short', amount, entry_price,
-                             stop_loss, take_profit, self.leverage, atr=atr)
+                            stop_loss, take_profit, self.leverage, atr,
+                            trailing_min, trailing_max)
             if ok and signal_type:
                 from modules.portfolio import get_futures_positions, save_futures_positions
                 pos = get_futures_positions()
@@ -326,17 +346,33 @@ class FuturesEngine:
                     pos[symbol]['atr'] = atr
                     save_futures_positions(pos)
             return ok
-        return _live_open(symbol, 'short', amount, stop_loss, take_profit, self.leverage)
+        else:
+            return _live_open(symbol, 'short', amount, stop_loss, take_profit,
+                            self.leverage, trailing_min, trailing_max)
 
     def open_long(self, symbol: str, amount: float, entry_price: float,
-                  stop_loss: float, take_profit: float) -> bool:
+              stop_loss: float, take_profit: float) -> bool:
         """Open a futures long position (alternative to spot long)."""
         logger.info(f"📈 Opening FUTURES LONG: {symbol} | Amount: {amount:.6f} "
                     f"@ ${entry_price:.2f}")
+
+        # Fetch per‑pair trailing bounds (optional)
+        trailing_min = trailing_max = None
+        try:
+            from config_loader import get_pair_config
+            pair_cfg = get_pair_config(symbol)
+            trailing_min = pair_cfg.get('trailing_min_pct')
+            trailing_max = pair_cfg.get('trailing_max_pct')
+        except Exception:
+            pass
+
         if self.trading_mode == 'paper':
             return _paper_open(symbol, 'long', amount, entry_price,
-                               stop_loss, take_profit, self.leverage)
-        return _live_open(symbol, 'long', amount, stop_loss, take_profit, self.leverage)
+                            stop_loss, take_profit, self.leverage, atr=0.0,
+                            trailing_min=trailing_min, trailing_max=trailing_max)
+        else:
+            return _live_open(symbol, 'long', amount, stop_loss, take_profit,
+                            self.leverage, trailing_min, trailing_max)
 
     def close_position(self, symbol: str, exit_price: Optional[float] = None,
                        reason: str = "") -> Optional[Dict]:

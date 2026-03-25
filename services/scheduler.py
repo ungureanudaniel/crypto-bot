@@ -200,6 +200,12 @@ def health_check():
         return
     
     try:
+        # This will log and activate circuit breaker if needed
+        trading_engine.check_drawdown()
+    except Exception as e:
+        logger.error(f"❌ Error in health check: {e}")
+        
+    try:
         summary = get_portfolio_summary()
         return_pct = summary.get('total_return_pct', 0)
         is_healthy = return_pct > -10

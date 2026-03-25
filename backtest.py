@@ -330,6 +330,8 @@ class Backtester:
         print(f"  🔁 Backtest — {len(self.coins)} coins | {self.days} days | {TIMEFRAME}")
         print(f"  Initial equity: ${INITIAL_EQUITY:.2f}")
         print(f"  Risk/trade: {RISK_PER_TRADE:.1%} | Fee: {FEE:.3%} | Max pos: {MAX_POSITIONS}")
+        print(f"  Trailing stop: {CONFIG.get('trailing_stop_min_pct', 0.02):.1%} - "
+              f"{CONFIG.get('trailing_stop_max_pct', 0.04):.1%}")
         print(f"  Regime filter: {'on' if self.use_regime else 'off'}")
         print(f"  Trend filter:  {'on' if self.use_trend else 'off'}")
         print(f"{'='*60}\n")
@@ -434,6 +436,9 @@ class Backtester:
         print(f"{'='*60}")
         print(f"\n  💰 Performance")
         print(f"     Initial equity:   ${INITIAL_EQUITY:.2f}")
+        print(f"     Trailing stop:     {CONFIG.get('trailing_stop_min_pct', 0.02):.1%} - "
+              f"{CONFIG.get('trailing_stop_max_pct', 0.04):.1%}")
+        print(f"     Risk/trade:       {RISK_PER_TRADE:.1%}")
         print(f"     Final equity:     ${s['final_equity']:.2f}")
         print(f"  {ret_color}  Total return:     {ret_sign}{s['total_return']:.2f}%")
         print(f"     Total PnL:        ${pnl_sign}{s['total_pnl']:.4f}")

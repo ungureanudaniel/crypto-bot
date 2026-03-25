@@ -418,7 +418,23 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         else:
             risk_multiplier = 0.6
         
-        adjusted_risk = risk_per_trade * risk_multiplier
+        pair_config = {}
+        if symbol:
+            try:
+                from config_loader import get_pair_config
+                pair_config = get_pair_config(symbol)
+            except Exception as e:
+                logger.debug(f"Could not load pair config for {symbol}: {e}")
+
+        # Override risk if per‑pair value exists
+        per_pair_risk = pair_config.get('risk_per_trade')
+        if per_pair_risk is not None:
+            # Apply same trend multiplier to the per‑pair risk
+            adjusted_risk = per_pair_risk * risk_multiplier
+            logger.debug(f"Using per‑pair risk for {symbol}: {per_pair_risk:.2%} (adjusted {adjusted_risk:.2%})")
+        else:
+            adjusted_risk = risk_per_trade * risk_multiplier
+
         logger.debug(f"Trend: {trend_dir} | strength={trend_strength:.2f}")
 
         # ATR for position sizing

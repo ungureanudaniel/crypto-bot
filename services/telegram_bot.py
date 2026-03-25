@@ -160,6 +160,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Start error: {e}")
         await update.message.reply_text("❌ Error starting bot")
 
+async def reset_circuit_breaker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        logger.warning("⚠️ Balance command triggered without message object")
+        return
+    await update.message.reply_text("💰 Fetching balance...", parse_mode='Markdown')
+
+    trading_engine.circuit_breaker_triggered = False
+    await update.message.reply_text("✅ Circuit breaker manually reset. Trading resumed.", parse_mode='Markdown')
+
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show balance with debug info"""
     if not update.message:
@@ -1150,6 +1159,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     <b>Risk Management</b>
     /setstop SYMBOL STOP [TARGET] - Set stop loss for position
     /stop - Stop bot
+    /resetcircuitbreaker - Reset circuit breaker
 
     <b>Examples</b>
     <code>/scan</code>
@@ -1221,6 +1231,7 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("summary", summary))
     application.add_handler(CommandHandler("setstop", set_stop_loss))
     application.add_handler(CommandHandler("stop", stop))
+    application.add_handler(CommandHandler("resetcircuitbreaker", reset_circuit_breaker))
     
     logger.info(f"✅ Registered {len(application.handlers[0])} command handlers")
     logger.info("✅ Bot ready - starting polling...")

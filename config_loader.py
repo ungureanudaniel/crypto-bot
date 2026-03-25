@@ -110,6 +110,13 @@ class Config:
 # Global config instance
 config = Config()
 
+def get_pair_config(symbol: str) -> dict:
+    """
+    Return per-pair configuration for a symbol.
+    If not defined, return an empty dict (global defaults will be used).
+    """
+    per_pair = config.config.get('per_pair', {})
+    return per_pair.get(symbol, {})
 # -------------------------------------------------------------------
 # Shared Binance client (singleton)
 # -------------------------------------------------------------------

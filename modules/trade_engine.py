@@ -12,7 +12,8 @@ from modules.regime_switcher import predict_regime, train_model
 from modules.portfolio import (
     add_trade, load_portfolio, save_portfolio,
     get_cash, update_cash, get_positions, save_positions,
-    get_futures_positions, open_futures_position, close_futures_position
+    get_futures_positions, open_futures_position, close_futures_position,
+    get_portfolio_summary
 )
 from config_loader import get_binance_client, get_futures_client, config
 
@@ -146,6 +147,8 @@ class TradingEngine:
         self.timeframe = self.config.get('trading_timeframe', '15m')
         self.max_positions = self.config.get('max_positions', 3)
         self.risk_per_trade = self.config.get('risk_per_trade', 0.02)
+        self.circuit_breaker_triggered = False
+        self.circuit_breaker_time = None
         self.last_trade_time = 0
 
         # Load open positions from file on startup
@@ -211,6 +214,29 @@ class TradingEngine:
         logger.info(f"📈 Max positions: {self.max_positions}, Risk per trade: {self.risk_per_trade:.1%}")
         logger.info(f"📂 Loaded {len(self.open_positions)} existing positions")
     
+    def check_drawdown(self) -> bool:
+        """
+        Checks if drawdown exceeds max_drawdown. If yes, activates circuit breaker.
+        Returns True if trading is allowed, False if circuit breaker is active.
+        """
+        # Get current drawdown from portfolio summary
+        summary = get_portfolio_summary()
+        current_drawdown = -summary['total_return_pct'] / 100 if summary['total_return_pct'] < 0 else 0
+        max_drawdown = self.config.get('max_drawdown', 0.05)
+
+        if current_drawdown > max_drawdown and not self.circuit_breaker_triggered:
+            self.circuit_breaker_triggered = True
+            logger.warning(f"🚨 Circuit breaker triggered – drawdown {current_drawdown:.1%} > {max_drawdown:.1%}")
+            # Optional: send notification via notifier
+            return False
+
+        # Auto‑reset when drawdown recovers below half of the limit
+        if self.circuit_breaker_triggered and current_drawdown < max_drawdown * 0.5:
+            self.circuit_breaker_triggered = False
+            logger.info("✅ Circuit breaker reset – drawdown recovered")
+
+        return not self.circuit_breaker_triggered
+
     def get_cash_balance(self, quote_currency: str = "USDT") -> float:
         """Get balance for specific quote currency"""
         
@@ -534,6 +560,22 @@ class TradingEngine:
                 'mode': self.trading_mode
             }
             
+            # Fetch per‑pair trailing bounds
+            trailing_min = None
+            trailing_max = None
+            try:
+                from config_loader import get_pair_config
+                pair_cfg = get_pair_config(symbol)
+                trailing_min = pair_cfg.get('trailing_min_pct')
+                trailing_max = pair_cfg.get('trailing_max_pct')
+            except Exception:
+                pass
+
+            self.open_positions[symbol].update({
+                'trailing_min_pct': trailing_min,
+                'trailing_max_pct': trailing_max,
+            })
+
             # Save updated positions to file
             save_positions_to_file(self.open_positions)
             
@@ -747,6 +789,11 @@ class TradingEngine:
         current_time = time.time()
         min_time_between_trades = 3600  # 1 hour — matches trading timeframe
         
+        # Check circuit breaker status
+        if not self.check_drawdown():
+            logger.info("⛔ Circuit breaker active – no new trades")
+            return []
+
         # Check if enough time has passed since last trade
         if hasattr(self, 'last_trade_time') and self.last_trade_time:
             time_since_last = current_time - self.last_trade_time
@@ -853,6 +900,10 @@ class TradingEngine:
         """
         Execute a trading signal
         """
+        if not self.check_drawdown():
+            logger.info("⛔ Circuit breaker active – signal not executed")
+            return False
+    
         try:
             # DEBUG: Log the signal data
             logger.info(f"🔍 EXECUTE_SIGNAL called")

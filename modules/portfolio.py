@@ -99,7 +99,9 @@ def save_futures_positions(futures_positions: Dict) -> None:
 def open_futures_position(symbol: str, side: str, amount: float,
                           entry_price: float, stop_loss: float,
                           take_profit: float, quote_currency: str = "USDT",
-                          leverage: int = 1, atr: float = 0.0) -> bool:
+                          leverage: int = 1, atr: float = 0.0,
+                          trailing_min_pct: Optional[float] = None,
+                          trailing_max_pct: Optional[float] = None) -> bool:
     """
     Record opening a futures position (paper or live).
     side: 'short' or 'long'
@@ -124,6 +126,8 @@ def open_futures_position(symbol: str, side: str, amount: float,
             "leverage": leverage,
             "margin_used": margin_used,
             "atr": atr,
+            'trailing_min_pct': trailing_min_pct,
+            'trailing_max_pct': trailing_max_pct,
             "signal_type": "unknown",
             "trailing_stop_active": False,
             "opened_at": datetime.now().isoformat(),

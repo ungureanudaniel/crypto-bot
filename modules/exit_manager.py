@@ -136,7 +136,8 @@ def update_chandelier_stop(
     Hybrid trailing stop:
     - Uses peak/trough anchoring from Chandelier concept
     - Uses percentage-based distance (not ATR multiplier) for consistency
-    - Adapts distance to asset volatility via ATR% with 2% floor
+    - Adapts distance to asset volatility via ATR% with per‑pair min/max
+    - Falls back to global trailing_stop_min_pct / trailing_stop_max_pct
 
     Long:  stop = peak_since_entry × (1 - trail_pct)
     Short: stop = trough_since_entry × (1 + trail_pct)
@@ -144,6 +145,8 @@ def update_chandelier_stop(
     Breakeven floor at 1.5% profit.
     Stop only moves in profitable direction (ratchet).
     """
+    from config_loader import config
+
     if current_price <= 0:
         return None, ''
 
@@ -151,12 +154,17 @@ def update_chandelier_stop(
     current_stop = position.get('stop_loss', 0.0)
     side         = position.get('side', 'long')
 
-    # Adaptive trail: ATR% with 2% floor, 4% ceiling
-    # BTC ATR ~1% → 2% trail (floor)
-    # ETH ATR ~2.5% → 2.5% trail
-    # SOL ATR ~3.5% → 3.5% trail (capped at 4%)
-    atr_pct    = (atr / entry_price) if (atr > 0 and entry_price > 0) else 0.02
-    trail_pct  = min(max(atr_pct, 0.02), 0.04)
+    # Adaptive trail: ATR% with per‑pair bounds
+    atr_pct = (atr / entry_price) if (atr > 0 and entry_price > 0) else 0.02
+
+    # Use per‑pair trailing bounds if available, else global
+    trail_min = position.get('trailing_min_pct')
+    trail_max = position.get('trailing_max_pct')
+    if trail_min is None or trail_max is None:
+        trail_min = config.config.get('trailing_stop_min_pct', 0.02)
+        trail_max = config.config.get('trailing_stop_max_pct', 0.04)
+
+    trail_pct = min(max(atr_pct, trail_min), trail_max)
 
     breakeven_threshold = 0.015  # 1.5% profit → breakeven floor activates
 
@@ -201,7 +209,6 @@ def update_chandelier_stop(
             return chandelier_stop, reason
 
     return None, ''
-
 
 # -------------------------------------------------------------------
 # Combined exit check — call once per position per cycle
