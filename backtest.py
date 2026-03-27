@@ -29,6 +29,8 @@ from typing import List, Dict, Optional
 import pandas as pd
 import numpy as np
 
+from config_loader import get_pair_config
+
 # -------------------------------------------------------------------
 # Setup paths
 # -------------------------------------------------------------------
@@ -45,13 +47,23 @@ logger = logging.getLogger(__name__)
 try:
     from config_loader import config
     CONFIG = config.config
+    print("\n📌 Per‑pair overrides loaded:")
+    for sym in CONFIG.get('coins', []):
+        cfg = get_pair_config(sym)
+        if cfg:
+            risk = cfg.get('risk_per_trade')
+            trail_min = cfg.get('trailing_min_pct')
+            trail_max = cfg.get('trailing_max_pct')
+            print(f"   {sym}: risk={risk}, trail={trail_min:.0%}‑{trail_max:.0%}" if trail_min and trail_max else f"   {sym}: risk={risk}")
+        else:
+            print(f"   {sym}: (none)")
 except Exception:
     CONFIG = {
         'coins': ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'],
         'risk_per_trade': 0.03,
         'trading_fee': 0.0005,
         'max_positions': 5,
-        'trading_timeframe': '1h',
+        'trading_timeframe': config.get('trading_timeframe', '1h'),
     }
 
 TIMEFRAME      = CONFIG.get('trading_timeframe', '1h')
@@ -126,7 +138,7 @@ class Backtester:
 
     # ------------------------------------------------------------------
     def _simulate_position(self, symbol: str, signal: dict,
-                           df: pd.DataFrame, entry_idx: int) -> dict:
+                       df: pd.DataFrame, entry_idx: int) -> dict:
         """Walk forward using pre-loaded df only — zero API calls."""
         side        = signal['side']
         entry_price = signal['entry']
@@ -142,6 +154,8 @@ class Backtester:
             'signal_type':          signal.get('signal_type', 'unknown'),
             'atr':                  atr,
             'trailing_stop_active': False,
+            'trailing_min_pct':     signal.get('trailing_min_pct'),
+            'trailing_max_pct':     signal.get('trailing_max_pct'),
         }
 
         exit_price   = None
@@ -173,7 +187,7 @@ class Backtester:
             candles_held = last_idx - entry_idx
 
         gross_pnl = ((exit_price - entry_price) if side == 'long'
-                     else (entry_price - exit_price)) * units
+                    else (entry_price - exit_price)) * units
         entry_fee = entry_price * units * FEE
         exit_fee  = exit_price  * units * FEE
         net_pnl   = gross_pnl - entry_fee - exit_fee
@@ -190,13 +204,12 @@ class Backtester:
             'pnl_pct':      round(pnl_pct, 4),
             'fees':         round(entry_fee + exit_fee, 6),
             'candles_held': candles_held,
-            'hours_held':   candles_held if TIMEFRAME == '1h' else round(candles_held / 4, 1),
+            'hours_held':   candles_held if TIMEFRAME == '4h' else round(candles_held / 4, 1),
             'exit_reason':  exit_reason,
             'signal_type':  signal.get('signal_type', 'unknown'),
             'regime':       signal.get('regime', 'unknown'),
             'trend_strength': signal.get('trend_strength', 0),
         }
-
     # ------------------------------------------------------------------
     def run_coin(self, symbol: str) -> List[dict]:
         """Run backtest for one coin with trend filtering."""
@@ -205,6 +218,16 @@ class Backtester:
         if df is None:
             self._log(f"  ⏭️  No data")
             return []
+
+        # ===== PER‑PAIR CONFIGURATION =====
+        pair_cfg = get_pair_config(symbol)
+        pair_risk = pair_cfg.get('risk_per_trade')
+        risk_used = pair_risk if pair_risk is not None else RISK_PER_TRADE
+        trailing_min = pair_cfg.get('trailing_min_pct')
+        trailing_max = pair_cfg.get('trailing_max_pct')
+        self._log(f"  Risk: {risk_used:.1%} (global: {RISK_PER_TRADE:.1%})")
+        if trailing_min and trailing_max:
+            self._log(f"  Trailing: {trailing_min:.1%}–{trailing_max:.1%}")
 
         coin_trades   = []
         warmup        = 100
@@ -264,7 +287,7 @@ class Backtester:
                         self._log(f"  ⏭️  {symbol}: trend too weak (ADX={strength*100:.0f})")
                         skip_trade = True
 
-                    # Skip if higher timeframe doesn't align
+                    # Optional: skip if higher timeframe doesn't align
                     # if not skip_trade and df_4h is not None and not df_4h.empty:
                     #     if not confirm_trend_with_higher_tf(symbol, window):
                     #         self._log(f"  ⏭️  {symbol}: 4h trend doesn't align with 1h")
@@ -282,7 +305,7 @@ class Backtester:
                 signal = generate_trade_signal(
                     df=window,
                     equity=self.equity,
-                    risk_per_trade=RISK_PER_TRADE,
+                    risk_per_trade=risk_used,          # per‑pair risk
                     symbol=symbol,
                     trading_engine=None,
                     regime=regime,
@@ -295,8 +318,9 @@ class Backtester:
                 i += SCAN_STEP
                 continue
 
-            # Add trend strength to signal for later analysis
-            signal['trend_strength'] = trend_strength
+            # Add trailing bounds to signal (will be passed to position)
+            signal['trailing_min_pct'] = trailing_min
+            signal['trailing_max_pct'] = trailing_max
 
             cost = signal['units'] * signal['entry']
             if cost > self.equity * 0.95 or cost < 1.0:
@@ -331,10 +355,34 @@ class Backtester:
         print(f"  Initial equity: ${INITIAL_EQUITY:.2f}")
         print(f"  Risk/trade: {RISK_PER_TRADE:.1%} | Fee: {FEE:.3%} | Max pos: {MAX_POSITIONS}")
         print(f"  Trailing stop: {CONFIG.get('trailing_stop_min_pct', 0.02):.1%} - "
-              f"{CONFIG.get('trailing_stop_max_pct', 0.04):.1%}")
+            f"{CONFIG.get('trailing_stop_max_pct', 0.04):.1%}")
         print(f"  Regime filter: {'on' if self.use_regime else 'off'}")
         print(f"  Trend filter:  {'on' if self.use_trend else 'off'}")
         print(f"{'='*60}\n")
+
+        # --- Per‑pair settings ---
+        print("📊 Per‑pair configurations (global defaults unless overridden):\n")
+        print(f"{'Symbol':<12} {'Risk':>8} {'Trail min':>10} {'Trail max':>10}")
+        print("-" * 45)
+        
+        for symbol in self.coins:
+            try:
+                from config_loader import get_pair_config
+                pair_cfg = get_pair_config(symbol)
+                risk = pair_cfg.get('risk_per_trade')
+                trail_min = pair_cfg.get('trailing_min_pct')
+                trail_max = pair_cfg.get('trailing_max_pct')
+                
+                risk_str = f"{risk:.1%}" if risk is not None else "global"
+                min_str = f"{trail_min:.1%}" if trail_min is not None else "global"
+                max_str = f"{trail_max:.1%}" if trail_max is not None else "global"
+            except Exception:
+                risk_str = min_str = max_str = "global"
+            
+            print(f"{symbol:<12} {risk_str:>8} {min_str:>10} {max_str:>10}")
+        
+        print(f"\n{'='*60}\n")
+
 
         # Train regime model if needed
         if self.use_regime and HAS_REGIME:
@@ -455,6 +503,24 @@ class Backtester:
 
         print(f"\n  {dd_color} Risk")
         print(f"     Max drawdown:     {s['max_drawdown']:.2f}%")
+
+        print(f"\n  ⚙️ Per‑pair settings (global unless overridden):")
+        print(f"  {'Symbol':<12} {'Risk':>8} {'Trail min':>10} {'Trail max':>10}")
+        print(f"  {'-'*45}")
+        for symbol in self.coins:
+            try:
+                from config_loader import get_pair_config
+                pair_cfg = get_pair_config(symbol)
+                risk = pair_cfg.get('risk_per_trade')
+                trail_min = pair_cfg.get('trailing_min_pct')
+                trail_max = pair_cfg.get('trailing_max_pct')
+                risk_str = f"{risk:.1%}" if risk is not None else "global"
+                min_str = f"{trail_min:.1%}" if trail_min is not None else "global"
+                max_str = f"{trail_max:.1%}" if trail_max is not None else "global"
+            except Exception:
+                risk_str = min_str = max_str = "global"
+            print(f"  {symbol:<12} {risk_str:>8} {min_str:>10} {max_str:>10}")
+        print()
 
         print(f"\n  🚪 Exit reasons")
         for reason, count in sorted(s['exit_reasons'].items(),

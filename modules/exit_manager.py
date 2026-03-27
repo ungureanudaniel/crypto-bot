@@ -227,8 +227,9 @@ def evaluate_exit(
       (False, '')     — hold; position dict may be mutated (stop / peak / trough updated)
 
     Order:
-      1. Recalculate ATR from fresh df (best accuracy for Chandelier)
-      2. Update Chandelier stop (mutates position in-place)
+      0. Track candles held (for signal reversal)
+      1. Recalculate ATR from fresh df
+      2. Update Chandelier stop
       3. Check if stop or TP was hit
       4. Check signal reversal (only after 6 candle minimum hold)
     """
@@ -241,6 +242,16 @@ def evaluate_exit(
         atr = _calculate_atr(df)
     else:
         atr = position.get('atr', 0.0)
+
+    # --- Candle counter: increment if a new candle has formed ---
+    if df is not None and not df.empty:
+        # Get latest candle timestamp
+        current_candle_time = df.index[-1]
+        last_candle = position.get('last_candle_time')
+        if last_candle is None or current_candle_time > last_candle:
+            # New candle
+            position['candles_held'] = position.get('candles_held', 0) + 1
+            position['last_candle_time'] = current_candle_time
 
     # Attach symbol to position for logging
     position.setdefault('symbol', symbol)

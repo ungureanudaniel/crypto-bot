@@ -48,7 +48,7 @@ scaler = None
 # ---------------------------
 # Helper: Fetch data with testnet support
 # ---------------------------
-def fetch_data_for_regime(symbol, interval="1h", limit=500):
+def fetch_data_for_regime(symbol, interval=config.get('trading_timeframe', '4h'), limit=500):
     """Fetch data for regime detection with testnet support"""
     try:
         # Try different import methods
@@ -324,7 +324,7 @@ def train_model():
         try:
             # STEP 1: Fetch more data for better regime detection
             logger.info(f"   ↳ Fetching OHLCV data...")
-            timeframe = "15m" if CONFIG.get('trading_mode') == 'testnet' else "1h"
+            timeframe = config.get('trading_timeframe', '4h')
 
             df = fetch_data_for_regime(coin, timeframe, limit=500)  # Use 4h timeframe, more data
             logger.info(f"   ↳ Got {len(df)} candles")
@@ -668,7 +668,7 @@ def quick_predict(symbol):
     logger.info(f"🔮 Quick prediction for {symbol}")
     
     # Fetch data
-    df = fetch_data_for_regime(symbol, "1h", limit=100)
+    df = fetch_data_for_regime(symbol, config.get('trading_timeframe', '4h'), limit=100)
     
     if df.empty:
         return f"No data for {symbol}"

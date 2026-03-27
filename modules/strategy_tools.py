@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict
+from typing import Dict, Optional
 from ta.volatility import BollingerBands
 from ta.trend import MACD, ADXIndicator
 from ta.momentum import RSIIndicator
@@ -288,37 +288,40 @@ def volume_breakout_signal(df):
 # Position Sizing (Only calculates, but execution in trade_engine.py)
 # -------------------------------------------------------------------
 def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
-                              stop_atr_multiplier: float = 2, trading_fee: float = 0.0005,
-                              side: str = 'long'):
-    """
-    Calculate position size based on risk.
-    Calibrated for 1h timeframe — stops are wider to avoid noise-triggered exits.
-    Correctly handles both long and short stop/TP direction.
-    Returns: units, stop_loss_price, take_profit_price
-    """
+                              stop_atr_multiplier: float = 2.0, trading_fee: float = 0.0005,
+                              side: str = 'long',
+                              stop_loss_min_pct: Optional[float] = None,
+                              stop_loss_max_pct: Optional[float] = None,
+                              default_stop_loss_pct: Optional[float] = None,
+                              min_rr: Optional[float] = None):
     try:
+        from config_loader import config as cfg
+
+        # Load config with fallbacks
+        min_pct = stop_loss_min_pct if stop_loss_min_pct is not None else cfg.config.get('stop_loss_min_pct', 0.015)
+        max_pct = stop_loss_max_pct if stop_loss_max_pct is not None else cfg.config.get('stop_loss_max_pct', 0.08)
+        def_pct = default_stop_loss_pct if default_stop_loss_pct is not None else cfg.config.get('default_stop_loss_pct', 0.03)
+        rr = min_rr if min_rr is not None else cfg.config.get('min_rr', 4.0)
+
         # Calculate stop loss distance from ATR
         if atr and atr > 0:
             stop_distance = atr * stop_atr_multiplier
             stop_loss_pct = stop_distance / entry_price
         else:
-            stop_loss_pct = 0.03  # Default 3% for 1h
+            stop_loss_pct = def_pct
 
-        # 1h-appropriate stop bounds: min 1.5%, max 8%
-        stop_loss_pct = max(stop_loss_pct, 0.015)
-        stop_loss_pct = min(stop_loss_pct, 0.08)
+        # Apply bounds
+        stop_loss_pct = max(stop_loss_pct, min_pct)
+        stop_loss_pct = min(stop_loss_pct, max_pct)
 
         # Fee cost for round trip
         round_trip_fee = trading_fee * 2
 
-        # TP is a ceiling — wide enough for trailing stop to run freely
-        min_rr = 4.0
-        take_profit_pct = max(stop_loss_pct * min_rr, round_trip_fee * 5)
+        # TP: risk:reward × stop
+        take_profit_pct = max(stop_loss_pct * rr, round_trip_fee * 5)
         take_profit_pct = max(take_profit_pct, 0.02)
 
-        # --- Direction-aware SL/TP ---
-        # Long:  stop BELOW entry, target ABOVE entry
-        # Short: stop ABOVE entry, target BELOW entry
+        # Direction‑aware SL/TP
         if side == 'short':
             stop_loss_price   = entry_price * (1 + stop_loss_pct)
             take_profit_price = entry_price * (1 - take_profit_pct)
@@ -326,8 +329,7 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
             stop_loss_price   = entry_price * (1 - stop_loss_pct)
             take_profit_price = entry_price * (1 + take_profit_pct)
 
-        # Fee-adjusted net profit check — uses actual position value for accuracy
-        # Skip trades where round-trip fees exceed 20% of the expected gain
+        # Fee-adjusted net profit check — skip if fees eat >20% of gain
         risk_amount   = equity * risk_per_trade
         risk_per_unit = entry_price * stop_loss_pct
         if risk_per_unit <= 0:
@@ -336,7 +338,7 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
         units_estimate  = min(risk_amount / risk_per_unit, (equity * 0.15) / entry_price)
         position_value  = units_estimate * entry_price
         actual_fee_cost = position_value * round_trip_fee
-        expected_gain   = position_value * stop_loss_pct * min_rr
+        expected_gain   = position_value * stop_loss_pct * rr
         if actual_fee_cost > expected_gain * 0.20:
             logger.debug(f"⏭️ Fee ratio too high: fees ${actual_fee_cost:.4f} vs gain ${expected_gain:.4f}")
             return 0, None, None
@@ -431,7 +433,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         if per_pair_risk is not None:
             # Apply same trend multiplier to the per‑pair risk
             adjusted_risk = per_pair_risk * risk_multiplier
-            logger.debug(f"Using per‑pair risk for {symbol}: {per_pair_risk:.2%} (adjusted {adjusted_risk:.2%})")
+            logger.info(f"📌 Using per‑pair risk for {symbol}: {per_pair_risk:.2%} (global {risk_per_trade:.2%})")
         else:
             adjusted_risk = risk_per_trade * risk_multiplier
 

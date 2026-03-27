@@ -2,8 +2,8 @@ import sys
 import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import asyncio
 import logging
+from modules.logger_config import setup_logging, log_trade
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from modules.data_feed import data_feed
@@ -15,14 +15,20 @@ from modules.portfolio import (
     get_futures_positions, open_futures_position, close_futures_position,
     get_portfolio_summary
 )
-from config_loader import get_binance_client, get_futures_client, config
+from config_loader import get_binance_client, get_futures_client, get_pair_config, config
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# ============================================================================
+# SETUP LOGGING (with optional Telegram support)
+# ============================================================================
+try:
+    from services.notifier import notifier
+    setup_logging(verbose=True, notifier=notifier)
+    print("✅ Logging initialized with Telegram support")
+except ImportError:
+    setup_logging(verbose=True)  # Fallback without Telegram
+    print("⚠️ Notifier not available - Telegram logging disabled")
+
+# Get logger for this module
 logger = logging.getLogger(__name__)
 
 # Try to import notifier
@@ -320,8 +326,8 @@ class TradingEngine:
                         symbol, position, current_price, df
                     )
 
-                    # Persist updated trailing stop back to file
-                    if not should_exit and position.get('trailing_stop_active'):
+                    # Always save position after evaluation (if not closed) to persist candle counter and trailing stop updates
+                    if not should_exit:
                         self.open_positions[symbol] = position
                         save_positions_to_file(self.open_positions)
 
@@ -419,7 +425,15 @@ class TradingEngine:
             'mode': self.trading_mode,
             'quote_currency': quote_currency
         })
-        
+        # Log the trade
+        log_trade('close',
+                symbol=symbol,
+                side=position['side'],
+                entry=position['entry_price'],
+                exit=exit_price,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                reason=reason)
         # Send notification
         if has_notifier:
             try:
@@ -437,8 +451,9 @@ class TradingEngine:
         return True
 
     def open_position(self, symbol: str, side: str, entry_price: float,
-                     units: float, stop_loss: float, take_profit: float,
-                     signal_type: str = '', **kwargs) -> bool:
+                 units: float, stop_loss: float, take_profit: float,
+                 signal_type: str = '', **kwargs) -> bool:
+
         """Open a new position with stop loss and take profit"""
         # DEBUG
         logger.info(f"🔍 OPEN POSITION ATTEMPT:")
@@ -557,20 +572,25 @@ class TradingEngine:
                 'atr': kwargs.get('atr', 0.0),
                 'trailing_stop_active': False,
                 'entry_time': datetime.now().isoformat(),
-                'mode': self.trading_mode
+                'mode': self.trading_mode,
+                'candles_held': 0,
+                'last_candle_time': None,
             }
-            
-            # Fetch per‑pair trailing bounds
-            trailing_min = None
-            trailing_max = None
-            try:
-                from config_loader import get_pair_config
-                pair_cfg = get_pair_config(symbol)
-                trailing_min = pair_cfg.get('trailing_min_pct')
-                trailing_max = pair_cfg.get('trailing_max_pct')
-            except Exception:
-                pass
+            # Log the trade
+            log_trade('open',
+                    symbol=symbol,
+                    side=side,
+                    entry=entry_price,
+                    units=units,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit)
 
+            # Fetch per‑pair trailing bounds
+            pair_cfg = get_pair_config(symbol)
+            trailing_min = pair_cfg.get('trailing_min_pct')
+            trailing_max = pair_cfg.get('trailing_max_pct')
+
+            # Update the position dictionary with the bounds (even if None, for clarity)
             self.open_positions[symbol].update({
                 'trailing_min_pct': trailing_min,
                 'trailing_max_pct': trailing_max,

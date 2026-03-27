@@ -11,6 +11,8 @@ All short signals from strategy_tools come here instead of trade_engine.
 import logging
 import sys
 import os
+from modules.logger_config import log_trade
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from typing import Optional, Dict
@@ -49,7 +51,7 @@ def _paper_open(symbol: str, side: str, amount: float, entry_price: float,
                 trailing_min: Optional[float] = None,
                 trailing_max: Optional[float] = None) -> bool:
     """Simulate opening a futures position in paper mode."""
-    from modules.portfolio import open_futures_position
+    from modules.portfolio import open_futures_position, get_futures_positions, save_futures_positions
     fee = amount * entry_price * FUTURES_FEE
     net_entry = entry_price * (1 + FUTURES_FEE) if side == 'long' else entry_price * (1 - FUTURES_FEE)
 
@@ -66,6 +68,20 @@ def _paper_open(symbol: str, side: str, amount: float, entry_price: float,
         trailing_max_pct=trailing_max
     )
     if success:
+        # Add candle tracking fields
+        log_trade('open',
+              symbol=symbol,
+              side=side,
+              entry=net_entry,
+              units=amount,
+              stop_loss=stop_loss,
+              take_profit=take_profit)
+
+        pos = get_futures_positions()
+        if symbol in pos:
+            pos[symbol]['candles_held'] = 0
+            pos[symbol]['last_candle_time'] = None
+            save_futures_positions(pos)
         logger.info(f"📄 [PAPER] Futures {side.upper()} opened: {symbol} "
                     f"@ ${net_entry:.4f} x{leverage} | Fee: ${fee:.4f}")
     return success
@@ -78,6 +94,15 @@ def _paper_close(symbol: str, exit_price: float, reason: str = "") -> Optional[D
     if result:
         logger.info(f"📄 [PAPER] Futures closed: {symbol} @ ${exit_price:.4f} "
                     f"| PnL: ${result['pnl']:+.4f} ({result['pnl_pct']:+.2f}%)")
+        log_trade('close',
+              symbol=symbol,
+              side=result.get('side'),
+              entry=result.get('entry_price'),
+              exit=exit_price,
+              pnl=result.get('pnl'),
+              pnl_pct=result.get('pnl_pct'),
+              reason=reason)
+
     return result
 
 
@@ -116,8 +141,8 @@ def _paper_check_stops() -> list:
 
                 should_exit, reason = evaluate_exit(symbol, pos, current_price, df)
 
-                # Persist trailing stop update back to portfolio
-                if not should_exit and pos.get('trailing_stop_active'):
+                # Always save position after evaluation (if not closed) to persist candle counter and trailing stop updates
+                if not should_exit:
                     positions[symbol] = pos
                     save_futures_positions(positions)
 
@@ -186,7 +211,6 @@ def _live_open(symbol: str, side: str, amount: float,
 
         # Place market order
         if hasattr(client, 'new_order'):
-            # UMFutures
             order = client.new_order(
                 symbol=fsymbol,
                 side=binance_side,
@@ -194,7 +218,6 @@ def _live_open(symbol: str, side: str, amount: float,
                 quantity=round(amount, 6)
             )
         else:
-            # python-binance fallback
             order = client.futures_create_order(
                 symbol=fsymbol,
                 side=binance_side,
@@ -205,9 +228,8 @@ def _live_open(symbol: str, side: str, amount: float,
         logger.info(f"✅ [LIVE] Futures {side.upper()} order placed: {fsymbol} "
                     f"| Amount: {amount} | OrderID: {order.get('orderId')}")
 
-        # Record in portfolio
         fill_price = float(order.get('avgPrice') or order.get('price', 0))
-        from modules.portfolio import open_futures_position
+        from modules.portfolio import open_futures_position, get_futures_positions, save_futures_positions
         open_futures_position(
             symbol=symbol,
             side=side,
@@ -219,6 +241,12 @@ def _live_open(symbol: str, side: str, amount: float,
             trailing_min_pct=trailing_min_pct,
             trailing_max_pct=trailing_max_pct
         )
+        # Add candle tracking fields
+        pos = get_futures_positions()
+        if symbol in pos:
+            pos[symbol]['candles_held'] = 0
+            pos[symbol]['last_candle_time'] = None
+            save_futures_positions(pos)
         return True
 
     except Exception as e:

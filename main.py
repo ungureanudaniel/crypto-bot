@@ -2,6 +2,13 @@
 import sys
 import os
 import asyncio
+from modules.logger_config import init_logging
+from services.notifier import notifier  # Import your notifier
+
+# Initialize logging with Telegram support
+logger = init_logging(verbose=True, notifier=notifier)
+
+logger.info("🚀 Bot starting...")
 
 # -------------------------------------------------------------------
 # SETUP PATHS

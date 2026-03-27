@@ -2,6 +2,7 @@
 import json
 import sys
 import os
+from modules.logger_config import setup_logging
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
