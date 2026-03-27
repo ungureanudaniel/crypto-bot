@@ -1,10 +1,22 @@
-# services/telegram_bot.py - UPDATED FOR EXCHANGE-ONLY PORTFOLIO
 import json
 import sys
 import os
-from modules.logger_config import setup_logging
+
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Setup custom logging FIRST (before any other logging)
+from modules.logger_config import setup_logging, log_trade
+
+# Initialize logging with Telegram support
+try:
+    from services.notifier import notifier
+    setup_logging(verbose=True, notifier=notifier)
+    print("✅ Telegram bot logging initialized with Telegram support")
+except ImportError:
+    setup_logging(verbose=True)
+    print("⚠️ Notifier not available - Telegram logging disabled")
+
 import logging
 import signal
 import asyncio
@@ -14,6 +26,10 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from modules.trade_engine import trading_engine, save_positions_to_file
 import concurrent.futures
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
+
 
 _price_cache = {}
 _price_cache_time = 0
@@ -40,12 +56,6 @@ current_file_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_file_dir)
 sys.path.insert(0, project_root)
 sys.path.insert(0, os.path.join(project_root, 'modules'))
-
-# -------------------------------------------------------------------
-# LOGGING
-# -------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
 # FIX EVENT LOOP FOR WINDOWS
@@ -1196,6 +1206,16 @@ def run_telegram_bot():
         logger.error("❌ No Telegram token in config")
         return
     
+    # Initialize notifier with credentials
+    try:
+        from services.notifier import init_notifier
+        chat_id = CONFIG.get('telegram_chat_id')
+        if chat_id:
+            init_notifier(token, chat_id)
+            logger.info("✅ Telegram notifier initialized")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not initialize notifier: {e}")
+    
     logger.info("🤖 Starting Telegram bot...")
     
     # Setup signal handlers
@@ -1238,7 +1258,7 @@ def run_telegram_bot():
     logger.info("✅ Bot ready - starting polling...")
     
     try:
-        # Run polling - this will be responsive because scheduler is in another thread
+        # Run polling
         application.run_polling(
             drop_pending_updates=True,
             poll_interval=1.0,

@@ -5,15 +5,23 @@ import time
 import threading
 from datetime import datetime
 
-from modules.portfolio import get_portfolio_summary
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Setup custom logging FIRST
+from modules.logger_config import setup_logging
+
+# Initialize logging (no Telegram for scheduler, just file/console)
+setup_logging(verbose=False)
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
 # SETUP PATHS
 # -------------------------------------------------------------------
 current_file_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_file_dir)
-sys.path.insert(0, project_root)
-sys.path.insert(0, os.path.join(project_root, 'modules'))
 
 # Import modules
 try:
@@ -21,16 +29,6 @@ try:
     CONFIG = config.config
 except ImportError:
     CONFIG = {'trading_mode': 'paper', 'coins': ['BTC/USDC', 'ETH/USDC']}
-
-# -------------------------------------------------------------------
-# LOGGING
-# -------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
 # GLOBAL VARIABLES FOR THREAD CONTROL
@@ -53,14 +51,14 @@ def _import_modules():
         return None, None
 
 # -------------------------------------------------------------------
-# SCHEDULER JOBS - UNCHANGED
+# SCHEDULER JOBS
 # -------------------------------------------------------------------
 def check_stop_losses_and_take_profits():
     """
     JOB 1: Check stop losses - runs every minute.
     Checks both spot positions (via trade_engine) and futures positions (via futures_engine).
     """
-    trading_engine, data_feed = _import_modules()
+    trading_engine, _ = _import_modules()
 
     if not trading_engine:
         return
@@ -69,7 +67,7 @@ def check_stop_losses_and_take_profits():
     try:
         positions_closed = trading_engine.check_stop_losses()
         if positions_closed:
-            logger.info(f"✅ Spot: closed {positions_closed} position(s) via stop/take profit")
+            logger.info(f"✅ Spot: closed positions via stop/take profit")
     except Exception as e:
         logger.error(f"❌ Error in spot stop loss check: {e}")
 
@@ -86,13 +84,13 @@ def scan_for_trading_signals():
     """
     JOB 2: Scan for signals - runs every 5 minutes
     """
-    trading_engine, data_feed = _import_modules()
+    trading_engine, _ = _import_modules()
     
     if not trading_engine:
         return
     
     try:
-        current_positions = len(trading_engine.open_positions)
+        current_positions = len(trading_engine.open_positions) + len(trading_engine.open_futures_positions)
         
         if current_positions >= trading_engine.max_positions:
             logger.info(f"⏭️ At max positions ({current_positions}/{trading_engine.max_positions})")
@@ -117,7 +115,8 @@ def scan_for_trading_signals():
                         logger.warning(f"❌ Failed to execute {signal['symbol']}")
                     
                     # Check if we've reached max positions
-                    if len(trading_engine.open_positions) >= trading_engine.max_positions:
+                    current_positions = len(trading_engine.open_positions) + len(trading_engine.open_futures_positions)
+                    if current_positions >= trading_engine.max_positions:
                         logger.info(f"⏭️ Max positions reached ({trading_engine.max_positions}), stopping execution")
                         break
                 
@@ -133,32 +132,42 @@ def update_portfolio_summary():
     """
     JOB 3: Update portfolio summary - runs every hour
     """
-    trading_engine, data_feed = _import_modules()
+    trading_engine, _ = _import_modules()
     
     if not trading_engine:
         return
     
     try:
+        from modules.portfolio import get_portfolio_summary
         summary = get_portfolio_summary()
         
-        logger.info(f"💰 Portfolio: ${summary.get('total_value', 0):,.2f}")
-        logger.info(f"   Cash: ${summary.get('total_cash', 0):,.2f}")
-        logger.info(f"   Positions: {summary.get('positions_count', 0)}")
-        logger.info(f"   Return: {summary.get('total_return_pct', 0):+.1f}%")
-        logger.info(f"   Win Rate: {summary.get('win_rate', 0):.1f}%")
+        total_value = summary.get('total_value', 0)
+        total_cash = summary.get('total_cash', 0)
+        total_return = summary.get('total_return_pct', 0)
+        positions_count = summary.get('positions_count', 0)
+        win_rate = summary.get('win_rate', 0)
+        
+        logger.info(f"💰 Portfolio: ${total_value:,.2f}")
+        logger.info(f"   Cash: ${total_cash:,.2f}")
+        logger.info(f"   Positions: {positions_count}")
+        logger.info(f"   Return: {total_return:+.1f}%")
+        logger.info(f"   Win Rate: {win_rate:.1f}%")
         
         # Send daily notification at 20:00 (only fires when hourly job runs at :00)
         current_hour = datetime.now().hour
         if current_hour == 20:
             try:
                 from services.notifier import notifier
-                if hasattr(notifier, 'send_message_sync'):
+                if hasattr(notifier, 'send_message_sync') and notifier.token:
+                    # Format message for Telegram
+                    pnl_emoji = "🟢" if total_return >= 0 else "🔴"
                     notifier.send_message_sync(
-                        f"📊 Daily Portfolio Update\n"
-                        f"Value: ${summary.get('total_value', 0):,.2f}\n"
-                        f"Return: {summary.get('total_return_pct', 0):+.1f}%\n"
-                        f"Win Rate: {summary.get('win_rate', 0):.1f}%\n"
-                        f"Active: {summary.get('positions_count', 0)}"
+                        f"{pnl_emoji} <b>Daily Portfolio Update</b>\n\n"
+                        f"💰 Value: <code>${total_value:,.2f}</code>\n"
+                        f"📈 Return: <code>{total_return:+.1f}%</code>\n"
+                        f"💵 Cash: <code>${total_cash:,.2f}</code>\n"
+                        f"🎯 Win Rate: <code>{win_rate:.1f}%</code>\n"
+                        f"📊 Active: <code>{positions_count}</code>"
                     )
             except Exception as e:
                 logger.error(f"❌ Failed to send daily notification: {e}")
@@ -169,14 +178,16 @@ def check_pending_orders():
     """
     JOB 4: Check pending limit orders - runs every minute
     """
-    trading_engine, data_feed = _import_modules()
+    trading_engine, _ = _import_modules()
     
     if not trading_engine or not trading_engine.binance_client:
         return
     
     try:
         open_orders = []
-        for symbol in CONFIG.get('coins', ['BTC/USDC', 'ETH/USDC'])[:5]:  # Limit to 5 symbols to avoid rate limits
+        coins = CONFIG.get('coins', ['BTC/USDC', 'ETH/USDC'])
+        
+        for symbol in coins[:5]:  # Limit to 5 symbols to avoid rate limits
             try:
                 binance_symbol = symbol.replace('/', '')
                 orders = trading_engine.binance_client.get_open_orders(symbol=binance_symbol)
@@ -194,7 +205,7 @@ def health_check():
     """
     JOB 5: Health check - runs every 6 hours
     """
-    trading_engine, data_feed = _import_modules()
+    trading_engine, _ = _import_modules()
     
     if not trading_engine:
         return
@@ -206,24 +217,25 @@ def health_check():
         logger.error(f"❌ Error in health check: {e}")
         
     try:
+        from modules.portfolio import get_portfolio_summary
         summary = get_portfolio_summary()
         return_pct = summary.get('total_return_pct', 0)
         is_healthy = return_pct > -10
         
         if not is_healthy:
-            logger.warning("⚠️ Portfolio health check FAILED")
+            logger.warning(f"⚠️ Portfolio health check FAILED: {return_pct:+.1f}%")
             try:
                 from services.notifier import notifier
-                if hasattr(notifier, 'send_message_sync'):
+                if hasattr(notifier, 'send_message_sync') and notifier.token:
                     notifier.send_message_sync(
                         f"⚠️ <b>Health Alert</b>\n"
                         f"Portfolio may be at risk\n"
-                        f"Return: {return_pct:+.1f}%"
+                        f"Return: <code>{return_pct:+.1f}%</code>"
                     )
             except Exception as e:
                 logger.error(f"❌ Failed to send health alert: {e}")
         else:
-            logger.info("✅ Health check passed")
+            logger.debug("✅ Health check passed")
     except Exception as e:
         logger.error(f"❌ Error in health check: {e}")
 
@@ -231,12 +243,13 @@ def log_daily_performance():
     """
     JOB 6: Log daily performance at market close - runs once per day
     """
-    trading_engine, data_feed = _import_modules()
+    trading_engine, _ = _import_modules()
     
     if not trading_engine:
         return
     
     try:
+        from modules.portfolio import get_portfolio_summary
         summary = get_portfolio_summary()
         
         log_entry = {
@@ -362,6 +375,7 @@ def start_schedulers(bot_data=None):
 # -------------------------------------------------------------------
 # AUTO-START WHEN IMPORTED
 # -------------------------------------------------------------------
+# Note: Don't auto-start - let the main bot start it explicitly
 # start_scheduler()
 
 if __name__ == "__main__":
