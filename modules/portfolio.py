@@ -12,7 +12,8 @@ from typing import Dict, Optional, List, Mapping
 logger = logging.getLogger(__name__)
 
 # Anchor portfolio file to the module's directory, not the working directory
-PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio.json")
+PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "portfolio.json")
+
 
 # Lock to prevent race conditions from concurrent read-modify-write operations
 _portfolio_lock = threading.RLock()
