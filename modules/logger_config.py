@@ -39,7 +39,7 @@ trade_formatter = logging.Formatter(
 class TelegramHandler(logging.Handler):
     """Custom logging handler that sends messages to Telegram"""
     
-    def __init__(self, notifier, min_level=logging.INFO):
+    def __init__(self, notifier, min_level=logging.WARNING):
         super().__init__()
         self.notifier = notifier
         self.min_level = min_level
