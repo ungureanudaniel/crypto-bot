@@ -1,6 +1,7 @@
 import json
 import sys
 import os
+import threading
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,6 +27,8 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from modules.trade_engine import trading_engine, save_positions_to_file
 import concurrent.futures
+
+stop_event = None
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -1182,24 +1185,47 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stop the bot gracefully"""
+    if not update.message:
+        logger.warning("⚠️ Start command triggered without message object")
+        return
     await update.message.reply_text("🛑 Stopping bot...", parse_mode='Markdown')
     logger.info("🛑 Stop command received - shutting down gracefully")
+    
+    # Set stop event
+    global stop_event
+    if stop_event:
+        stop_event.set()
+    
+    # Stop scheduler
     try:
         from services.scheduler import stop_scheduler
         stop_scheduler()
     except Exception as e:
         logger.error(f"Error stopping scheduler: {e}")
-    if stop_event:
-        stop_event.set()
-    # Ask the application to stop polling
-    context.application.stop_running()
+    
+    # Stop the application (no await needed for these methods)
+    try:
+        # Stop the updater (synchronous)
+        if hasattr(context.application, 'updater') and context.application.updater:
+            context.application.updater.stop()
+        
+        # Stop the application
+        await context.application.stop()
+        
+        # Send final message
+        await update.message.reply_text("✅ Bot stopped", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+        await update.message.reply_text(f"⚠️ Error during shutdown: {str(e)[:100]}", parse_mode='Markdown')    
 
 # -------------------------------------------------------------------
 # MAIN FUNCTION
 # -------------------------------------------------------------------
-def run_telegram_bot():
-    """Run Telegram bot and scheduler in separate thread"""
+async def run_telegram_bot_async():
+    """Async version of the Telegram bot runner"""
     global stop_event
+    stop_event = threading.Event()  # Create the event
+
     
     token = CONFIG.get('telegram_token')
     if not token:
@@ -1258,23 +1284,60 @@ def run_telegram_bot():
     logger.info("✅ Bot ready - starting polling...")
     
     try:
-        # Run polling
-        application.run_polling(
+        # Run polling - this is async, so we await it
+        await application.initialize()
+        await application.start()
+        
+        # Start polling
+        await application.updater.start_polling(
             drop_pending_updates=True,
             poll_interval=1.0,
             timeout=40
         )
+        
+        # Keep running until stop event
+        while not stop_event or not stop_event.is_set():
+            await asyncio.sleep(1)
+            
     except (KeyboardInterrupt, SystemExit):
         logger.info("🛑 Bot stopped by user")
     except Exception as e:
         logger.error(f"❌ Polling error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     finally:
+        # Clean shutdown
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
         logger.info("👋 Goodbye!")
         try:
             from services.scheduler import stop_scheduler
             stop_scheduler()
         except:
             pass
+
+
+def run_telegram_bot():
+    """Synchronous wrapper to run the async bot"""
+    # Fix asyncio event loop for Windows
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    # Create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(run_telegram_bot_async())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Bot error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
     run_telegram_bot()

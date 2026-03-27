@@ -4,7 +4,7 @@ import asyncio
 import logging
 from telegram import Bot
 from telegram.error import TelegramError
-
+from typing import Optional
 # -------------------------------------------------------------------
 # SETUP PATHS AND LOGGING
 # -------------------------------------------------------------------
@@ -239,6 +239,18 @@ async def send_message(message: str):
 
 async def send_trade_notification(trade_data: dict):
     return await notifier.send_trade_notification(trade_data)
+
+def init_notifier(token: Optional[str] = None, chat_id: Optional[str] = None):
+    """Initialize the notifier with credentials (for backward compatibility)"""
+    global notifier
+    if token and chat_id:
+        # Update config
+        CONFIG['telegram_token'] = token
+        CONFIG['telegram_chat_id'] = chat_id
+        # Recreate notifier
+        notifier = Notifier()
+    return notifier
+
 
 
 if __name__ == "__main__":
