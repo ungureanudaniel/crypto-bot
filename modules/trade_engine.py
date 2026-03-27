@@ -217,7 +217,6 @@ class TradingEngine:
         
         logger.info(f"🚀 Trading Engine initialized for {self.trading_mode.upper()} mode")
         logger.info(f"📊 Monitoring {len(self.symbols)} symbols on {self.timeframe}")
-        logger.info(f"📈 Max positions: {self.max_positions}, Risk per trade: {self.risk_per_trade:.1%}")
         logger.info(f"📂 Loaded {len(self.open_positions)} existing positions")
     
     def check_drawdown(self) -> bool:
