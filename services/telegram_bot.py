@@ -1203,20 +1203,19 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error stopping scheduler: {e}")
     
-    # Stop the application (no await needed for these methods)
+    # Stop the application properly
     try:
-        # Stop the updater (synchronous)
-        if hasattr(context.application, 'updater') and context.application.updater:
-            context.application.updater.stop()
-        
-        # Stop the application
-        await context.application.stop()
-        
-        # Send final message
-        await update.message.reply_text("✅ Bot stopped", parse_mode='Markdown')
+        # Only stop if running
+        if context.application.running:
+            await context.application.stop()
+            logger.info("✅ Application stopped")
+        else:
+            logger.info("Application already stopped")
     except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
-        await update.message.reply_text(f"⚠️ Error during shutdown: {str(e)[:100]}", parse_mode='Markdown')    
+        logger.error(f"Error stopping application: {e}")
+    
+    # Send final message
+    await update.message.reply_text("✅ Bot stopped. Use /start to restart.", parse_mode='Markdown') 
 
 # -------------------------------------------------------------------
 # MAIN FUNCTION
@@ -1307,15 +1306,22 @@ async def run_telegram_bot_async():
         logger.error(traceback.format_exc())
     finally:
         # Clean shutdown
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+        try:
+            # Only stop if running
+            if application.running:
+                await application.stop()
+                logger.info("✅ Application stopped")
+            await application.shutdown()
+        except Exception as e:
+            logger.debug(f"Shutdown error (normal during stop): {e}")
+        
         logger.info("👋 Goodbye!")
         try:
             from services.scheduler import stop_scheduler
             stop_scheduler()
         except:
             pass
+
 
 
 def run_telegram_bot():
