@@ -154,6 +154,7 @@ class TradingEngine:
         self.max_positions = self.config.get('max_positions', 3)
         self.risk_per_trade = self.config.get('risk_per_trade', 0.02)
         self.circuit_breaker_triggered = False
+        self.last_trade_time_per_pair = {}
         self.circuit_breaker_time = None
         self.last_trade_time = 0
 
@@ -203,17 +204,12 @@ class TradingEngine:
         # Initial balance for return calculation (from first sync)
         self.initial_total_value = None
 
-        # Restore last_trade_time from portfolio to survive restarts
+        # Load per-pair trade timestamps
         try:
             portfolio = load_portfolio()
-            saved_time = portfolio.get('last_trade_time', 0)
-            self.last_trade_time = saved_time
-            if saved_time:
-                import time as _time
-                age = _time.time() - saved_time
-                logger.info(f"⏱️ Last trade was {age/60:.0f} min ago (restored from portfolio)")
-        except Exception:
-            self.last_trade_time = 0
+            self.last_trade_time_per_pair = portfolio.get('last_trade_time_per_pair', {})
+        except:
+            self.last_trade_time_per_pair = {}
         
         logger.info(f"🚀 Trading Engine initialized for {self.trading_mode.upper()} mode")
         logger.info(f"📊 Monitoring {len(self.symbols)} symbols on {self.timeframe}")
@@ -803,22 +799,24 @@ class TradingEngine:
         Scan all symbols for trading signals
         Returns list of signals found
         """
-        # ===== MINIMUM TIME BETWEEN TRADES =====
         import time
         current_time = time.time()
         min_time_between_trades = 3600  # 1 hour — matches trading timeframe
+        
+        # Initialize per-pair last trade times if not exists
+        if not hasattr(self, 'last_trade_time_per_pair'):
+            self.last_trade_time_per_pair = {}
+            # Try to load from portfolio
+            try:
+                portfolio = load_portfolio()
+                self.last_trade_time_per_pair = portfolio.get('last_trade_time_per_pair', {})
+            except:
+                pass
         
         # Check circuit breaker status
         if not self.check_drawdown():
             logger.info("⛔ Circuit breaker active – no new trades")
             return []
-
-        # Check if enough time has passed since last trade
-        if hasattr(self, 'last_trade_time') and self.last_trade_time:
-            time_since_last = current_time - self.last_trade_time
-            if time_since_last < min_time_between_trades:
-                logger.info(f"⏱️ Too soon since last trade ({time_since_last:.0f}s < {min_time_between_trades}s). Waiting...")
-                return []
         
         # Check if we can take new positions (spot + futures combined)
         current_positions = len(self.open_positions) + len(self.open_futures_positions)
@@ -842,6 +840,14 @@ class TradingEngine:
                 # Skip if already in spot or futures position for this symbol
                 if symbol in self.open_positions or symbol in self.open_futures_positions:
                     continue
+                
+                # ===== PER-PAIR COOLDOWN CHECK =====
+                last_trade_time = self.last_trade_time_per_pair.get(symbol, 0)
+                if last_trade_time > 0:
+                    time_since_last = current_time - last_trade_time
+                    if time_since_last < min_time_between_trades:
+                        logger.debug(f"⏱️ {symbol}: Too soon since last trade ({time_since_last:.0f}s < {min_time_between_trades}s). Skipping...")
+                        continue
                 
                 # Fetch data
                 df = self.data_feed.get_ohlcv(
@@ -901,16 +907,9 @@ class TradingEngine:
             except Exception as e:
                 logger.error(f"❌ Error scanning {symbol}: {e}")
         
-        # If we found signals, update the last trade time and persist it
-        if signals_found:
-            self.last_trade_time = current_time
-            try:
-                portfolio = load_portfolio()
-                portfolio['last_trade_time'] = current_time
-                save_portfolio(portfolio)
-            except Exception as e:
-                logger.warning(f"Could not persist last_trade_time: {e}")
-            logger.info(f"⏱️ Updated last trade time to {time.strftime('%H:%M:%S', time.localtime(current_time))}")
+        # If we found signals, update the per-pair last trade time when executed
+        # Note: We don't update here because signals might not be executed
+        # The update happens in execute_signal after successful execution
         
         logger.info(f"📊 Scan complete: Found {len(signals_found)} signals")
         return signals_found
@@ -1037,11 +1036,19 @@ class TradingEngine:
             )
 
             if result:
+                # Update last trade time for this pair
+                import time
+                self.last_trade_time_per_pair[symbol] = time.time()
+                
+                # Persist to portfolio
+                try:
+                    portfolio = load_portfolio()
+                    portfolio['last_trade_time_per_pair'] = self.last_trade_time_per_pair
+                    save_portfolio(portfolio)
+                except Exception as e:
+                    logger.warning(f"Could not persist per-pair trade time: {e}")
+                
                 logger.info(f"✅ Successfully opened spot position for {symbol}")
-            else:
-                logger.warning(f"❌ Failed to open spot position for {symbol}")
-
-            return result
             
         except Exception as e:
             logger.error(f"❌ Error executing signal: {e}")
