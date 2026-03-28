@@ -48,23 +48,28 @@ class TelegramHandler(logging.Handler):
     def emit(self, record):
         """Send log record to Telegram"""
         try:
-            # Format the message
             msg = self.format(record)
             
-            # Only send trade-related messages (OPEN/CLOSE) or errors
+            # Skip if no notifier or no token
+            if not self.notifier or not self.notifier.token:
+                return
+            
+            # Only send important messages
+            skip_patterns = ["Max positions:", "Monitoring", "Trading Engine initialized"]
+            if any(pattern in msg for pattern in skip_patterns):
+                return
+            
+            # Only send trade-related or error messages
             if ('OPEN|' in msg or 'CLOSE|' in msg or 
                 record.levelno >= logging.ERROR or
                 'TRADE' in msg.upper()):
                 
-                # Use async send if available, else sync
-                if hasattr(self.notifier, 'send_message_async'):
-                    import asyncio
-                    asyncio.create_task(self.notifier.send_message_async(msg))
-                else:
-                    self.notifier.send_message_sync(msg)
+                # Use sync method to avoid event loop issues
+                self.notifier.send_message_sync(msg)
+                
         except Exception as e:
-            # Don't let Telegram errors crash the logging
-            print(f"Telegram logging error: {e}")
+            # Silently ignore to avoid breaking the bot
+            pass
 
 
 def setup_logging(verbose: bool = True, notifier=None):
