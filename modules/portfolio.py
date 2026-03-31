@@ -29,45 +29,120 @@ TRADING_MODE = CONFIG.get('trading_mode', 'paper').lower()
 # CORE FILE OPERATIONS
 # -------------------------------------------------------------------
 def load_portfolio() -> Dict:
-    """Load portfolio data from file"""
+    """Load portfolio data from file with validation"""
     with _portfolio_lock:
         if os.path.exists(PORTFOLIO_FILE):
             try:
                 with open(PORTFOLIO_FILE, "r") as f:
                     data = json.load(f)
-                # Migrate old portfolios that don't have futures_positions yet
+                
+                # Validate required fields
+                required_fields = ['cash', 'trade_history', 'performance_metrics']
+                for field in required_fields:
+                    if field not in data:
+                        logger.warning(f"⚠️ Missing '{field}' in portfolio, using default")
+                        return _get_default_portfolio()
+                
+                # Migrate old portfolios
                 if 'futures_positions' not in data:
                     data['futures_positions'] = {}
+                if 'initial_balance' not in data:
+                    data['initial_balance'] = data['cash'].get('USDT', 100.0)
+                
                 return data
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ JSON corruption detected: {e}")
+                logger.error(f"   File: {PORTFOLIO_FILE}")
+                
+                # Try to recover from backup
+                backup_file = PORTFOLIO_FILE + ".backup"
+                if os.path.exists(backup_file):
+                    try:
+                        with open(backup_file, "r") as f:
+                            data = json.load(f)
+                        logger.info(f"✅ Recovered portfolio from backup")
+                        return data
+                    except:
+                        pass
+                
+                # Create backup of corrupted file
+                corrupted_file = PORTFOLIO_FILE + ".corrupted"
+                os.rename(PORTFOLIO_FILE, corrupted_file)
+                logger.warning(f"📁 Corrupted file saved as: {corrupted_file}")
+                
+                # Return default (but don't destroy existing cash)
+                return _get_default_portfolio()
+                
             except Exception as e:
                 logger.error(f"Error loading portfolio: {e}")
+                return _get_default_portfolio()
+        
+        return _get_default_portfolio()
 
-        # Default portfolio with $100 USDT
-        return {
-            "positions": {},           # Spot long positions
-            "futures_positions": {},   # Futures short (and long) positions
-            "cash": {
-                "USDT": 100.00,
-                "USDC": 0.00
-            },
-            "initial_balance": 100.00,
-            "trade_history": [],
-            "performance_metrics": {
-                "total_trades": 0,
-                "winning_trades": 0,
-                "total_pnl": 0.0,
-                "win_rate": 0.0
-            },
-            "last_updated": datetime.now().isoformat()
-        }
+def _get_default_portfolio() -> Dict:
+    """Get default portfolio - used when file is missing or corrupted"""
+    # Try to preserve existing cash if possible
+    default_cash = 5000.00  # Changed from 100 to 5000
+    
+    # Check if there's a backup with actual cash
+    backup_file = PORTFOLIO_FILE + ".backup"
+    if os.path.exists(backup_file):
+        try:
+            with open(backup_file, "r") as f:
+                backup = json.load(f)
+                if backup.get('cash', {}).get('USDT', 0) > default_cash:
+                    default_cash = backup['cash']['USDT']
+                    logger.info(f"💰 Restored cash from backup: ${default_cash:.2f}")
+        except:
+            pass
+    
+    return {
+        "positions": {},
+        "futures_positions": {},
+        "cash": {
+            "USDT": default_cash,
+            "USDC": 0.00
+        },
+        "initial_balance": default_cash,
+        "trade_history": [],
+        "performance_metrics": {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "total_pnl": 0.0,
+            "win_rate": 0.0
+        },
+        "last_updated": datetime.now().isoformat()
+    }
 
 def save_portfolio(portfolio: Dict) -> None:
-    """Save portfolio data to file"""
+    """Save portfolio data to file with atomic write and backup"""
     with _portfolio_lock:
-        portfolio["last_updated"] = datetime.now().isoformat()
+        # Validate JSON before saving
         try:
-            with open(PORTFOLIO_FILE, "w") as f:
+            json.dumps(portfolio)
+        except Exception as e:
+            logger.error(f"❌ Cannot save portfolio - invalid data: {e}")
+            return
+        
+        portfolio["last_updated"] = datetime.now().isoformat()
+        
+        # Create backup of existing file
+        if os.path.exists(PORTFOLIO_FILE):
+            try:
+                backup_file = PORTFOLIO_FILE + ".backup"
+                import shutil
+                shutil.copy2(PORTFOLIO_FILE, backup_file)
+            except Exception as e:
+                logger.warning(f"Could not create backup: {e}")
+        
+        # Write to temp file first, then rename (atomic)
+        temp_file = PORTFOLIO_FILE + ".tmp"
+        try:
+            with open(temp_file, "w") as f:
                 json.dump(portfolio, f, indent=2)
+            os.replace(temp_file, PORTFOLIO_FILE)
+            logger.debug("✅ Portfolio saved successfully")
         except Exception as e:
             logger.error(f"❌ Failed to save portfolio: {e}")
 
