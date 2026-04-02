@@ -2,6 +2,8 @@ import json
 import os
 import sys
 import threading
+import fcntl
+import time
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,56 +31,57 @@ TRADING_MODE = CONFIG.get('trading_mode', 'paper').lower()
 # CORE FILE OPERATIONS
 # -------------------------------------------------------------------
 def load_portfolio() -> Dict:
-    """Load portfolio data from file with validation"""
+    """Load portfolio data from file with retry on busy"""
     with _portfolio_lock:
         if os.path.exists(PORTFOLIO_FILE):
-            try:
-                with open(PORTFOLIO_FILE, "r") as f:
-                    data = json.load(f)
-                
-                # Validate required fields
-                required_fields = ['cash', 'trade_history', 'performance_metrics']
-                for field in required_fields:
-                    if field not in data:
-                        logger.warning(f"⚠️ Missing '{field}' in portfolio, using default")
-                        return _get_default_portfolio()
-                
-                # Migrate old portfolios
-                if 'futures_positions' not in data:
-                    data['futures_positions'] = {}
-                if 'initial_balance' not in data:
-                    data['initial_balance'] = data['cash'].get('USDT', 100.0)
-                
-                return data
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ JSON corruption detected: {e}")
-                logger.error(f"   File: {PORTFOLIO_FILE}")
-                
-                # Try to recover from backup
-                backup_file = PORTFOLIO_FILE + ".backup"
-                if os.path.exists(backup_file):
-                    try:
-                        with open(backup_file, "r") as f:
-                            data = json.load(f)
-                        logger.info(f"✅ Recovered portfolio from backup")
-                        return data
-                    except:
-                        pass
-                
-                # Create backup of corrupted file
-                corrupted_file = PORTFOLIO_FILE + ".corrupted"
-                os.rename(PORTFOLIO_FILE, corrupted_file)
-                logger.warning(f"📁 Corrupted file saved as: {corrupted_file}")
-                
-                # Return default (but don't destroy existing cash)
-                return _get_default_portfolio()
-                
-            except Exception as e:
-                logger.error(f"Error loading portfolio: {e}")
-                return _get_default_portfolio()
+            for attempt in range(3):
+                try:
+                    with open(PORTFOLIO_FILE, "r") as f:
+                        data = json.load(f)
+                    
+                    # Migrate old portfolios
+                    if 'futures_positions' not in data:
+                        data['futures_positions'] = {}
+                    if 'initial_balance' not in data:
+                        data['initial_balance'] = data['cash'].get('USDT', 100.0)
+                    
+                    return data
+                    
+                except OSError as e:
+                    if e.errno == 16:  # Device or resource busy
+                        logger.warning(f"⚠️ File busy, retry {attempt + 1}/3...")
+                        time.sleep(0.1)
+                        continue
+                    raise
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ JSON corruption detected: {e}")
+                    # Create backup of corrupted file
+                    corrupted_file = PORTFOLIO_FILE + ".corrupted"
+                    os.rename(PORTFOLIO_FILE, corrupted_file)
+                    logger.warning(f"📁 Corrupted file saved as: {corrupted_file}")
+                    break
+                except Exception as e:
+                    logger.error(f"Error loading portfolio: {e}")
+                    break
         
-        return _get_default_portfolio()
+        # Return default portfolio
+        return {
+            "positions": {},
+            "futures_positions": {},
+            "cash": {
+                "USDT": 5000.00,
+                "USDC": 0.00
+            },
+            "initial_balance": 5000.00,
+            "trade_history": [],
+            "performance_metrics": {
+                "total_trades": 0,
+                "winning_trades": 0,
+                "total_pnl": 0.0,
+                "win_rate": 0.0
+            },
+            "last_updated": datetime.now().isoformat()
+        }
 
 def _get_default_portfolio() -> Dict:
     """Get default portfolio - used when file is missing or corrupted"""
@@ -116,7 +119,7 @@ def _get_default_portfolio() -> Dict:
     }
 
 def save_portfolio(portfolio: Dict) -> None:
-    """Save portfolio data to file with atomic write and backup"""
+    """Save portfolio data to file with proper file locking"""
     with _portfolio_lock:
         # Validate JSON before saving
         try:
@@ -127,24 +130,31 @@ def save_portfolio(portfolio: Dict) -> None:
         
         portfolio["last_updated"] = datetime.now().isoformat()
         
-        # Create backup of existing file
-        if os.path.exists(PORTFOLIO_FILE):
-            try:
-                backup_file = PORTFOLIO_FILE + ".backup"
-                import shutil
-                shutil.copy2(PORTFOLIO_FILE, backup_file)
-            except Exception as e:
-                logger.warning(f"Could not create backup: {e}")
-        
-        # Write to temp file first, then rename (atomic)
+        # Write to temp file first
         temp_file = PORTFOLIO_FILE + ".tmp"
         try:
             with open(temp_file, "w") as f:
                 json.dump(portfolio, f, indent=2)
-            os.replace(temp_file, PORTFOLIO_FILE)
-            logger.debug("✅ Portfolio saved successfully")
+                f.flush()
+                os.fsync(f.fileno())  # Force write to disk
         except Exception as e:
-            logger.error(f"❌ Failed to save portfolio: {e}")
+            logger.error(f"❌ Failed to write temp file: {e}")
+            return
+        
+        # Try to rename with retry on busy
+        for attempt in range(5):  # Retry up to 5 times
+            try:
+                os.replace(temp_file, PORTFOLIO_FILE)
+                logger.debug("✅ Portfolio saved successfully")
+                return
+            except OSError as e:
+                if e.errno == 16:  # Device or resource busy
+                    logger.warning(f"⚠️ File busy, retry {attempt + 1}/5...")
+                    time.sleep(0.1)  # Wait 100ms
+                    continue
+                raise
+        
+        logger.error(f"❌ Failed to save portfolio after 5 attempts")
 
 # -------------------------------------------------------------------
 # POSITION MANAGEMENT (just data access, no logic)
