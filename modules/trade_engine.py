@@ -728,10 +728,12 @@ class TradingEngine:
             if self.trading_mode == 'paper':
                 logger.info(f"📄 PAPER MANUAL LIMIT: {side.upper()} {quantity:.6f} {symbol} at ${price:.2f}")
                 
-                # In paper mode, execute immediately (simulate fill)
+                internal_side = 'long' if side.lower() in ['buy', 'long'] else 'short'
+
+                # In paper mode, execute immediately
                 success = self.open_position(
                     symbol=symbol,
-                    side=side,
+                    side=internal_side,
                     entry_price=price,
                     units=quantity,
                     stop_loss=stop_loss,
