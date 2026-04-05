@@ -61,16 +61,13 @@ def save_positions_to_file(positions: Dict):
 def load_positions_from_file() -> Dict:
     """Load open positions from portfolio.json"""
     try:
-        print("🔍 DEBUG: load_positions_from_file called")  # Add this
-        positions = get_positions()
-    except Exception as e:
-        logger.error(f"❌ Failed to load positions: {e}")
-        print(f"❌ DEBUG: Error: {e}")  # Add this
+        print("🔍 DEBUG: load_positions_from_file called")
         positions = get_positions()
         logger.info(f"📂 Loaded {len(positions)} positions from portfolio.json")
         return positions
     except Exception as e:
         logger.error(f"❌ Failed to load positions: {e}")
+        print(f"❌ DEBUG: Error: {e}")
         return {}
 
 # -------------------------------------------------------------------
@@ -928,7 +925,7 @@ class TradingEngine:
         if not self.check_drawdown():
             logger.info("⛔ Circuit breaker active – signal not executed")
             return False
-    
+
         try:
             # DEBUG: Log the signal data
             logger.info(f"🔍 EXECUTE_SIGNAL called")
@@ -1057,6 +1054,7 @@ class TradingEngine:
                 
                 logger.info(f"✅ Successfully opened spot position for {symbol}")
             
+            return result
         except Exception as e:
             logger.error(f"❌ Error executing signal: {e}")
             import traceback
