@@ -21,6 +21,7 @@ Run from project root:
 
 import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
 import time
 import logging
@@ -34,9 +35,6 @@ from config_loader import get_pair_config
 # -------------------------------------------------------------------
 # Setup paths
 # -------------------------------------------------------------------
-project_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, project_root)
-sys.path.insert(0, os.path.join(project_root, 'modules'))
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -75,13 +73,8 @@ INITIAL_EQUITY = int(CONFIG.get('cash', 5000))
 # -------------------------------------------------------------------
 # Import strategy stack (same as production)
 # -------------------------------------------------------------------
-try:
-    from modules.strategy_tools import generate_trade_signal, calculate_position_units
-    from modules.exit_manager import evaluate_exit, _calculate_atr
-    HAS_STRATEGY = True
-except ImportError as e:
-    print(f"❌ Could not import strategy modules: {e}")
-    sys.exit(1)
+from modules.strategy_tools import generate_trade_signal, calculate_position_units
+from modules.exit_manager import evaluate_exit, _calculate_atr
 
 try:
     from modules.regime_switcher import predict_regime, train_model, model as regime_model

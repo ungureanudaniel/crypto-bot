@@ -51,14 +51,21 @@ client = get_binance_client()
 def save_positions_to_file(positions: Dict):
     """Save open positions to portfolio.json"""
     try:
+        print(f"🔍 DEBUG: save_positions_to_file called with {len(positions)} positions")  # Add this
         save_positions(positions)
         logger.debug(f"💾 Saved {len(positions)} positions to portfolio.json")
     except Exception as e:
         logger.error(f"❌ Failed to save positions: {e}")
+        print(f"❌ DEBUG: Error: {e}")  # Add this
 
 def load_positions_from_file() -> Dict:
     """Load open positions from portfolio.json"""
     try:
+        print("🔍 DEBUG: load_positions_from_file called")  # Add this
+        positions = get_positions()
+    except Exception as e:
+        logger.error(f"❌ Failed to load positions: {e}")
+        print(f"❌ DEBUG: Error: {e}")  # Add this
         positions = get_positions()
         logger.info(f"📂 Loaded {len(positions)} positions from portfolio.json")
         return positions
