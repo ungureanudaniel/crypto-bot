@@ -18,7 +18,7 @@ from modules.portfolio import (
 from config_loader import get_binance_client, get_futures_client, get_pair_config, config
 
 # ============================================================================
-# SETUP LOGGING (with optional Telegram support)
+# SETUP LOGGING
 # ============================================================================
 try:
     from services.notifier import notifier

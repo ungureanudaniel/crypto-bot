@@ -22,13 +22,10 @@ import logging
 import signal
 import asyncio
 import time
-from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from modules.trade_engine import trading_engine, save_positions_to_file
 import concurrent.futures
-
-stop_event = None
 
 # Get logger for this module
 logger = logging.getLogger(__name__)

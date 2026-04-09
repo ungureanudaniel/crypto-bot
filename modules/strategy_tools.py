@@ -434,9 +434,12 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             # Apply same trend multiplier to the per‑pair risk
             adjusted_risk = per_pair_risk * risk_multiplier
             logger.info(f"📌 Using per‑pair risk for {symbol}: {per_pair_risk:.2%} (global {risk_per_trade:.2%})")
+            # After calculating adjusted_risk, add:
+            logger.debug(f"Risk multiplier: {risk_multiplier:.2f}, Adjusted risk: {adjusted_risk:.2%}")
         else:
             adjusted_risk = risk_per_trade * risk_multiplier
-
+            # After calculating adjusted_risk, add:
+            logger.debug(f"Risk multiplier: {risk_multiplier:.2f}, Adjusted risk: {adjusted_risk:.2%}")
         logger.debug(f"Trend: {trend_dir} | strength={trend_strength:.2f}")
 
         # ATR for position sizing

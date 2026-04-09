@@ -245,13 +245,18 @@ def evaluate_exit(
 
     # --- Candle counter: increment if a new candle has formed ---
     if df is not None and not df.empty:
-        # Get latest candle timestamp
-        current_candle_time = df.index[-1]
+        # Use the timestamp column if available, otherwise use index
+        if 'timestamp' in df.columns:
+            current_candle_time = df['timestamp'].iloc[-1]
+        else:
+            # Fallback to index (less reliable)
+            current_candle_time = len(df) - 1
+        
         last_candle = position.get('last_candle_time')
         if last_candle is None or current_candle_time > last_candle:
-            # New candle
             position['candles_held'] = position.get('candles_held', 0) + 1
             position['last_candle_time'] = current_candle_time
+
 
     # Attach symbol to position for logging
     position.setdefault('symbol', symbol)

@@ -31,35 +31,32 @@ except ImportError:
     CONFIG = {'trading_mode': 'paper', 'coins': ['BTC/USDC', 'ETH/USDC']}
 
 # -------------------------------------------------------------------
+# GLOBAL TRADING ENGINE INSTANCE (SINGLETON)
+# -------------------------------------------------------------------
+try:
+    from modules.trade_engine import trading_engine
+    from modules.futures_engine import futures_engine
+    from modules.portfolio import get_portfolio_summary
+    logger.info("✅ Trading engine loaded once at scheduler startup")
+except ImportError as e:
+    logger.error(f"❌ Failed to import trading engine: {e}")
+    trading_engine = None
+    futures_engine = None
+
+# -------------------------------------------------------------------
 # GLOBAL VARIABLES FOR THREAD CONTROL
 # -------------------------------------------------------------------
 _scheduler_thread = None
 _stop_event = threading.Event()
 
 # -------------------------------------------------------------------
-# HELPER FUNCTIONS WITH PROPER IMPORTS
-# -------------------------------------------------------------------
-def _import_modules():
-    """Import required modules with proper error handling"""
-    try:
-        from modules.trade_engine import trading_engine
-        from modules.data_feed import data_feed
-        return trading_engine, data_feed
-    except ImportError as e:
-        logger.error(f"Failed to import modules: {e}")
-        logger.error(f"Python path: {sys.path}")
-        return None, None
-
-# -------------------------------------------------------------------
-# SCHEDULER JOBS
+# SCHEDULER JOBS (using the global trading_engine instance)
 # -------------------------------------------------------------------
 def check_stop_losses_and_take_profits():
     """
     JOB 1: Check stop losses - runs every minute.
-    Checks both spot positions (via trade_engine) and futures positions (via futures_engine).
     """
-    trading_engine, _ = _import_modules()
-
+    global trading_engine
     if not trading_engine:
         return
 
@@ -73,10 +70,10 @@ def check_stop_losses_and_take_profits():
 
     # --- Futures stop losses ---
     try:
-        from modules.futures_engine import futures_engine
-        futures_closed = futures_engine.check_stops()
-        if futures_closed:
-            logger.info(f"✅ Futures: closed {len(futures_closed)} position(s): {futures_closed}")
+        if futures_engine:
+            futures_closed = futures_engine.check_stops()
+            if futures_closed:
+                logger.info(f"✅ Futures: closed {len(futures_closed)} position(s): {futures_closed}")
     except Exception as e:
         logger.error(f"❌ Error in futures stop loss check: {e}")
 
@@ -84,8 +81,7 @@ def scan_for_trading_signals():
     """
     JOB 2: Scan for signals - runs every 5 minutes
     """
-    trading_engine, _ = _import_modules()
-    
+    global trading_engine
     if not trading_engine:
         return
     
@@ -106,7 +102,6 @@ def scan_for_trading_signals():
                 failed = 0
                 
                 for signal in signals:
-                    # Execute the signal - execute_signal now handles balance checks
                     if trading_engine.execute_signal(signal):
                         executed += 1
                         logger.info(f"✅ Executed {signal['symbol']}")
@@ -114,7 +109,6 @@ def scan_for_trading_signals():
                         failed += 1
                         logger.warning(f"❌ Failed to execute {signal['symbol']}")
                     
-                    # Check if we've reached max positions
                     current_positions = len(trading_engine.open_positions) + len(trading_engine.open_futures_positions)
                     if current_positions >= trading_engine.max_positions:
                         logger.info(f"⏭️ Max positions reached ({trading_engine.max_positions}), stopping execution")
@@ -132,13 +126,7 @@ def update_portfolio_summary():
     """
     JOB 3: Update portfolio summary - runs every hour
     """
-    trading_engine, _ = _import_modules()
-    
-    if not trading_engine:
-        return
-    
     try:
-        from modules.portfolio import get_portfolio_summary
         summary = get_portfolio_summary()
         
         total_value = summary.get('total_value', 0)
@@ -153,13 +141,12 @@ def update_portfolio_summary():
         logger.info(f"   Return: {total_return:+.1f}%")
         logger.info(f"   Win Rate: {win_rate:.1f}%")
         
-        # Send daily notification at 20:00 (only fires when hourly job runs at :00)
+        # Send daily notification at 20:00
         current_hour = datetime.now().hour
         if current_hour == 20:
             try:
                 from services.notifier import notifier
                 if hasattr(notifier, 'send_message_sync') and notifier.token:
-                    # Format message for Telegram
                     pnl_emoji = "🟢" if total_return >= 0 else "🔴"
                     notifier.send_message_sync(
                         f"{pnl_emoji} <b>Daily Portfolio Update</b>\n\n"
@@ -178,8 +165,7 @@ def check_pending_orders():
     """
     JOB 4: Check pending limit orders - runs every minute
     """
-    trading_engine, _ = _import_modules()
-    
+    global trading_engine
     if not trading_engine or not trading_engine.binance_client:
         return
     
@@ -187,12 +173,12 @@ def check_pending_orders():
         open_orders = []
         coins = CONFIG.get('coins', ['BTC/USDC', 'ETH/USDC'])
         
-        for symbol in coins[:5]:  # Limit to 5 symbols to avoid rate limits
+        for symbol in coins[:5]:
             try:
                 binance_symbol = symbol.replace('/', '')
                 orders = trading_engine.binance_client.get_open_orders(symbol=binance_symbol)
                 open_orders.extend(orders)
-                time.sleep(0.1)  # Small delay to avoid rate limits
+                time.sleep(0.1)
             except Exception as e:
                 logger.debug(f"Error fetching orders for {symbol}: {e}")
         
@@ -205,19 +191,16 @@ def health_check():
     """
     JOB 5: Health check - runs every 6 hours
     """
-    trading_engine, _ = _import_modules()
-    
+    global trading_engine
     if not trading_engine:
         return
     
     try:
-        # This will log and activate circuit breaker if needed
         trading_engine.check_drawdown()
     except Exception as e:
         logger.error(f"❌ Error in health check: {e}")
         
     try:
-        from modules.portfolio import get_portfolio_summary
         summary = get_portfolio_summary()
         return_pct = summary.get('total_return_pct', 0)
         is_healthy = return_pct > -10
@@ -243,13 +226,7 @@ def log_daily_performance():
     """
     JOB 6: Log daily performance at market close - runs once per day
     """
-    trading_engine, _ = _import_modules()
-    
-    if not trading_engine:
-        return
-    
     try:
-        from modules.portfolio import get_portfolio_summary
         summary = get_portfolio_summary()
         
         log_entry = {
@@ -263,14 +240,11 @@ def log_daily_performance():
         }
         
         log_file = os.path.join(project_root, 'daily_performance.log')
-        try:
-            with open(log_file, 'a') as f:
-                f.write(f"{log_entry['date']} {log_entry['time']} | "
-                       f"Value: ${log_entry['portfolio_value']:,.2f} | "
-                       f"Return: {log_entry['return_pct']:+.1f}% | "
-                       f"Win Rate: {log_entry['win_rate']:.1f}%\n")
-        except Exception as e:
-            logger.error(f"Failed to write daily log: {e}")
+        with open(log_file, 'a') as f:
+            f.write(f"{log_entry['date']} {log_entry['time']} | "
+                   f"Value: ${log_entry['portfolio_value']:,.2f} | "
+                   f"Return: {log_entry['return_pct']:+.1f}% | "
+                   f"Win Rate: {log_entry['win_rate']:.1f}%\n")
         
         logger.info(f"📊 Daily snapshot saved")
     except Exception as e:
@@ -296,33 +270,27 @@ def _scheduler_loop():
             current_hour = now.hour
             current_day = now.day
             
-            # Run every minute
             if current_minute != last_minute:
                 check_stop_losses_and_take_profits()
                 check_pending_orders()
                 last_minute = current_minute
             
-            # Run every 5 minutes
             if current_minute % 5 == 0 and current_minute != last_5min:
                 scan_for_trading_signals()
                 last_5min = current_minute
             
-            # Run every hour
             if current_minute == 0 and current_hour != last_hour:
                 update_portfolio_summary()
                 last_hour = current_hour
             
-            # Run every 6 hours
             if current_hour % 6 == 0 and current_minute == 0 and current_hour != last_6hour:
                 health_check()
                 last_6hour = current_hour
             
-            # Run once per day (at 23:59)
             if current_hour == 23 and current_minute == 59 and current_day != last_day:
                 log_daily_performance()
                 last_day = current_day
             
-            # Sleep to avoid CPU spinning
             time.sleep(1)
             
         except Exception as e:
@@ -332,7 +300,7 @@ def _scheduler_loop():
     logger.info("🛑 Scheduler thread stopped")
 
 # -------------------------------------------------------------------
-# PUBLIC FUNCTIONS TO CONTROL THE SCHEDULER THREAD
+# PUBLIC FUNCTIONS
 # -------------------------------------------------------------------
 def start_scheduler():
     """Start the scheduler in a separate thread"""
@@ -375,34 +343,14 @@ def start_schedulers(bot_data=None):
 # -------------------------------------------------------------------
 # AUTO-START WHEN IMPORTED
 # -------------------------------------------------------------------
-# Note: Don't auto-start - let the main bot start it explicitly
-# start_scheduler()
-
 if __name__ == "__main__":
     print(f"🔧 Project root: {project_root}")
     print(f"🔧 Trading mode: {CONFIG.get('trading_mode', 'unknown')}")
     
-    # Test imports
-    try:
-        from modules.trade_engine import trading_engine
-        print(f"✅ Successfully imported trade_engine")
+    if trading_engine:
+        print(f"✅ Trading engine loaded")
         print(f"   Mode: {trading_engine.trading_mode}")
-        print(f"   Client available: {'Yes' if trading_engine.binance_client else 'No'}")
-    except ImportError as e:
-        print(f"❌ Failed to import: {e}")
     
-    # Test jobs
-    print("\n🔄 Testing scheduler jobs...")
-    jobs = get_all_jobs()
-    
-    for job_name, job_func in jobs.items():
-        print(f"\n📋 Testing {job_name}...")
-        try:
-            job_func()
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-    
-    # Test thread
     print("\n🧪 Testing scheduler thread...")
     start_scheduler()
     
