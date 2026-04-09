@@ -141,20 +141,21 @@ def save_portfolio(portfolio: Dict) -> None:
             logger.error(f"❌ Failed to write temp file: {e}")
             return
         
-        # Try to rename with retry on busy
-        for attempt in range(5):  # Retry up to 5 times
+        # Try to rename with retry on busy (increasing wait times)
+        for attempt in range(10):  # Increased to 10 attempts
             try:
                 os.replace(temp_file, PORTFOLIO_FILE)
                 logger.debug("✅ Portfolio saved successfully")
                 return
             except OSError as e:
                 if e.errno == 16:  # Device or resource busy
-                    logger.warning(f"⚠️ File busy, retry {attempt + 1}/5...")
-                    time.sleep(0.1)  # Wait 100ms
+                    wait_time = 0.2 * (attempt + 1)  # 0.2s, 0.4s, 0.6s...
+                    logger.warning(f"⚠️ File busy, retry {attempt + 1}/10 in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
                     continue
                 raise
         
-        logger.error(f"❌ Failed to save portfolio after 5 attempts")
+        logger.error(f"❌ Failed to save portfolio after 10 attempts")
 
 # -------------------------------------------------------------------
 # POSITION MANAGEMENT (just data access, no logic)
