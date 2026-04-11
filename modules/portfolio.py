@@ -9,7 +9,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
 from datetime import datetime
-from typing import Dict, Optional, List, Mapping
+from typing import Dict, Optional, List, Mapping, Any
 
 logger = logging.getLogger(__name__)
 
@@ -118,32 +118,39 @@ def _get_default_portfolio() -> Dict:
         "last_updated": datetime.now().isoformat()
     }
 
+def _make_serializable(obj: Any) -> Any:
+    """Recursively convert pandas Timestamp and other non‑serializable types."""
+    if isinstance(obj, (datetime)):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: _make_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_serializable(item) for item in obj]
+    return obj
+
 def save_portfolio(portfolio: Dict) -> None:
-    """Save portfolio data directly to file with retry on failure"""
+    """Save portfolio data after converting non‑serializable objects."""
     with _portfolio_lock:
-        # Validate JSON before saving
-        try:
-            json.dumps(portfolio)
-        except Exception as e:
-            logger.error(f"❌ Cannot save portfolio - invalid data: {e}")
-            return
+        # Make a deep copy and convert all Timestamps to strings
+        clean_portfolio = _make_serializable(portfolio)
         
-        portfolio["last_updated"] = datetime.now().isoformat()
+        # No need to pre-validate with json.dumps – we'll write directly
+        clean_portfolio["last_updated"] = datetime.now().isoformat()
         
         for attempt in range(5):
             try:
                 with open(PORTFOLIO_FILE, "w") as f:
-                    json.dump(portfolio, f, indent=2)
+                    json.dump(clean_portfolio, f, indent=2)
                     f.flush()
                     os.fsync(f.fileno())
                 logger.debug("✅ Portfolio saved successfully")
-                time.sleep(0.05)  # let filesystem settle
+                time.sleep(0.05)
                 return
             except OSError as e:
                 if e.errno == 16:  # Device or resource busy
-                    wait_time = 0.2 * (attempt + 1)
-                    logger.warning(f"⚠️ File busy, retry {attempt+1}/5 in {wait_time:.1f}s")
-                    time.sleep(wait_time)
+                    wait = 0.2 * (attempt + 1)
+                    logger.warning(f"⚠️ File busy, retry {attempt+1}/5 in {wait:.1f}s")
+                    time.sleep(wait)
                     continue
                 raise
             except Exception as e:
