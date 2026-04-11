@@ -119,9 +119,9 @@ def _get_default_portfolio() -> Dict:
     }
 
 def save_portfolio(portfolio: Dict) -> None:
-    """Save portfolio data to file with retry on failure (no temp file)"""
+    """Save portfolio data directly to file with retry on failure"""
     with _portfolio_lock:
-        # Validate JSON
+        # Validate JSON before saving
         try:
             json.dumps(portfolio)
         except Exception as e:
@@ -137,8 +137,7 @@ def save_portfolio(portfolio: Dict) -> None:
                     f.flush()
                     os.fsync(f.fileno())
                 logger.debug("✅ Portfolio saved successfully")
-                # Small delay to allow the file system to settle
-                time.sleep(0.05)
+                time.sleep(0.05)  # let filesystem settle
                 return
             except OSError as e:
                 if e.errno == 16:  # Device or resource busy
