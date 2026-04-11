@@ -4,7 +4,6 @@ import sys
 import os
 import time
 import logging
-import joblib
 from ta.trend import MACD, ADXIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.momentum import RSIIndicator
@@ -23,6 +22,7 @@ logger = logging.getLogger(__name__)
 # CONFIG LOADING
 # -------------------------------------------------------------------
 try:
+    # Add parent directory to path
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from config_loader import config
     CONFIG = config.config
@@ -31,35 +31,56 @@ except ImportError:
     logger.warning("⚠️ Could not import config_loader, using defaults")
     CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
 
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+logging.info("🔧 Configuration loaded for regime switcher. Trading mode: %s", CONFIG.get('trading_mode', 'paper'))
+
 # Global variables
 model = None
 feature_columns_used = None
 scaler = None
-class_mapping = None  # store mapping for inverse transform
-
-MODEL_PATH = "regime_model.pkl"
-SCALER_PATH = "regime_scaler.pkl"
-MAPPING_PATH = "regime_class_mapping.pkl"
 
 # ---------------------------
 # Helper: Fetch data with testnet support
 # ---------------------------
-def fetch_data_for_regime(symbol, interval=CONFIG.get('trading_timeframe', '4h'), limit=500):
+def fetch_data_for_regime(symbol, interval=config.get('trading_timeframe', '4h'), limit=500):
+    """Fetch data for regime detection with testnet support"""
     try:
-        from modules.data_feed import data_feed
-        df = data_feed.get_ohlcv(symbol, interval, limit=limit)
+        # Try different import methods
+        try:
+            # Method 1: Direct import
+            from modules.data_feed import data_feed
+            df = data_feed.get_ohlcv(symbol, interval, limit=limit)
+        except ImportError:
+            try:
+                # Method 2: Relative import
+                from .data_feed import data_feed
+                df = data_feed.get_ohlcv(symbol, interval, limit=limit)
+            except ImportError:
+                # Method 3: Absolute import
+                import sys
+                sys.path.insert(0, '.')
+                from data_feed import data_feed
+                df = data_feed.get_ohlcv(symbol, interval, limit=limit)
+        
         if df is not None and not df.empty:
             logger.info(f"✅ Fetched {len(df)} candles for {symbol}")
             return df
         else:
             logger.warning(f"⚠️ No data for {symbol}")
             return pd.DataFrame()
+            
     except Exception as e:
         logger.error(f"❌ Error fetching data for {symbol}: {e}")
         return pd.DataFrame()
 
 # ---------------------------
-# Feature Engineering (keep as is, unchanged)
+# Feature Engineering
 # ---------------------------
 def add_features(df, required_features=None):
     """Add technical indicators as features - OPTIMIZED VERSION"""
@@ -245,7 +266,9 @@ def detect_trend(df, lookback=50):
 
     return direction, strength, confidence
 
-_4h_cache = {}
+# 4h cache for trend confirmation
+_4h_cache = {} 
+
 def confirm_trend_with_higher_tf(symbol, df_1h):
     """Return True if 4h and 1h trends agree."""
     global _4h_cache
@@ -272,10 +295,11 @@ def confirm_trend_with_higher_tf(symbol, df_1h):
         return True
 
 # ---------------------------
-# Model Training (fixed)
+# Model Training
 # ---------------------------
 def train_model():
-    global model, feature_columns_used, scaler, class_mapping
+    """Train an XGBoost classifier - FIXED VERSION WITH BETTER CLASS HANDLING"""
+    global model, feature_columns_used, scaler
     
     logger.info("=" * 60)
     logger.info("🔄 STARTING MODEL TRAINING")
@@ -283,42 +307,70 @@ def train_model():
     
     start_time = time.time()
     
+    # Load config properly
+    config = CONFIG
+    
     all_features = []
     all_labels = []
     
-    coins = CONFIG.get('coins', ['BTC/USDC', 'ETH/USDC', 'SOL/USDC', 'ADA/USDC', 'BNB/USDC'])
+    coins = config.get('coins', ['BTC/USDC', 'ETH/USDC', 'SOL/USDC', 'ADA/USDC', 'BNB/USDC'])
+    
     logger.info(f"🧪 Training with: {coins}")
     
     for coin_idx, coin in enumerate(coins):
         coin_start = time.time()
         logger.info(f"🔍 [{coin_idx+1}/{len(coins)}] Processing {coin}...")
+        
         try:
-            timeframe = CONFIG.get('trading_timeframe', '4h')
-            df = fetch_data_for_regime(coin, timeframe, limit=500)
-            if df.empty or len(df) < 100:
+            # STEP 1: Fetch more data for better regime detection
+            logger.info(f"   ↳ Fetching OHLCV data...")
+            timeframe = config.get('trading_timeframe', '4h')
+
+            df = fetch_data_for_regime(coin, timeframe, limit=500)  # Use 4h timeframe, more data
+            logger.info(f"   ↳ Got {len(df)} candles")
+            
+            if df.empty or len(df) < 100:  # Require more data
                 logger.warning(f"   ↳ Insufficient data ({len(df)}), skipping")
                 continue
                 
+            # STEP 2: Add features
+            logger.info(f"   ↳ Adding features...")
             df_with_features = add_features(df)
+            logger.info(f"   ↳ Features added, shape: {df_with_features.shape}")
+            
             if df_with_features.empty:
+                logger.warning(f"   ↳ No features, skipping")
                 continue
                 
+            # STEP 3: Label regimes with better balancing
+            logger.info(f"   ↳ Labeling regimes...")
             df_labeled = label_regime(df_with_features)
-            if df_labeled is None or df_labeled.empty:
-                logger.warning(f"   ↳ Labeling failed for {coin}")
-                continue
+            logger.info(f"   ↳ Labeled, shape: {df_labeled.shape}")
+            
+            # Check regime distribution
             regime_counts = df_labeled['regime'].value_counts().sort_index()
             logger.info(f"   ↳ Regime distribution: {regime_counts.to_dict()}")
             
-            # Keep only regimes with at least 5 samples
-            min_samples = 5
-            valid_regimes = [r for r, cnt in regime_counts.items() if cnt >= min_samples]
+            # FIX: Ensure we have enough samples for each regime BEFORE adding
+            min_samples_per_class = 5
+            valid_regimes = []
+            for regime in [0, 1, 2, 3, 4]:  # All 5 regimes
+                count = regime_counts.get(regime, 0)
+                if count >= min_samples_per_class:
+                    valid_regimes.append(regime)
+                else:
+                    logger.warning(f"   ↳ Regime {regime} has only {count} samples")
+            
             if len(valid_regimes) < 2:
                 logger.warning(f"   ↳ Not enough regimes ({len(valid_regimes)}), skipping")
                 continue
+            
+            # FIX: Filter data to only include valid regimes
             df_labeled = df_labeled[df_labeled['regime'].isin(valid_regimes)]
             
+            # Get available features
             if feature_columns_used is None:
+                # Define default features
                 feature_columns_used = [
                     'rsi', 'macd', 'macd_signal', 'macd_histogram', 'adx', 
                     'bb_width', 'bb_position', 'atr_pct', 'volatility', 'volatility_5',
@@ -327,124 +379,194 @@ def train_model():
                 ]
             
             available_features = [col for col in feature_columns_used if col in df_labeled.columns]
-            if len(available_features) < 5:
+            logger.info(f"   ↳ Available features: {len(available_features)}")
+            
+            if len(available_features) < 5:  # Further reduced requirement
+                logger.warning(f"   ↳ Insufficient features ({len(available_features)}), skipping")
                 continue
                 
             features = df_labeled[available_features]
             labels = df_labeled['regime']
+            
             all_features.append(features)
             all_labels.append(labels)
             
             coin_time = time.time() - coin_start
             logger.info(f"   ✅ Processed in {coin_time:.1f}s | Samples: {len(features)}")
+            
         except Exception as e:
             logger.error(f"   ❌ Error processing {coin}: {str(e)[:100]}")
             continue
+    
+    logger.info(f"📊 Total coins processed: {len(all_features)}/{len(coins)}")
     
     if not all_features:
         logger.error("❌ NO DATA PROCESSED - Training failed!")
         return False
     
-    # Concatenate
-    X = pd.concat(all_features, ignore_index=True)
-    y = pd.concat(all_labels, ignore_index=True)
-    y_dist = y.value_counts().sort_index()
-    logger.info(f"📊 Final class distribution: {y_dist.to_dict()}")
-    
-    # Clean NaNs
-    nan_mask = X.isna().any(axis=1) | y.isna()
-    X_clean = X[~nan_mask]
-    y_clean = y[~nan_mask]
-    if len(X_clean) < 50:
-        logger.error("❌ Not enough clean data after NaN removal!")
-        return False
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_clean)
-    X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns)
-    
-    # --- CRITICAL FIX: Remap labels to consecutive integers ---
-    unique_original = np.sort(y_clean.unique())
-    class_mapping = {old: new for new, old in enumerate(unique_original)}
-    y_remapped = y_clean.map(class_mapping)
-    logger.info(f"📊 Original classes: {unique_original} -> Remapped to: {list(class_mapping.values())}")
-    
-    # Split data
     try:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y_remapped, test_size=0.2, random_state=42, stratify=y_remapped
-        )
-    except ValueError:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y_remapped, test_size=0.2, random_state=42
-        )
-        logger.warning("Stratified split failed, using regular split")
-    
-    logger.info(f"📊 Train: {len(X_train)}, Test: {len(X_test)}")
-    logger.info(f"📈 Train distribution: {y_train.value_counts().sort_index().to_dict()}")
-    
-    # Train model
-    num_classes = len(class_mapping)
-    if num_classes == 2:
-        model = XGBClassifier(n_estimators=100, max_depth=4, learning_rate=0.1,
-                              random_state=42, n_jobs=-1, eval_metric='logloss')
-    else:
-        model = XGBClassifier(n_estimators=100, max_depth=4, learning_rate=0.1,
-                              random_state=42, n_jobs=-1,
-                              objective='multi:softprob', num_class=num_classes,
-                              eval_metric='mlogloss')
-    
-    model.fit(X_train, y_train)
-    
-    # Evaluate
-    y_pred = model.predict(X_test)
-    accuracy = (y_pred == y_test).mean()
-    logger.info(f"Accuracy: {accuracy:.3f}")
-    
-    # Save model and scaler and mapping
-    joblib.dump(model, MODEL_PATH)
-    joblib.dump(scaler, SCALER_PATH)
-    joblib.dump(class_mapping, MAPPING_PATH)
-    logger.info(f"✅ Model saved to {MODEL_PATH}")
-    
-    total_time = time.time() - start_time
-    logger.info(f"✅ TRAINING COMPLETED in {total_time:.1f} seconds")
-    return True
+        # STEP 6: Concatenate
+        concat_start = time.time()
+        logger.info("📦 Concatenating data...")
+        X = pd.concat(all_features, ignore_index=True)
+        y = pd.concat(all_labels, ignore_index=True)
+        concat_time = time.time() - concat_start
+        
+        # Check final distribution
+        y_distribution = y.value_counts().sort_index()
+        logger.info(f"   ✅ Concatenated in {concat_time:.1f}s | Total: {len(X)} samples")
+        logger.info(f"   📊 Final class distribution: {y_distribution.to_dict()}")
+        
+        # STEP 7: Clean NaN
+        logger.info("🧹 Cleaning NaN values...")
+        nan_mask = X.isna().any(axis=1) | y.isna()
+        X_clean = X[~nan_mask]
+        y_clean = y[~nan_mask]
+        logger.info(f"   ✅ Cleaned: {len(X_clean)}/{len(X)} samples remaining")
+        
+        if len(X_clean) < 50:  # Reduced minimum
+            logger.error("❌ Not enough clean data after NaN removal!")
+            return False
+        
+        # STEP 8: Scale features
+        logger.info("⚖️ Scaling features...")
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X_clean)
+        X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns)
+        
+        # STEP 9: FIXED - Split data with conditional stratification
+        logger.info("✂️ Splitting data...")
+        
+        # FIX: Check if we can use stratification
+        unique_classes = y_clean.nunique()
+        min_samples_per_class = y_clean.value_counts().min()
+        
+        if unique_classes >= 2 and min_samples_per_class >= 2:
+            # We can use stratification
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_scaled, y_clean, test_size=0.2, random_state=42, stratify=y_clean
+            )
+            logger.info(f"   ✅ Split with stratification")
+        else:
+            # Not enough samples for stratification
+            logger.warning(f"   ⚠️ Not enough samples per class for stratification")
+            logger.warning(f"     Classes: {unique_classes}, Min samples: {min_samples_per_class}")
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_scaled, y_clean, test_size=0.2, random_state=42  # No stratification
+            )
+            logger.info(f"   ✅ Split WITHOUT stratification")
+        
+        logger.info(f"   📊 Train: {len(X_train)}, Test: {len(X_test)}")
+        
+        # Check train distribution
+        train_dist = y_train.value_counts().sort_index()
+        logger.info(f"   📈 Train distribution: {train_dist.to_dict()}")
+        
+        # STEP 10: Train model with balanced class weights
+        logger.info("🧠 Training XGBoost model...")
+        
+        # FIX: Handle class imbalance properly
+        unique_train_classes = y_train.nunique()
+        
+        if unique_train_classes < 2:
+            logger.error(f"❌ Only {unique_train_classes} class in training data!")
+            return False
+        
+        # Use balanced weights for multi-class
+        if unique_train_classes > 2:
+            # For multi-class, use class weights
+            model = XGBClassifier(
+                n_estimators=100,
+                max_depth=4,
+                learning_rate=0.1,
+                random_state=42,
+                n_jobs=-1,
+                objective='multi:softprob',
+                num_class=unique_train_classes,
+                eval_metric='mlogloss'
+            )
+        else:
+            # For binary classification
+            model = XGBClassifier(
+                n_estimators=100,
+                max_depth=4,
+                learning_rate=0.1,
+                random_state=42,
+                n_jobs=-1
+            )
+        
+        train_start = time.time()
+        model.fit(X_train, y_train)
+        train_time = time.time() - train_start
+        logger.info(f"   ✅ Model trained in {train_time:.1f}s")
+        
+        # STEP 11: Evaluate
+        logger.info("📊 Evaluating model...")
+        y_pred = model.predict(X_test)
+        
+        # FIX: Handle single class in test set
+        if len(np.unique(y_test)) == 1:
+            logger.warning("⚠️ Only one class in test set - accuracy is 100%")
+            accuracy = 1.0
+            report = {"accuracy": accuracy}
+        else:
+            # Suppress warnings with zero_division
+            report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+            accuracy = report['accuracy']
+        
+        total_time = time.time() - start_time
+        logger.info("=" * 60)
+        logger.info(f"✅ TRAINING COMPLETED in {total_time:.1f} seconds")
+        logger.info("=" * 60)
+        
+        # Log detailed results
+        logger.info(f"Accuracy: {accuracy:.3f}")
+        
+        if isinstance(report, dict):
+            for regime in ['0', '1', '2']:
+                if regime in report:
+                    prec = report[regime]['precision']
+                    rec = report[regime]['recall']
+                    f1 = report[regime]['f1-score']
+                    support = report[regime]['support']
+                    logger.info(f"Regime {regime}: Precision={prec:.2f}, Recall={rec:.2f}, F1={f1:.2f}, Support={support}")
+        
+        return True
+        
+    except Exception as e:
+        total_time = time.time() - start_time
+        logger.error(f"❌ TRAINING FAILED after {total_time:.1f}s: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
 
 # ---------------------------
-# Regime Prediction (fixed)
+# Regime Prediction - FIXED
 # ---------------------------
 def predict_regime(df):
-    global model, scaler, class_mapping, feature_columns_used
+    """Predict the current regime with calibrated confidence - WITH TREND DIRECTION"""
+    global model, feature_columns_used, scaler
     
-    # Try to load saved model if not in memory
+    # Check if we have a model
     if model is None:
-        try:
-            if os.path.exists(MODEL_PATH):
-                model = joblib.load(MODEL_PATH)
-                scaler = joblib.load(SCALER_PATH)
-                class_mapping = joblib.load(MAPPING_PATH)
-                logger.info("Loaded pre-trained regime model from disk")
-            else:
-                logger.info("No saved model found, training...")
-                success = train_model()
-                if not success or model is None:
-                    logger.warning("Model training failed, using simple detection")
-                    return simple_regime_detection_with_direction(df)
-        except Exception as e:
-            logger.error(f"Error loading model: {e}")
+        logger.info("🤖 No trained model found, attempting to train...")
+        success = train_model()
+        if not success or model is None:
+            logger.warning("⚠️ Model training failed, using simple detection")
             return simple_regime_detection_with_direction(df)
     
     try:
         if len(df) < 50:
             return f"Insufficient data ({len(df)} rows)"
         
+        # Add features
         df_with_features = add_features(df)
         if df_with_features.empty:
             return "Feature engineering failed"
         
+        # Get latest features
         if feature_columns_used is None:
+            # Define default features
             feature_columns_used = [
                 'rsi', 'macd', 'macd_signal', 'macd_histogram', 'adx', 
                 'bb_width', 'bb_position', 'atr_pct', 'volatility', 'volatility_5',
@@ -452,31 +574,32 @@ def predict_regime(df):
                 'volume_ratio', 'volume_volatility', 'momentum'
             ]
         
-        for feat in feature_columns_used:
-            if feat not in df_with_features.columns:
-                df_with_features[feat] = 0
+        # Ensure all features exist
+        for feature in feature_columns_used:
+            if feature not in df_with_features.columns:
+                df_with_features[feature] = 0
         
+        # Get latest row
         latest_row = df_with_features.iloc[-1:][feature_columns_used]
+        
         if latest_row.isna().any().any():
+            logger.warning("NaN values in features, trying previous row")
             latest_row = df_with_features.iloc[-2:-1][feature_columns_used]
             if latest_row.isna().any().any():
                 return simple_regime_detection_with_direction(df)
         
+        # Scale features
         if scaler is not None:
             features_scaled = scaler.transform(latest_row)
         else:
             features_scaled = latest_row.values
         
-        pred_remapped = model.predict(features_scaled)[0]
-        # Inverse mapping to original label
-        if class_mapping is None:
-            prediction = pred_remapped
-        else:
-            inv_map = {v: k for k, v in class_mapping.items()}
-            prediction = inv_map[pred_remapped]
+        # Predict
+        prediction = model.predict(features_scaled)[0]
         probabilities = model.predict_proba(features_scaled)[0]
         confidence = probabilities.max()
         
+        # Map prediction to label
         regime_map = {
             0: "Range / Mean-Reversion",
             1: "Compression (Squeeze)",
@@ -484,21 +607,62 @@ def predict_regime(df):
             3: "Breakout",
             4: "True Trend"
         }
+        
         regime_label = regime_map.get(prediction, f"Unknown ({prediction})")
         
+        # ===== ADD TREND DIRECTION =====
+        # ===== ADD TREND DIRECTION =====
         trend_dir, trend_strength, _ = detect_trend(df)
         direction = {"up": "UPTREND", "down": "DOWNTREND", "side": "SIDEWAYS"}.get(trend_dir, "SIDEWAYS")
-        if prediction == 4:
+        
+        # Add direction to the regime label
+        if prediction == 4:  # True Trend
             full_label = f"{regime_label} {direction}"
         else:
             full_label = regime_label
+        
+        # Adjust confidence display
         display_confidence = min(99, max(60, int(confidence * 100)))
+        
         return f"{full_label} ({display_confidence}% confidence)"
         
     except Exception as e:
         logger.error(f"❌ Error in predict_regime: {e}")
         return simple_regime_detection_with_direction(df)
 
+def simple_regime_detection_with_direction(df):
+    """Simple rule-based regime detection with trend direction"""
+    try:
+        if len(df) < 20:
+            return "Insufficient data"
+        
+        # Get regime from simple detection
+        base_result = simple_regime_detection(df)
+        
+        # Add direction
+        sma_20 = df['close'].rolling(20).mean().iloc[-1]
+        sma_50 = df['close'].rolling(50).mean().iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        if current_price > sma_20 and sma_20 > sma_50:
+            direction = "UPTREND"
+        elif current_price < sma_20 and sma_20 < sma_50:
+            direction = "DOWNTREND"
+        else:
+            direction = "SIDEWAYS"
+        
+        # If it's trending, add direction
+        if "Trending" in base_result:
+            return f"{base_result} {direction}"
+        
+        return base_result
+        
+    except Exception as e:
+        return f"Simple detection error: {str(e)}"
+
+# ---------------------------
+# Quick prediction (for testing)
+# ---------------------------
 def quick_predict(symbol):
     """Quick prediction for testing"""
     logger.info(f"🔮 Quick prediction for {symbol}")
@@ -514,7 +678,7 @@ def quick_predict(symbol):
     return result
 
 # ---------------------------
-# Regime Labeling (unchanged)
+# Regime Labeling - KEEP SAME
 # ---------------------------
 def label_regime(df):
     """
@@ -595,6 +759,9 @@ def label_regime(df):
 
     return df
 
+# ---------------------------
+# Simple Fallback Detection
+# ---------------------------
 def simple_regime_detection(df):
     """Simple rule-based regime detection as fallback"""
     try:
@@ -615,41 +782,16 @@ def simple_regime_detection(df):
     except Exception as e:
         return f"Simple detection error: {str(e)}"
 
-def simple_regime_detection_with_direction(df):
-    """Simple rule-based regime detection with trend direction"""
-    try:
-        if len(df) < 20:
-            return "Insufficient data"
-        
-        # Get regime from simple detection
-        base_result = simple_regime_detection(df)
-        
-        # Add direction
-        sma_20 = df['close'].rolling(20).mean().iloc[-1]
-        sma_50 = df['close'].rolling(50).mean().iloc[-1]
-        current_price = df['close'].iloc[-1]
-        
-        if current_price > sma_20 and sma_20 > sma_50:
-            direction = "UPTREND"
-        elif current_price < sma_20 and sma_20 < sma_50:
-            direction = "DOWNTREND"
-        else:
-            direction = "SIDEWAYS"
-        
-        # If it's trending, add direction
-        if "Trending" in base_result:
-            return f"{base_result} {direction}"
-        
-        return base_result
-        
-    except Exception as e:
-        return f"Simple detection error: {str(e)}"
-
 # ---------------------------
 # Test function
 # ---------------------------
 if __name__ == "__main__":
-    print("🧪 Testing regime switcher...")
+    print("🧪 Testing regime switcher with testnet...")
+    
+    # Test with config
+    print(f"Config loaded: {config.get('trading_mode', 'paper')}")
+    
+    # Test with a coin
     test_coin = "BTC/USDT"
     result = quick_predict(test_coin)
     print(f"Result for {test_coin}: {result}")

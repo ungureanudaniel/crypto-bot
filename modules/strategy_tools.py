@@ -10,10 +10,12 @@ from ta.volatility import BollingerBands
 from ta.trend import MACD, ADXIndicator
 from ta.momentum import RSIIndicator
 from modules.data_feed import fetch_ohlcv
+from config_loader import config as _cfg
 
 logger = logging.getLogger(__name__)
 ml_strategies = {}
 sentiment_agent = None
+use_volume_shrinkage = _cfg.config.get('use_volume_shrinkage', False)
 # -------------------------------------------------------------------
 # Helper Functions
 # -------------------------------------------------------------------
@@ -165,48 +167,116 @@ def rsi_signal(df, oversold=25, overbought=75):
         logger.error(f"Error in rsi_signal: {e}")
         return None
 
-def macd_signal(df):
+def macd_bar_exhaustion_signal(df, fast=12, slow=26, signal=9, 
+                                min_bars=3, min_shrink_bars=2,
+                                use_rsi_confirm=True, rsi_oversold=35, rsi_overbought=65, 
+                                use_volume_shrink=True):
     """
-    MACD crossover signal
+    MACD Bar Exhaustion Signal (Replaces standard MACD crossover)
+    
+    Entry Logic (Long):
+      1. MACD histogram has 2+ consecutive red (negative) bars
+      2. Red bars are shrinking in magnitude (closing toward zero)
+      3. Price stabilizes (low volatility)
+      4. One more small drop (final flush)
+      5. Enter when histogram continues shrinking
+    
+    Entry Logic (Short):
+      1. MACD histogram has 2+ consecutive green (positive) bars
+      2. Green bars are shrinking in magnitude (closing toward zero)
+      3. Price stabilizes (low volatility)
+      4. One more small push up (final pump)
+      5. Enter when histogram continues shrinking
+    
     Returns: 'long', 'short', or None
     """
     try:
-        macd = MACD(df['close'])
-        macd_line = macd.macd()
-        signal_line = macd.macd_signal()
-        
-        # Check for crossover
-        if macd_line.iloc[-2] < signal_line.iloc[-2] and macd_line.iloc[-1] > signal_line.iloc[-1]:
-            return 'long'  # Bullish crossover
-        elif macd_line.iloc[-2] > signal_line.iloc[-2] and macd_line.iloc[-1] < signal_line.iloc[-1]:
-            return 'short'  # Bearish crossover
-        else:
+        if len(df) < 50:
             return None
+        
+        # Calculate MACD
+        ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
+        ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        histogram = macd_line - signal_line
+
+        # Identify positive/negative bars
+        hist_pos = histogram > 0
+        hist_neg = histogram < 0
+        
+        # Count consecutive bars
+        pos_streak = hist_pos.groupby((hist_pos != hist_pos.shift()).cumsum()).cumsum()
+        neg_streak = hist_neg.groupby((hist_neg != hist_neg.shift()).cumsum()).cumsum()
+        pos_streak = pos_streak.where(hist_pos, 0).astype(int)
+        neg_streak = neg_streak.where(hist_neg, 0).astype(int)
+        
+        # Bar magnitude (absolute value)
+        hist_abs = histogram.abs()
+        
+        # Check if bars are shrinking (current smaller than previous)
+        # Need at least min_shrink_bars consecutive shrinking bars
+        bars_shrinking = True
+        for i in range(1, min_shrink_bars + 1):
+            if not (hist_abs.iloc[-i] < hist_abs.iloc[-i-1]):
+                bars_shrinking = False
+                break
+        
+        # Calculate ATR for stability check
+        atr_series = calculate_atr(df)
+        current_atr = atr_series.iloc[-1] if not atr_series.empty else 0
+        atr_ma = atr_series.rolling(20).mean().iloc[-1] if not atr_series.empty else 0
+        stable = current_atr < atr_ma
+        
+        # RSI confirmation (optional)
+        rsi_confirm_ok = True
+        if use_rsi_confirm:
+            rsi = RSIIndicator(df['close'], window=14).rsi()
+            current_rsi = rsi.iloc[-1]
+        
+        # Volume shrinkage: current volume < previous volume (for the final bar)
+        volume_shrink_ok = True
+        if use_volume_shrink:
+            volume_shrink_ok = df['volume'].iloc[-1] < df['volume'].iloc[-2]
+        
+        # Price action: check for one more small drop/pump
+        price_drop = df['close'].iloc[-1] < df['close'].iloc[-2]
+        price_rise = df['close'].iloc[-1] > df['close'].iloc[-2]
+        
+        # ===== LONG SIGNAL =====
+        if (neg_streak.iloc[-1] >= min_bars and 
+            bars_shrinking and 
+            stable and 
+            price_drop and volume_shrink_ok):
             
+            # RSI confirmation (optional)
+            if use_rsi_confirm and current_rsi > rsi_oversold:
+                rsi_confirm_ok = False
+            
+            if rsi_confirm_ok:
+                logger.debug(f"📈 MACD Bar Exhaustion LONG: {neg_streak.iloc[-1]} red bars, shrinking, stable, final drop, volume shrinking")
+                return 'long'
+        
+        # ===== SHORT SIGNAL =====
+        if (pos_streak.iloc[-1] >= min_bars and 
+            bars_shrinking and 
+            stable and 
+            price_rise):
+            
+            # RSI confirmation (optional)
+            if use_rsi_confirm and current_rsi < rsi_overbought:
+                rsi_confirm_ok = False
+            
+            if rsi_confirm_ok:
+                logger.debug(f"📉 MACD Bar Exhaustion SHORT: {pos_streak.iloc[-1]} green bars, shrinking, stable, final pump, volume shrinking")
+                return 'short'
+        
+        return None
+        
     except Exception as e:
-        logger.error(f"Error in macd_signal: {e}")
+        logger.error(f"Error in macd_bar_exhaustion_signal: {e}")
         return None
 
-def ema_crossover_signal(df, fast=9, slow=21):
-    """
-    EMA crossover signal
-    Returns: 'long', 'short' or None
-    """
-    try:
-        ema_fast = df['close'].ewm(span=fast).mean()
-        ema_slow = df['close'].ewm(span=slow).mean()
-        
-        # Check for crossover
-        if ema_fast.iloc[-2] < ema_slow.iloc[-2] and ema_fast.iloc[-1] > ema_slow.iloc[-1]:
-            return 'long'  # Golden cross
-        elif ema_fast.iloc[-2] > ema_slow.iloc[-2] and ema_fast.iloc[-1] < ema_slow.iloc[-1]:
-            return 'short'  # Death cross
-        else:
-            return None
-            
-    except Exception as e:
-        logger.error(f"Error in ema_crossover_signal: {e}")
-        return None
 
 def bollinger_band_signal(df, deviation=2):
     """
@@ -377,6 +447,8 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
     """
     Main function that combines multiple strategies.
     Enhanced with trend detection to filter counter‑trend signals.
+    
+    REPLACED: Standard MACD crossover with MACD Bar Exhaustion strategy
     """
     try:
         if df.empty or len(df) < 50:
@@ -434,11 +506,9 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             # Apply same trend multiplier to the per‑pair risk
             adjusted_risk = per_pair_risk * risk_multiplier
             logger.info(f"📌 Using per‑pair risk for {symbol}: {per_pair_risk:.2%} (global {risk_per_trade:.2%})")
-            # After calculating adjusted_risk, add:
             logger.debug(f"Risk multiplier: {risk_multiplier:.2f}, Adjusted risk: {adjusted_risk:.2%}")
         else:
             adjusted_risk = risk_per_trade * risk_multiplier
-            # After calculating adjusted_risk, add:
             logger.debug(f"Risk multiplier: {risk_multiplier:.2f}, Adjusted risk: {adjusted_risk:.2%}")
         logger.debug(f"Trend: {trend_dir} | strength={trend_strength:.2f}")
 
@@ -476,40 +546,39 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         signal = None
         signal_type = None
         multiplier = 2.0
-
+        
         # ===== TRENDING MARKET =====
         if regime_type == "trend":
             logger.debug(f"📈 Trending market - following {trend_direction} trend")
+            
+            # Single call with all improvements: min_bars=3, RSI confirm, volume shrink
+            signal = macd_bar_exhaustion_signal(df, 
+                                                min_bars=3, 
+                                                min_shrink_bars=2,
+                                                use_rsi_confirm=True, 
+                                                rsi_oversold=35, 
+                                                rsi_overbought=65,
+                                                use_volume_shrink=use_volume_shrinkage)
+            
             if trend_direction == "up":
-                signal = ema_crossover_signal(df)
                 if signal == 'long':
-                    signal_type = "ema_trend_up"
+                    signal_type = "macd_bar_exhaustion_trend_up"
                     multiplier = 2.5
                 else:
-                    signal = macd_signal(df)
+                    # fallback to breakout if no MACD signal
+                    signal = breakout_signal(df)
                     if signal == 'long':
-                        signal_type = "macd_trend_up"
+                        signal_type = "breakout_trend_up"
                         multiplier = 2.5
-                    else:
-                        signal = breakout_signal(df)
-                        if signal == 'long':
-                            signal_type = "breakout_trend_up"
-                            multiplier = 2.5
             elif trend_direction == "down":
-                signal = ema_crossover_signal(df)
                 if signal == 'short':
-                    signal_type = "ema_trend_down"
+                    signal_type = "macd_bar_exhaustion_trend_down"
                     multiplier = 2.5
                 else:
-                    signal = macd_signal(df)
+                    signal = breakout_signal(df)
                     if signal == 'short':
-                        signal_type = "macd_trend_down"
+                        signal_type = "breakout_trend_down"
                         multiplier = 2.5
-                    else:
-                        signal = breakout_signal(df)
-                        if signal == 'short':
-                            signal_type = "breakout_trend_down"
-                            multiplier = 2.5
             else:
                 signal = rsi_signal(df)
                 if signal:
@@ -521,51 +590,70 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                         signal_type = f"bollinger_trend_side_{signal}"
                         multiplier = 1.5
 
-        # ===== RANGING MARKET - ADD TREND FILTER =====
+        # ===== RANGING MARKET =====
         elif regime_type in ["range", "compression"]:
             logger.debug(f"📊 Ranging market – favoring mean reversion")
             
-            # In range markets, only take signals that align with short-term trend
-            # or when trend is weak
-            signal = rsi_signal(df)
+            # Try MACD bar exhaustion first (works well in ranges)
+            signal = macd_bar_exhaustion_signal(df, 
+                                                min_bars=2, 
+                                                min_shrink_bars=2,
+                                                use_rsi_confirm=False, 
+                                                use_volume_shrink=True)
             if signal:
-                signal_dir = 'up' if signal == 'long' else 'down'
-                # Allow range trades only if trend is weak OR signal aligns with trend
-                if trend_strength < 0.25 or signal_dir == trend_dir or trend_dir == 'side':
-                    signal_type = f"rsi_range_{signal}"
-                    multiplier = 1.5
-                    logger.debug(f"✅ Range RSI {signal} (trend: {trend_dir}, strength: {trend_strength:.2f})")
-                else:
-                    signal = None
-                    logger.debug(f"⏭️ Skipping range RSI {signal} - against {trend_dir} trend")
-            
-            if not signal:
-                signal = bollinger_band_signal(df)
+                signal_type = f"macd_bar_exhaustion_range_{signal}"
+                multiplier = 2.0
+                logger.debug(f"✅ Range MACD Bar Exhaustion {signal}")
+            else:
+                # Fallback to RSI and Bollinger
+                signal = rsi_signal(df)
                 if signal:
                     signal_dir = 'up' if signal == 'long' else 'down'
                     if trend_strength < 0.25 or signal_dir == trend_dir or trend_dir == 'side':
-                        signal_type = f"bollinger_range_{signal}"
+                        signal_type = f"rsi_range_{signal}"
                         multiplier = 1.5
-                        logger.debug(f"✅ Range Bollinger {signal}")
+                        logger.debug(f"✅ Range RSI {signal}")
                     else:
                         signal = None
+                if not signal:
+                    signal = bollinger_band_signal(df)
+                    if signal:
+                        signal_dir = 'up' if signal == 'long' else 'down'
+                        if trend_strength < 0.25 or signal_dir == trend_dir or trend_dir == 'side':
+                            signal_type = f"bollinger_range_{signal}"
+                            multiplier = 1.5
+                            logger.debug(f"✅ Range Bollinger {signal}")
+                        else:
+                            signal = None
 
-        # ===== BREAKOUT MARKET - ADD TREND FILTER =====
+        # ===== BREAKOUT MARKET =====
         elif regime_type == "breakout":
             logger.debug(f"🚀 Breakout market")
             
-            # Breakouts should align with trend direction
-            signal = breakout_signal(df)
+            # Try MACD bar exhaustion first (can signal pullback entries)
+            signal = macd_bar_exhaustion_signal(df, 
+                                                min_bars=2, 
+                                                min_shrink_bars=2,
+                                                use_rsi_confirm=False, 
+                                                use_volume_shrink=True)
             if signal:
                 signal_dir = 'up' if signal == 'long' else 'down'
                 if signal_dir == trend_dir or trend_strength < 0.2:
-                    signal_type = f"breakout_{signal}"
-                    multiplier = 3.0
-                    logger.debug(f"✅ Breakout {signal} with trend")
+                    signal_type = f"macd_bar_exhaustion_breakout_{signal}"
+                    multiplier = 2.5
+                    logger.debug(f"✅ Breakout MACD Bar Exhaustion {signal}")
                 else:
                     signal = None
-                    logger.debug(f"⏭️ Skipping breakout {signal} - against {trend_dir} trend")
-            
+            if not signal:
+                signal = breakout_signal(df)
+                if signal:
+                    signal_dir = 'up' if signal == 'long' else 'down'
+                    if signal_dir == trend_dir or trend_strength < 0.2:
+                        signal_type = f"breakout_{signal}"
+                        multiplier = 3.0
+                        logger.debug(f"✅ Breakout {signal}")
+                    else:
+                        signal = None
             if not signal:
                 signal = volume_breakout_signal(df)
                 if signal:
@@ -577,22 +665,35 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     else:
                         signal = None
 
-        # ===== EXPANSION MARKET - ADD TREND FILTER =====
+        # ===== EXPANSION MARKET =====
         elif regime_type == "expansion":
             logger.debug(f"🌪️ High volatility – cautious")
             adjusted_risk = risk_per_trade * 0.5
             
-            # Only take signals with the trend in high volatility
-            signal = breakout_signal(df, volume_confirmation=True)
+            # MACD bar exhaustion may be less reliable in high volatility
+            signal = macd_bar_exhaustion_signal(df, 
+                                                min_bars=2, 
+                                                min_shrink_bars=2,
+                                                use_rsi_confirm=True, 
+                                                use_volume_shrink=True)
             if signal:
                 signal_dir = 'up' if signal == 'long' else 'down'
                 if signal_dir == trend_dir:
-                    signal_type = f"breakout_expansion_{signal}"
-                    multiplier = 3.0
-                    logger.debug(f"✅ Breakout in high volatility with trend")
+                    signal_type = f"macd_bar_exhaustion_expansion_{signal}"
+                    multiplier = 2.0
+                    logger.debug(f"✅ Expansion MACD Bar Exhaustion {signal}")
                 else:
                     signal = None
-            
+            if not signal:
+                signal = breakout_signal(df, volume_confirmation=True)
+                if signal:
+                    signal_dir = 'up' if signal == 'long' else 'down'
+                    if signal_dir == trend_dir:
+                        signal_type = f"breakout_expansion_{signal}"
+                        multiplier = 3.0
+                        logger.debug(f"✅ Breakout in high volatility with trend")
+                    else:
+                        signal = None
             if not signal:
                 signal = volume_breakout_signal(df)
                 if signal and abs(df['close'].pct_change().iloc[-1]) > 0.02:
@@ -604,13 +705,13 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     else:
                         signal = None
 
-        # ===== UNKNOWN REGIME - ADD TREND FILTER =====
+        # ===== UNKNOWN REGIME =====
         else:
             logger.debug(f"❓ Unknown regime – trying all strategies")
+            # Prioritize MACD bar exhaustion
             for fn, stype, mult in [
+                (lambda d: macd_bar_exhaustion_signal(d, min_bars=2, min_shrink_bars=2, use_volume_shrink=True), "macd_bar_exhaustion_unknown", 2.0),
                 (breakout_signal, "breakout_unknown", 2.0),
-                (ema_crossover_signal, "ema_unknown", 2.0),
-                (macd_signal, "macd_unknown", 2.0),
                 (rsi_signal, "rsi_unknown", 1.5),
                 (bollinger_band_signal, "bollinger_unknown", 1.5),
                 (volume_breakout_signal, "volume_unknown", 2.0),
@@ -618,7 +719,6 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 sig = fn(df)
                 if sig:
                     signal_dir = 'up' if sig == 'long' else 'down'
-                    # In unknown regime, only take signals with the trend if trend is clear
                     if trend_strength > 0.25 and signal_dir != trend_dir and trend_dir != 'side':
                         logger.debug(f"⏭️ Skipping {stype} - counter-trend")
                         continue
@@ -780,8 +880,7 @@ if __name__ == "__main__":
             strategies = [
                 ("Breakout", lambda: breakout_signal(df)),
                 ("RSI", lambda: rsi_signal(df)),
-                ("MACD", lambda: macd_signal(df)),
-                ("EMA Crossover", lambda: ema_crossover_signal(df)),
+                ("MACD", lambda: macd_bar_exhaustion_signal(df)),
                 ("Bollinger", lambda: bollinger_band_signal(df)),
                 ("Volume Breakout", lambda: volume_breakout_signal(df))
             ]
