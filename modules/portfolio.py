@@ -119,9 +119,9 @@ def _get_default_portfolio() -> Dict:
     }
 
 def save_portfolio(portfolio: Dict) -> None:
-    """Save portfolio data to file with proper file locking"""
+    """Save portfolio data to file with retry on failure (no temp file)"""
     with _portfolio_lock:
-        # Validate JSON before saving
+        # Validate JSON
         try:
             json.dumps(portfolio)
         except Exception as e:
@@ -130,32 +130,27 @@ def save_portfolio(portfolio: Dict) -> None:
         
         portfolio["last_updated"] = datetime.now().isoformat()
         
-        # Write to temp file first
-        temp_file = PORTFOLIO_FILE + ".tmp"
-        try:
-            with open(temp_file, "w") as f:
-                json.dump(portfolio, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())  # Force write to disk
-        except Exception as e:
-            logger.error(f"❌ Failed to write temp file: {e}")
-            return
-        
-        # Try to rename with retry on busy (increasing wait times)
-        for attempt in range(10):  # Increased to 10 attempts
+        for attempt in range(5):
             try:
-                os.replace(temp_file, PORTFOLIO_FILE)
+                with open(PORTFOLIO_FILE, "w") as f:
+                    json.dump(portfolio, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
                 logger.debug("✅ Portfolio saved successfully")
+                # Small delay to allow the file system to settle
+                time.sleep(0.05)
                 return
             except OSError as e:
                 if e.errno == 16:  # Device or resource busy
-                    wait_time = 0.2 * (attempt + 1)  # 0.2s, 0.4s, 0.6s...
-                    logger.warning(f"⚠️ File busy, retry {attempt + 1}/10 in {wait_time:.1f}s...")
+                    wait_time = 0.2 * (attempt + 1)
+                    logger.warning(f"⚠️ File busy, retry {attempt+1}/5 in {wait_time:.1f}s")
                     time.sleep(wait_time)
                     continue
                 raise
-        
-        logger.error(f"❌ Failed to save portfolio after 10 attempts")
+            except Exception as e:
+                logger.error(f"❌ Failed to save portfolio: {e}")
+                return
+        logger.error("❌ Failed to save portfolio after 5 attempts")
 
 # -------------------------------------------------------------------
 # POSITION MANAGEMENT (just data access, no logic)
