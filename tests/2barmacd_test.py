@@ -12,7 +12,7 @@ df = pd.read_csv('eth_usdt_4h_1086d.csv')
 
 # Fix timestamp parsing - use the correct format for your data
 # Your timestamps are like "10-04-25 17:00" (day-month-year hour:minute)
-df['timestamp'] = pd.to_datetime(df['timestamp'], format='%d-%m-%y %H:%M')
+df['timestamp'] = pd.to_datetime(df['timestamp'])
 df = df.sort_values('timestamp').reset_index(drop=True)
 
 print(f"Data loaded: {len(df)} candles from {df['timestamp'].min()} to {df['timestamp'].max()}")

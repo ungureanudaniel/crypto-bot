@@ -4,7 +4,8 @@ import sys
 import threading
 import fcntl
 import time
-
+import pandas as pd
+import numpy as np
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
@@ -119,9 +120,15 @@ def _get_default_portfolio() -> Dict:
     }
 
 def _make_serializable(obj: Any) -> Any:
-    """Recursively convert pandas Timestamp and other non‑serializable types."""
-    if isinstance(obj, (datetime)):
+    """Convert non‑serializable objects (Timestamp, ndarray, etc.) to JSON‑compatible types."""
+    if isinstance(obj, (pd.Timestamp, datetime)):
         return obj.isoformat()
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
     if isinstance(obj, dict):
         return {k: _make_serializable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -129,21 +136,20 @@ def _make_serializable(obj: Any) -> Any:
     return obj
 
 def save_portfolio(portfolio: Dict) -> None:
-    """Save portfolio data after converting non‑serializable objects."""
+    """Save portfolio directly (no temp file) with retry and serialization fix."""
     with _portfolio_lock:
-        # Make a deep copy and convert all Timestamps to strings
-        clean_portfolio = _make_serializable(portfolio)
-        
-        # No need to pre-validate with json.dumps – we'll write directly
-        clean_portfolio["last_updated"] = datetime.now().isoformat()
-        
+        # Clean the portfolio of non‑serializable objects
+        clean: Dict = _make_serializable(portfolio)
+        clean["last_updated"] = datetime.now().isoformat()
+
         for attempt in range(5):
             try:
+                # Write directly to the target file (no .tmp rename)
                 with open(PORTFOLIO_FILE, "w") as f:
-                    json.dump(clean_portfolio, f, indent=2)
+                    json.dump(clean, f, indent=2)
                     f.flush()
                     os.fsync(f.fileno())
-                logger.debug("✅ Portfolio saved successfully")
+                logger.info(f"✅ Portfolio saved: cash={clean['cash']['USDT']:.2f}, positions={len(clean.get('positions', {}))}")
                 time.sleep(0.05)
                 return
             except OSError as e:
