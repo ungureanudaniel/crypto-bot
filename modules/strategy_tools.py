@@ -798,10 +798,10 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             if units > 0:
                 return {
                     'symbol': symbol,
-                    'side': signal,
+                    'signal': signal,
                     'signal_type': signal_type,
                     'units': units,
-                    'entry_price': current_price,
+                    'entry': current_price,
                     'stop_loss': sl_price,
                     'take_profit': tp_price,
                     'risk_pct': adjusted_risk,
