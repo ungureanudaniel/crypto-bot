@@ -921,8 +921,16 @@ class TradingEngine:
                 
                 if signal:
                     # Check for duplicate signals
-                    signal_key = f"{symbol}_{signal.get('signal_type', 'unknown')}"
+                    if signal.get('entry', 0) <= 0:
+                        logger.error(f"❌ Invalid signal for {symbol}: missing valid 'entry' (got {signal.get('entry')})")
+                        continue
                     
+                    if signal.get('units', 0) <= 0:
+                        logger.error(f"❌ Invalid signal for {symbol}: missing valid 'units' (got {signal.get('units')})")
+                        continue
+                    
+                    signal_key = f"{symbol}_{signal.get('signal_type', 'unknown')}"
+    
                     if signal_key != self.last_signals.get(symbol):
                         signals_found.append({
                             'symbol': symbol,
@@ -930,7 +938,7 @@ class TradingEngine:
                             'regime': regime
                         })
                         self.last_signals[symbol] = signal_key
-                        
+
                         logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} {signal['side']} signal at ${signal['entry']:.2f} (Regime: {regime})")
                     else:
                         logger.info(f"⏭️ {symbol}: Duplicate signal skipped")
@@ -938,8 +946,7 @@ class TradingEngine:
             except Exception as e:
                 logger.error(f"❌ Error scanning {symbol}: {e}")
         
-        # If we found signals, update the per-pair last trade time when executed
-        # Note: We don't update here because signals might not be executed
+        # If found signals, update the per-pair last trade time when executed
         # The update happens in execute_signal after successful execution
         
         logger.info(f"📊 Scan complete: Found {len(signals_found)} signals")
@@ -954,11 +961,6 @@ class TradingEngine:
             return False
 
         try:
-            # DEBUG: Log the signal data
-            logger.info(f"🔍 EXECUTE_SIGNAL called")
-            logger.info(f"   Signal data type: {type(signal_data)}")
-            logger.info(f"   Signal data keys: {signal_data.keys()}")
-            
             if 'symbol' not in signal_data:
                 logger.error("❌ No 'symbol' in signal_data")
                 return False
@@ -969,6 +971,19 @@ class TradingEngine:
             
             symbol = signal_data['symbol']
             signal = signal_data['signal']
+            
+            # VALIDATE required fields
+            required_fields = ['side', 'entry', 'units', 'stop_loss', 'take_profit']
+            for field in required_fields:
+                if field not in signal:
+                    logger.error(f"❌ Signal missing required field '{field}': {signal}")
+                    return False
+                if field == 'entry' and signal[field] <= 0:
+                    logger.error(f"❌ Signal has invalid entry price: {signal[field]}")
+                    return False
+                if field == 'units' and signal[field] <= 0:
+                    logger.error(f"❌ Signal has invalid units: {signal[field]}")
+                    return False
             
             logger.info(f"   Symbol: {symbol}")
             logger.info(f"   Signal type: {signal.get('signal_type', 'unknown')}")
