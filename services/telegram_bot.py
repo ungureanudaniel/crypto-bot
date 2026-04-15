@@ -88,7 +88,7 @@ CONFIG = get_config()
 # -------------------------------------------------------------------
 # TRADE HISTORY (optional - for record keeping)
 # -------------------------------------------------------------------
-HISTORY_FILE = os.path.join(project_root, "trade_history.json")
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "history.json")
 
 def load_trade_history():
     """Load trade history from file (optional)"""
