@@ -2,6 +2,8 @@ services:
   trader_bot:
     build: .
     container_name: binance_trader_bot
+    init: true
+    stop_grace_period: 15s
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "healthcheck.py", "--quick"]
@@ -12,6 +14,7 @@ services:
     volumes:
       - ./config.json:/app/config.json
       - ./portfolio.json:/app/portfolio.json
+      - ./history.json:/app/history.json
       - ./logs:/app/logs
     logging:
       driver: "json-file"
