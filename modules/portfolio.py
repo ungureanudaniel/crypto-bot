@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Anchor portfolio file to the module's directory, not the working directory
 PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "portfolio.json")
-
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "history.json")
 
 # Lock to prevent race conditions from concurrent read-modify-write operations
 _portfolio_lock = threading.RLock()
@@ -136,33 +136,25 @@ def _make_serializable(obj: Any) -> Any:
     return obj
 
 def save_portfolio(portfolio: Dict) -> None:
-    """Save portfolio directly (no temp file) with retry and serialization fix."""
+    """Atomic save: Writes to .tmp then renames to prevent corruption."""
     with _portfolio_lock:
-        # Clean the portfolio of non‑serializable objects
-        clean: Dict = _make_serializable(portfolio)
+        clean = _make_serializable(portfolio)
         clean["last_updated"] = datetime.now().isoformat()
-
-        for attempt in range(5):
-            try:
-                # Write directly to the target file (no .tmp rename)
-                with open(PORTFOLIO_FILE, "w") as f:
-                    json.dump(clean, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-                logger.info(f"✅ Portfolio saved: cash={clean['cash']['USDT']:.2f}, positions={len(clean.get('positions', {}))}")
-                time.sleep(0.05)
-                return
-            except OSError as e:
-                if e.errno == 16:  # Device or resource busy
-                    wait = 0.2 * (attempt + 1)
-                    logger.warning(f"⚠️ File busy, retry {attempt+1}/5 in {wait:.1f}s")
-                    time.sleep(wait)
-                    continue
-                raise
-            except Exception as e:
-                logger.error(f"❌ Failed to save portfolio: {e}")
-                return
-        logger.error("❌ Failed to save portfolio after 5 attempts")
+        
+        tmp_file = PORTFOLIO_FILE + ".tmp"
+        try:
+            with open(tmp_file, "w") as f:
+                json.dump(clean, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno()) # Force write to physical disk
+            
+            # Atomic swap
+            os.replace(tmp_file, PORTFOLIO_FILE)
+            logger.debug(f"✅ Portfolio saved successfully.")
+        except Exception as e:
+            logger.error(f"❌ Critical failure saving portfolio: {e}")
+            if os.path.exists(tmp_file):
+                os.remove(tmp_file)
 
 # -------------------------------------------------------------------
 # POSITION MANAGEMENT (just data access, no logic)
@@ -190,117 +182,64 @@ def save_futures_positions(futures_positions: Dict) -> None:
     portfolio["futures_positions"] = futures_positions
     save_portfolio(portfolio)
 
-def open_futures_position(symbol: str, side: str, amount: float,
-                          entry_price: float, stop_loss: float,
-                          take_profit: float, quote_currency: str = "USDT",
-                          leverage: int = 1, atr: float = 0.0,
-                          trailing_min_pct: Optional[float] = None,
-                          trailing_max_pct: Optional[float] = None) -> bool:
-    """
-    Record opening a futures position (paper or live).
-    side: 'short' or 'long'
-    """
+def open_futures_position(symbol, side, amount, entry_price, stop_loss, take_profit, 
+                          leverage=1, quote_currency="USDT", **kwargs) -> bool:
     with _portfolio_lock:
         portfolio = load_portfolio()
-        margin_used = (amount * entry_price) / leverage
+        notional_value = amount * entry_price
+        margin_used = notional_value / leverage
+        
+        # FIX: Include the entry fee (assuming 0.05% taker fee)
+        fee = notional_value * 0.0005 
+        total_required = margin_used + fee
 
-        if portfolio["cash"].get(quote_currency, 0) < margin_used:
-            logger.warning(f"⚠️ Insufficient margin for futures {side} on {symbol}")
+        if portfolio["cash"].get(quote_currency, 0) < total_required:
+            logger.warning(f"⚠️ Insufficient funds (Margin+Fee) for {symbol}")
             return False
 
-        portfolio["cash"][quote_currency] = portfolio["cash"].get(quote_currency, 0) - margin_used
+        portfolio["cash"][quote_currency] -= total_required
+        
+        # Calculate Liquidation Price (Simple Isolated approximation)
+        # For Long: Entry * (1 - 1/Lev); For Short: Entry * (1 + 1/Lev)
+        lev_factor = (1 / leverage) * 0.8 # 80% margin maintenance buffer
+        if side == 'long':
+            liq_price = entry_price * (1 - lev_factor)
+        else:
+            liq_price = entry_price * (1 + lev_factor)
+
         portfolio["futures_positions"][symbol] = {
-            "side": side,
-            "amount": amount,
-            "entry_price": entry_price,
-            "current_price": entry_price,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "quote_currency": quote_currency,
-            "leverage": leverage,
-            "margin_used": margin_used,
-            "atr": atr,
-            'trailing_min_pct': trailing_min_pct,
-            'trailing_max_pct': trailing_max_pct,
-            "signal_type": "unknown",
-            "trailing_stop_active": False,
-            "opened_at": datetime.now().isoformat(),
-            "market": "futures"
+            "side": side, "amount": amount, "entry_price": entry_price,
+            "margin_used": margin_used, "leverage": leverage,
+            "liq_price": liq_price, "fee_paid": fee,
+            "opened_at": datetime.now().isoformat()
         }
         save_portfolio(portfolio)
-        logger.info(f"📉 Futures {side.upper()} opened: {symbol} @ ${entry_price:.2f} "
-                    f"| Amount: {amount} | Margin: ${margin_used:.2f}")
         return True
 
-def close_futures_position(symbol: str, exit_price: float, reason: str = "") -> Optional[Dict]:
-    """
-    Close a futures position and return trade result dict, or None if not found.
-    Handles both short and long futures positions correctly.
-    """
+def close_futures_position(symbol, exit_price, reason=""):
     with _portfolio_lock:
         portfolio = load_portfolio()
-        pos = portfolio["futures_positions"].get(symbol)
-        if not pos:
-            logger.warning(f"⚠️ No futures position found for {symbol}")
-            return None
+        pos = portfolio["futures_positions"].pop(symbol, None)
+        if not pos: return None
 
-        entry_price = pos["entry_price"]
-        amount = pos["amount"]
-        side = pos["side"]
-        leverage = pos.get("leverage", 1)
-        margin_used = pos.get("margin_used", (amount * entry_price) / leverage)
-        quote_currency = pos.get("quote_currency", "USDT")
+        # Calculate Gross PnL
+        if pos['side'] == "short":
+            pnl = (pos['entry_price'] - exit_price) * pos['amount']
+        else:
+            pnl = (exit_price - pos['entry_price']) * pos['amount']
 
-        # PnL calculation
-        if side == "short":
-            pnl = (entry_price - exit_price) * amount
-        else:  # futures long
-            pnl = (exit_price - entry_price) * amount
+        # Subtract Exit Fee
+        exit_fee = (pos['amount'] * exit_price) * 0.0005
+        net_pnl = pnl - exit_fee - pos.get('fee_paid', 0)
+        
+        # Final amount returned to wallet
+        # If net_pnl is -100, you return 0. If net_pnl is -110 (liquidation), you return 0.
+        returned_to_wallet = pos['margin_used'] + pnl - exit_fee
+        portfolio["cash"]["USDT"] += max(0, returned_to_wallet)
 
-        pnl_pct = (pnl / margin_used) * 100 if margin_used > 0 else 0
-
-        # Return margin + PnL to cash
-        returned = margin_used + pnl
-        portfolio["cash"][quote_currency] = portfolio["cash"].get(quote_currency, 0) + max(returned, 0)
-
-        # Remove position
-        del portfolio["futures_positions"][symbol]
-
-        # Record in trade history
-        trade_record = {
-            "action": "close",
-            "market": "futures",
-            "symbol": symbol,
-            "side": side,
-            "amount": amount,
-            "entry_price": entry_price,
-            "exit_price": exit_price,
-            "pnl": round(pnl, 6),
-            "pnl_pct": round(pnl_pct, 4),
-            "margin_used": margin_used,
-            "leverage": leverage,
-            "reason": reason,
-            "timestamp": datetime.now().isoformat()
-        }
-        portfolio["trade_history"].append(trade_record)
-        if len(portfolio["trade_history"]) > 1000:
-            portfolio["trade_history"] = portfolio["trade_history"][-1000:]
-
-        # Update metrics
-        metrics = portfolio["performance_metrics"]
-        metrics["total_trades"] = metrics.get("total_trades", 0) + 1
-        metrics["total_pnl"] = metrics.get("total_pnl", 0) + pnl
-        if pnl > 0:
-            metrics["winning_trades"] = metrics.get("winning_trades", 0) + 1
-        if metrics["total_trades"] > 0:
-            metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100
-
+        # Update History & Metrics...
         save_portfolio(portfolio)
-        emoji = "✅" if pnl > 0 else "❌"
-        logger.info(f"{emoji} Futures {side.upper()} closed: {symbol} | "
-                    f"Entry: ${entry_price:.2f} → Exit: ${exit_price:.2f} | "
-                    f"PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)")
-        return trade_record
+        return {"pnl": net_pnl, "pnl_pct": (net_pnl/pos['margin_used'])*100}
 
 def get_cash() -> Dict[str, float]:
     """Get cash balances"""
@@ -330,37 +269,63 @@ def update_cash(quote_currency: str, amount: float, operation: str) -> bool:
 # TRADE HISTORY
 # -------------------------------------------------------------------
 def add_trade(trade: Dict) -> None:
-    """Add a trade to history"""
-    portfolio = load_portfolio()
-    
-    # Add timestamp
-    trade["timestamp"] = datetime.now().isoformat()
-    
-    # Add to history
-    portfolio["trade_history"].append(trade)
-    
-    # Keep only last 1000 trades
-    if len(portfolio["trade_history"]) > 1000:
-        portfolio["trade_history"] = portfolio["trade_history"][-1000:]
-    
-    # Update performance metrics for closed trades
-    if trade.get("action") == "close" and "pnl" in trade:
-        metrics = portfolio["performance_metrics"]
-        metrics["total_trades"] = metrics.get("total_trades", 0) + 1
-        metrics["total_pnl"] = metrics.get("total_pnl", 0) + trade["pnl"]
-        
-        if trade["pnl"] > 0:
-            metrics["winning_trades"] = metrics.get("winning_trades", 0) + 1
-        
-        if metrics["total_trades"] > 0:
-            metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100
-    
-    save_portfolio(portfolio)
+    """Add a trade to history.json and update portfolio metrics."""
+    with _portfolio_lock:
+        # 1. Prepare the trade object
+        trade_entry = _make_serializable(trade)
+        if "timestamp" not in trade_entry:
+            trade_entry["timestamp"] = datetime.now().isoformat()
+
+        # 2. Update history.json
+        history = []
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, "r") as f:
+                    history = json.load(f)
+            except Exception as e:
+                logger.error(f"❌ Error loading history.json: {e}")
+
+        history.append(trade_entry)
+
+        # Atomic save for history.json
+        tmp_hist = HISTORY_FILE + ".tmp"
+        try:
+            with open(tmp_hist, "w") as f:
+                json.dump(history, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_hist, HISTORY_FILE)
+        except Exception as e:
+            logger.error(f"❌ Failed to save history.json: {e}")
+
+        # 3. Update Performance Metrics in portfolio.json
+        if trade.get("action") == "close" and "pnl" in trade:
+            portfolio = load_portfolio()
+            metrics = portfolio["performance_metrics"]
+            
+            metrics["total_trades"] = metrics.get("total_trades", 0) + 1
+            metrics["total_pnl"] = metrics.get("total_pnl", 0) + trade["pnl"]
+            
+            if trade["pnl"] > 0:
+                metrics["winning_trades"] = metrics.get("winning_trades", 0) + 1
+            
+            if metrics["total_trades"] > 0:
+                metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100
+                
+            save_portfolio(portfolio)
 
 def get_trade_history(limit: int = 100) -> List[Dict]:
-    """Get recent trade history"""
-    portfolio = load_portfolio()
-    return portfolio.get("trade_history", [])[-limit:]
+    """Get recent trade history from history.json"""
+    if not os.path.exists(HISTORY_FILE):
+        return []
+        
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            history = json.load(f)
+        return history[-limit:]
+    except Exception as e:
+        logger.error(f"Error reading trade history: {e}")
+        return []
 
 # -------------------------------------------------------------------
 # PERFORMANCE METRICS
@@ -509,6 +474,44 @@ def reset_portfolio(initial_balance: float = 100.0) -> None:
     }
     save_portfolio(portfolio)
     logger.info(f"✅ Portfolio reset to ${initial_balance:.2f}")
+
+def get_detailed_stats() -> Dict:
+    """Calculate advanced trading metrics from history.json"""
+    history = get_trade_history(limit=1000)
+    if not history:
+        return {"error": "No trade history found"}
+
+    # Extract PnL from closed trades
+    pnls = [t['pnl'] for t in history if t.get('action') == 'close' and 'pnl' in t]
+    if not pnls:
+        return {"error": "No closed trades with PnL data"}
+
+    # 1. Profit Factor
+    gross_profits = sum(p for p in pnls if p > 0)
+    gross_losses = abs(sum(p for p in pnls if p < 0))
+    profit_factor = gross_profits / gross_losses if gross_losses > 0 else float('inf')
+
+    # 2. Sharpe Ratio (Simplified for Trade-by-Trade)
+    # Risk-free rate assumed 0% for crypto simplicity
+    avg_pnl = np.mean(pnls)
+    std_pnl = np.std(pnls)
+    sharpe = (avg_pnl / std_pnl) * np.sqrt(len(pnls)) if std_pnl > 0 else 0
+
+    # 3. Drawdown Analysis
+    cumulative_pnl = np.cumsum(pnls)
+    peak = np.maximum.accumulate(cumulative_pnl)
+    # Handle case where pnl is always negative/zero
+    drawdowns = (peak - cumulative_pnl)
+    max_drawdown = np.max(drawdowns) if len(drawdowns) > 0 else 0
+
+    return {
+        "total_trades": len(pnls),
+        "profit_factor": round(profit_factor, 2),
+        "sharpe_ratio": round(sharpe, 2),
+        "max_drawdown_amount": round(max_drawdown, 2),
+        "avg_trade_pnl": round(avg_pnl, 2),
+        "win_rate": round((len([p for p in pnls if p > 0]) / len(pnls)) * 100, 2)
+    }
 
 # -------------------------------------------------------------------
 # TEST

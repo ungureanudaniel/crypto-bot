@@ -156,7 +156,7 @@ class TradingEngine:
         self.symbols = self.config.get('coins', ['BTC/USDC', 'ETH/USDC'])
         self.timeframe = self.config.get('trading_timeframe', '15m')
         self.max_positions = self.config.get('max_positions', 3)
-        self.risk_per_trade = self.config.get('risk_per_trade', 0.02)
+        self.risk_per_trade = float(self.config.get('risk_per_trade', 0.02))
         self.circuit_breaker_triggered = False
         self.last_trade_time_per_pair = {}
         self.circuit_breaker_time = None
@@ -219,6 +219,76 @@ class TradingEngine:
         logger.info(f"📊 Monitoring {len(self.symbols)} symbols on {self.timeframe}")
         logger.info(f"📂 Loaded {len(self.open_positions)} existing positions")
     
+    def run_iteration(self):
+        """Main loop called by scheduler"""
+        if not self.check_drawdown():
+            return
+
+        # 1. Manage Exits first (Always clear the desk before taking new orders)
+        self.check_stop_losses()
+
+        # 2. Scan for new signals
+        for symbol in self.symbols:
+            self.process_pair(symbol)
+
+    def process_pair(self, symbol: str):
+        """Evaluates a single pair for entry"""
+        # Load fresh data
+        df = self.data_feed.get_ohlcv(symbol, self.timeframe)
+        if df is None or df.empty:
+            return
+
+        # Regime Filter
+        regime = predict_regime(df)
+        
+        # Generate Signal (Passing regime to strategy)
+        signal_data = generate_trade_signal(df, self.get_cash_balance("USDT"), self.risk_per_trade, symbol, self, regime=regime)
+        signal = signal_data.get('signal')
+
+        if signal in ['buy', 'sell']:
+            current_price = df['close'].iloc[-1]
+            
+            # Position Sizing Logic
+            units = self.calculate_position_size(symbol, current_price, signal_data.get('stop_loss'))
+            
+            if signal == 'buy':
+                self.open_position(
+                    symbol=symbol, 
+                    side='long', 
+                    entry_price=current_price,
+                    units=units,
+                    stop_loss=signal_data.get('stop_loss'),
+                    take_profit=signal_data.get('take_profit'),
+                    signal_type=signal_data.get('strategy_name'),
+                    atr=signal_data.get('atr')
+                )
+            elif signal == 'sell':
+                # FIX: Route shorts directly to futures engine
+                if self.futures_engine:
+                    self.futures_engine.open_short(
+                        symbol=symbol,
+                        amount=units,
+                        entry_price=current_price,
+                        stop_loss=signal_data.get('stop_loss'),
+                        take_profit=signal_data.get('take_profit')
+                    )
+                else:
+                    logger.warning(f"⚠️ Short signal for {symbol} ignored: FuturesEngine not loaded")
+
+    def calculate_position_size(self, symbol, price, stop_loss):
+        """Risk-based sizing: Risks X% of account balance based on SL distance"""
+        cash = self.get_cash_balance("USDT")
+        risk_amt = cash * self.risk_per_trade
+        
+        if stop_loss and stop_loss != price:
+            risk_per_unit = abs(price - stop_loss)
+            units = risk_amt / risk_per_unit
+        else:
+            # Fallback to 10% of cash if no SL provided
+            units = (cash * 0.1) / price
+            
+        return units
+
     def check_drawdown(self) -> bool:
         """
         Checks if drawdown exceeds max_drawdown. If yes, activates circuit breaker.
@@ -285,78 +355,31 @@ class TradingEngine:
         return prices
     
     def check_stop_losses(self) -> bool:
-        """
-        Check exits for all open positions each minute.
-        Layer 1 (signal reversal) + Layer 2 (trailing stop) via exit_manager.
-        Falls back to plain SL/TP if exit_manager is unavailable.
-        Returns True if any positions were closed.
-        """
+        """Fixed: Ensures state is saved after every evaluation"""
         positions_closed = False
+        if not self.open_positions:
+            return False
 
-        # --- Spot positions ---
-        if self.open_positions:
-            try:
-                from modules.exit_manager import evaluate_exit
-            except ImportError:
-                evaluate_exit = None
+        current_prices = self.get_current_prices()
+        from modules.exit_manager import evaluate_exit
 
-            current_prices = self.get_current_prices()
+        for symbol, position in list(self.open_positions.items()):
+            price = current_prices.get(symbol)
+            if not price: continue
 
-            for symbol, position in list(self.open_positions.items()):
-                current_price = current_prices.get(symbol)
-                if not current_price:
-                    logger.warning(f"⚠️ Could not get price for {symbol}, skipping")
-                    continue
+            # Get latest OHLCV for indicators used in exit_manager (like trailing ATR)
+            df = self.data_feed.get_ohlcv(symbol, self.timeframe, limit=50)
+            
+            should_exit, reason = evaluate_exit(symbol, position, price, df)
 
-                should_exit = False
-                reason      = ''
-
-                if evaluate_exit:
-                    try:
-                        df = self.data_feed.get_ohlcv(
-                            symbol=symbol,
-                            interval=self.timeframe,
-                            limit=100
-                        )
-                    except Exception:
-                        df = None
-
-                    should_exit, reason = evaluate_exit(
-                        symbol, position, current_price, df
-                    )
-
-                    # Always save position after evaluation (if not closed) to persist candle counter and trailing stop updates
-                    if not should_exit:
-                        self.open_positions[symbol] = position
-                        save_positions_to_file(self.open_positions)
-
-                else:
-                    # Plain SL/TP fallback
-                    side = position['side']
-                    sl   = position.get('stop_loss', 0)
-                    tp   = position.get('take_profit', 0)
-                    if side == 'long':
-                        if sl and current_price <= sl:
-                            should_exit, reason = True, 'stop_loss'
-                        elif tp and current_price >= tp:
-                            should_exit, reason = True, 'take_profit'
-                    else:
-                        if sl and current_price >= sl:
-                            should_exit, reason = True, 'stop_loss'
-                        elif tp and current_price <= tp:
-                            should_exit, reason = True, 'take_profit'
-
-                if should_exit:
-                    logger.info(f"🚪 Exiting {symbol} @ ${current_price:.4f} | Reason: {reason}")
-                    self.close_position(symbol, current_price, reason)
-                    positions_closed = True
-
-        # --- Futures positions ---
-        if self.futures_engine:
-            closed = self.futures_engine.check_stops()
-            if closed:
-                self.open_futures_positions = get_futures_positions()
+            if should_exit:
+                self.close_position(symbol, price, reason)
                 positions_closed = True
+            else:
+                # Update the position object with any changes (like trailing SL)
+                # and save to file immediately to prevent loss on crash.
+                self.open_positions[symbol] = position
+                save_positions_to_file(self.open_positions)
 
         return positions_closed
     
@@ -422,6 +445,7 @@ class TradingEngine:
             'pnl_pct': pnl_pct,
             'reason': reason,
             'mode': self.trading_mode,
+            'signal_type': position.get('signal_type', 'unknown'),
             'quote_currency': quote_currency
         })
         # Log the trade
@@ -608,6 +632,7 @@ class TradingEngine:
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
                 'mode': self.trading_mode,
+                'signal_type': signal_type if signal_type else 'unknown',
                 'quote_currency': quote_currency
             })
             

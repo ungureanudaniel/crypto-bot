@@ -129,14 +129,18 @@ class Backtester:
             self._log(f"  ⚠️  Fetch failed for {symbol}: {e}")
             return None
 
-    # ------------------------------------------------------------------
-    def _simulate_position(self, symbol: str, signal: dict,
-                       df: pd.DataFrame, entry_idx: int) -> dict:
+    def _simulate_position(self, symbol: str, signal: dict, df: pd.DataFrame, entry_idx: int) -> dict:
         """Walk forward using pre-loaded df only — zero API calls."""
-        side        = signal['side']
-        entry_price = signal['entry']
-        units       = signal['units']
-        atr         = signal.get('atr', 0.0)
+        
+        if entry_idx + 1 >= len(df): return None 
+        
+        # 1. FIX: Entry Price must be the NEXT candle's open for realism
+        entry_bar = df.iloc[entry_idx + 1]
+        entry_price = float(entry_bar['open'])
+        
+        side = signal['side']
+        units = signal['units']
+        atr = signal.get('atr', 0.0)
         max_candles = 168  # 7 days on 1h
 
         position = {
@@ -149,57 +153,72 @@ class Backtester:
             'trailing_stop_active': False,
             'trailing_min_pct':     signal.get('trailing_min_pct'),
             'trailing_max_pct':     signal.get('trailing_max_pct'),
+            'candles_held':         0
         }
 
-        exit_price   = None
-        exit_reason  = 'max_hold'
-        candles_held = 0
-        end_idx      = min(entry_idx + max_candles + 1, len(df))
+        exit_price = None
+        exit_reason = 'max_hold'
+        end_idx = min(entry_idx + max_candles + 1, len(df))
 
+        # Start simulation from the candle we entered on
         for i in range(entry_idx + 1, end_idx):
-            current_price = float(df.iloc[i]['close'])
-            candles_held  = i - entry_idx
+            bar = df.iloc[i]
+            high, low, close = float(bar['high']), float(bar['low']), float(bar['close'])
+            
+            position['candles_held'] = i - entry_idx
 
-            position['candles_held'] = candles_held
+            # 2. Check for SL/TP hits via wicks FIRST (Most conservative)
+            if side == 'long':
+                if low <= position['stop_loss']:
+                    exit_price, exit_reason = position['stop_loss'], 'stop_loss_wick'
+                    break
+            else: # short
+                if high >= position['stop_loss']:
+                    exit_price, exit_reason = position['stop_loss'], 'stop_loss_wick'
+                    break
 
+            # 3. Prepare window for complex exit logic (needs historical context)
             w_start = max(0, i - 49)
-            window  = df.iloc[w_start: i + 1]
+            window = df.iloc[w_start: i + 1]
 
-            should_exit, reason = evaluate_exit(
-                symbol, position, current_price, window
-            )
-
+            # 4. Check complex logic (Trailing stops, MACD flips, etc.)
+            should_exit, reason = evaluate_exit(symbol, position, close, window)
+            
             if should_exit:
-                exit_price  = current_price
-                exit_reason = reason
+                exit_price, exit_reason = close, reason
                 break
 
+        # If we hit max_candles without an exit trigger
         if exit_price is None:
-            last_idx     = min(entry_idx + max_candles, len(df) - 1)
-            exit_price   = float(df.iloc[last_idx]['close'])
-            candles_held = last_idx - entry_idx
+            last_idx = min(entry_idx + max_candles, len(df) - 1)
+            exit_price = float(df.iloc[last_idx]['close'])
+            exit_reason = 'max_hold'
 
-        gross_pnl = ((exit_price - entry_price) if side == 'long'
-                    else (entry_price - exit_price)) * units
-        entry_fee = entry_price * units * FEE
-        exit_fee  = exit_price  * units * FEE
-        net_pnl   = gross_pnl - entry_fee - exit_fee
-        pnl_pct   = net_pnl / max(entry_price * units, 1e-9) * 100
+        # --- PnL Accounting ---
+        gross_pnl = ((exit_price - entry_price) if side == 'long' else (entry_price - exit_price)) * units
+        
+        # Apply FEE + 0.02% slippage for realistic fills
+        slippage_adj = 0.0002
+        entry_costs = entry_price * units * (FEE + slippage_adj)
+        exit_costs = exit_price * units * (FEE + slippage_adj)
+        
+        net_pnl = gross_pnl - entry_costs - exit_costs
+        pnl_pct = (net_pnl / (entry_price * units)) * 100 if units > 0 else 0
 
         return {
             'symbol':       symbol,
             'side':         side,
-            'entry_price':  entry_price,
-            'exit_price':   exit_price,
+            'entry_price':  round(entry_price, 6),
+            'exit_price':   round(exit_price, 6),
             'units':        units,
             'gross_pnl':    round(gross_pnl, 6),
             'net_pnl':      round(net_pnl, 6),
             'pnl_pct':      round(pnl_pct, 4),
-            'fees':         round(entry_fee + exit_fee, 6),
-            'candles_held': candles_held,
-            'hours_held':   candles_held if TIMEFRAME == '4h' else round(candles_held / 4, 1),
+            'fees':         round(entry_costs + exit_costs, 6),
+            'candles_held': position['candles_held'],
+            'hours_held':   position['candles_held'] if TIMEFRAME == '1h' else position['candles_held'] * 4,
             'exit_reason':  exit_reason,
-            'signal_type':  signal.get('signal_type', 'unknown'),
+            'signal_type':  position['signal_type'],
             'regime':       signal.get('regime', 'unknown'),
             'trend_strength': signal.get('trend_strength', 0),
         }
@@ -315,13 +334,16 @@ class Backtester:
             signal['trailing_min_pct'] = trailing_min
             signal['trailing_max_pct'] = trailing_max
 
-            cost = signal['units'] * signal['entry']
+            cost = signal['units'] * float(window.iloc[-1]['close'])
             if cost > self.equity * 0.95 or cost < 1.0:
                 i += SCAN_STEP
                 continue
 
             # ===== SIMULATE POSITION =====
             result = self._simulate_position(symbol, signal, df, i)
+            if result is None:
+                i += SCAN_STEP
+                continue
             self.equity += result['net_pnl']
             self.equity_curve.append(self.equity)
             coin_trades.append(result)

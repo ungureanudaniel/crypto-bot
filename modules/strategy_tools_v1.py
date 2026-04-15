@@ -5,7 +5,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import numpy as np
 import logging
-import time
 from typing import Dict, Optional
 from ta.volatility import BollingerBands
 from ta.trend import MACD, ADXIndicator
@@ -17,9 +16,6 @@ logger = logging.getLogger(__name__)
 ml_strategies = {}
 sentiment_agent = None
 use_volume_shrinkage = _cfg.config.get('use_volume_shrinkage', False)
-# IMPROVEMENT: allow enabling daily trend filter via config
-use_daily_trend_filter = _cfg.config.get('use_daily_trend_filter', True)
-
 # -------------------------------------------------------------------
 # Helper Functions
 # -------------------------------------------------------------------
@@ -172,25 +168,22 @@ def rsi_signal(df, oversold=25, overbought=75):
         return None
 
 def macd_bar_exhaustion_signal(df, fast=12, slow=26, signal=9, 
-                                min_bars=4,                      # IMPROVEMENT: increased from 3 to 4
-                                min_shrink_bars=3,               # IMPROVEMENT: increased from 2 to 3
-                                use_rsi_confirm=True, 
-                                rsi_oversold=30,                 # IMPROVEMENT: tighter from 35 to 30
-                                rsi_overbought=70,               # IMPROVEMENT: tighter from 65 to 70
+                                min_bars=3, min_shrink_bars=2,
+                                use_rsi_confirm=True, rsi_oversold=35, rsi_overbought=65, 
                                 use_volume_shrink=True):
     """
     MACD Bar Exhaustion Signal (Replaces standard MACD crossover)
     
     Entry Logic (Long):
-      1. MACD histogram has 4+ consecutive red (negative) bars
-      2. Last 3 red bars are shrinking in magnitude
+      1. MACD histogram has 2+ consecutive red (negative) bars
+      2. Red bars are shrinking in magnitude (closing toward zero)
       3. Price stabilizes (low volatility)
       4. One more small drop (final flush)
       5. Enter when histogram continues shrinking
     
     Entry Logic (Short):
-      1. MACD histogram has 4+ consecutive green (positive) bars
-      2. Last 3 green bars are shrinking in magnitude
+      1. MACD histogram has 2+ consecutive green (positive) bars
+      2. Green bars are shrinking in magnitude (closing toward zero)
       3. Price stabilizes (low volatility)
       4. One more small push up (final pump)
       5. Enter when histogram continues shrinking
@@ -249,12 +242,6 @@ def macd_bar_exhaustion_signal(df, fast=12, slow=26, signal=9,
         # Price action: check for one more small drop/pump
         price_drop = df['close'].iloc[-1] < df['close'].iloc[-2]
         price_rise = df['close'].iloc[-1] > df['close'].iloc[-2]
-
-        # IMPROVEMENT: ADX filter – skip if ADX > 30 (strong trend)
-        adx = ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
-        adx_val = adx.iloc[-1]
-        if adx_val > 30:
-            return None
         
         # ===== LONG SIGNAL =====
         if (neg_streak.iloc[-1] >= min_bars and 
@@ -274,7 +261,7 @@ def macd_bar_exhaustion_signal(df, fast=12, slow=26, signal=9,
         if (pos_streak.iloc[-1] >= min_bars and 
             bars_shrinking and 
             stable and 
-            price_rise and volume_shrink_ok):
+            price_rise):
             
             # RSI confirmation (optional)
             if use_rsi_confirm and current_rsi < rsi_overbought:
@@ -384,7 +371,7 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
         min_pct = stop_loss_min_pct if stop_loss_min_pct is not None else cfg.config.get('stop_loss_min_pct', 0.015)
         max_pct = stop_loss_max_pct if stop_loss_max_pct is not None else cfg.config.get('stop_loss_max_pct', 0.08)
         def_pct = default_stop_loss_pct if default_stop_loss_pct is not None else cfg.config.get('default_stop_loss_pct', 0.03)
-        rr = min_rr if min_rr is not None else cfg.config.get('min_rr', 99.0)
+        rr = min_rr if min_rr is not None else cfg.config.get('min_rr', 4.0)
 
         # Calculate stop loss distance from ATR
         if atr and atr > 0:
@@ -453,33 +440,8 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
         logger.error(f"Error in calculate_position_units: {e}")
         return 0, None, None
 
-# -------------------------------------------------------------------
-# Higher timeframe trend helper (cached)
-# -------------------------------------------------------------------
-_daily_trend_cache = {}
-def get_daily_trend(symbol: str) -> str:
-    """Return 'up', 'down', or 'side' based on daily EMA cross."""
-    now = time.time()
-    # cache for 1 hour
-    if symbol in _daily_trend_cache:
-        cached_time, cached_trend = _daily_trend_cache[symbol]
-        if now - cached_time < 3600:
-            return cached_trend
-    try:
-        df_daily = fetch_ohlcv(symbol, interval='1d', limit=100)
-        if df_daily.empty or len(df_daily) < 50:
-            return "side"
-        ema20 = df_daily['close'].ewm(span=20).mean()
-        ema50 = df_daily['close'].ewm(span=50).mean()
-        trend = "up" if ema20.iloc[-1] > ema50.iloc[-1] else "down"
-        _daily_trend_cache[symbol] = (now, trend)
-        return trend
-    except Exception as e:
-        logger.debug(f"Daily trend error for {symbol}: {e}")
-        return "side"
-
 # ===========================================================================
-# Main signal Generator
+# Main signal GeneratorExit
 # ===========================================================================
 def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_engine=None, regime=None):
     """
@@ -487,7 +449,6 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
     Enhanced with trend detection to filter counter‑trend signals.
     
     REPLACED: Standard MACD crossover with MACD Bar Exhaustion strategy
-    IMPROVEMENTS: stricter parameters, ADX filter, daily trend filter
     """
     try:
         if df.empty or len(df) < 50:
@@ -590,13 +551,13 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         if regime_type == "trend":
             logger.debug(f"📈 Trending market - following {trend_direction} trend")
             
-            # Single call with all improvements: min_bars=4, RSI confirm, volume shrink
+            # Single call with all improvements: min_bars=3, RSI confirm, volume shrink
             signal = macd_bar_exhaustion_signal(df, 
-                                                min_bars=4, 
-                                                min_shrink_bars=3,
+                                                min_bars=3, 
+                                                min_shrink_bars=2,
                                                 use_rsi_confirm=True, 
-                                                rsi_oversold=30, 
-                                                rsi_overbought=70,
+                                                rsi_oversold=35, 
+                                                rsi_overbought=65,
                                                 use_volume_shrink=use_volume_shrinkage)
             
             if trend_direction == "up":
@@ -635,8 +596,8 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             
             # Try MACD bar exhaustion first (works well in ranges)
             signal = macd_bar_exhaustion_signal(df, 
-                                                min_bars=4, 
-                                                min_shrink_bars=3,
+                                                min_bars=2, 
+                                                min_shrink_bars=2,
                                                 use_rsi_confirm=False, 
                                                 use_volume_shrink=True)
             if signal:
@@ -671,8 +632,8 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             
             # Try MACD bar exhaustion first (can signal pullback entries)
             signal = macd_bar_exhaustion_signal(df, 
-                                                min_bars=4, 
-                                                min_shrink_bars=3,
+                                                min_bars=2, 
+                                                min_shrink_bars=2,
                                                 use_rsi_confirm=False, 
                                                 use_volume_shrink=True)
             if signal:
@@ -711,8 +672,8 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             
             # MACD bar exhaustion may be less reliable in high volatility
             signal = macd_bar_exhaustion_signal(df, 
-                                                min_bars=4, 
-                                                min_shrink_bars=3,
+                                                min_bars=2, 
+                                                min_shrink_bars=2,
                                                 use_rsi_confirm=True, 
                                                 use_volume_shrink=True)
             if signal:
@@ -749,7 +710,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             logger.debug(f"❓ Unknown regime – trying all strategies")
             # Prioritize MACD bar exhaustion
             for fn, stype, mult in [
-                (lambda d: macd_bar_exhaustion_signal(d, min_bars=4, min_shrink_bars=3, use_volume_shrink=True), "macd_bar_exhaustion_unknown", 2.0),
+                (lambda d: macd_bar_exhaustion_signal(d, min_bars=2, min_shrink_bars=2, use_volume_shrink=True), "macd_bar_exhaustion_unknown", 2.0),
                 (breakout_signal, "breakout_unknown", 2.0),
                 (rsi_signal, "rsi_unknown", 1.5),
                 (bollinger_band_signal, "bollinger_unknown", 1.5),
@@ -775,37 +736,64 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 logger.warning(f"❌ REJECTED: {signal} signal against {trend_dir} trend (ADX={trend_strength*100:.0f})")
                 return None
             
-            # --- Daily Trend Filter ---
-            if use_daily_trend_filter and symbol:
-                daily_trend = get_daily_trend(symbol)
-                if daily_trend != "side" and signal_dir != daily_trend:
-                    logger.warning(f"❌ REJECTED: {signal} signal against DAILY {daily_trend} trend")
-                    return None
+            # Weak trend: skip counter-trend trades
+            if trend_strength < 0.2 and signal_dir != trend_dir and trend_dir != 'side':
+                logger.debug(f"⏭️ Skipping {signal} – trend too weak (ADX {trend_strength*100:.0f})")
+                return None
 
-            # --- Position Sizing and Output ---
-            # Use real-time balance if available
-            available_balance = get_available_balance(symbol, trading_engine) or equity
-            
-            units, sl_price, tp_price = calculate_position_units(
-                entry_price=current_price,
-                equity=available_balance,
-                risk_per_trade=adjusted_risk,
-                atr=current_atr,
-                stop_atr_multiplier=multiplier, # Uses the multiplier set in the regime logic
+            # Determine market type
+            market = "futures" if signal == "short" else "spot"
+
+            # Leverage (for futures)
+            try:
+                from config_loader import config as _cfg
+                leverage = int(_cfg.config.get('futures_leverage', 1))
+            except:
+                leverage = 1
+
+            sizing_equity = equity * leverage if market == "futures" else equity
+
+            units, sl, tp = calculate_position_units(
+                current_price,
+                sizing_equity,
+                adjusted_risk,
+                current_atr,
+                multiplier,
+                trading_fee=trading_fee,
                 side=signal
             )
 
             if units > 0:
-                return {
-                    'symbol': symbol,
+                # Cap short units
+                if signal == 'short' and trading_engine:
+                    available = get_available_balance(symbol, trading_engine)
+                    if available > 0:
+                        max_units_by_cash = (available * leverage) / current_price if current_price > 0 else 0
+                        if units > max_units_by_cash:
+                            units = max_units_by_cash
+                            logger.info(f"🔄 Short capped to margin: {units:.6f}")
+                    if units <= 0:
+                        return None
+
+                # Confidence based on trend alignment
+                if signal_dir == trend_dir:
+                    confidence = min(85 + int(trend_strength * 15), 95)
+                else:
+                    confidence = 60
+
+                result = {
                     'side': signal,
-                    'signal_type': signal_type,
+                    'entry': current_price,
                     'units': units,
-                    'entry_price': current_price,
-                    'stop_loss': sl_price,
-                    'take_profit': tp_price,
-                    'risk_pct': adjusted_risk,
-                    'regime': regime_type
+                    'stop_loss': sl,
+                    'take_profit': tp,
+                    'signal_type': signal_type or 'unknown',
+                    'atr': current_atr,
+                    'regime': f"{regime_type}_{trend_direction}",
+                    'market': market,
+                    'leverage': leverage,
+                    'confidence': confidence,
+                    'trend_strength': trend_strength,
                 }
                 logger.debug(f"📊 Signal: {signal} | confidence: {confidence}% | trend: {trend_dir} ({trend_strength*100:.0f} ADX)")
                 return result
@@ -878,7 +866,7 @@ if __name__ == "__main__":
             print(f"   ⏱️  Timeframe: {interval}")
             
             # Fetch data
-            from modules.data_feed import fetch_ohlcv
+            from data_feed import fetch_ohlcv
             df = fetch_ohlcv(symbol, interval=interval, limit=200)
             
             if df.empty or len(df) < 50:
@@ -892,7 +880,7 @@ if __name__ == "__main__":
             strategies = [
                 ("Breakout", lambda: breakout_signal(df)),
                 ("RSI", lambda: rsi_signal(df)),
-                ("MACD Bar Exhaustion", lambda: macd_bar_exhaustion_signal(df)),
+                ("MACD", lambda: macd_bar_exhaustion_signal(df)),
                 ("Bollinger", lambda: bollinger_band_signal(df)),
                 ("Volume Breakout", lambda: volume_breakout_signal(df))
             ]
@@ -954,7 +942,7 @@ if __name__ == "__main__":
         print(f"\n🔍 Testing {symbol}...")
         
         # Fetch data
-        from modules.data_feed import fetch_ohlcv
+        from data_feed import fetch_ohlcv
         df = fetch_ohlcv(symbol, interval="1h", limit=200)
         
         if df.empty:
@@ -969,6 +957,7 @@ if __name__ == "__main__":
         
         for scenario_name, mock_balance in balance_scenarios:
             print(f"\n   📊 Scenario: {scenario_name}")
+            
             # Mock the get_available_balance function for this test
             def mock_get_balance(sym, engine, balance=mock_balance):
                 return balance
@@ -1011,7 +1000,7 @@ if __name__ == "__main__":
     signals_by_tf = {}
     
     for interval in test_timeframes:
-        from modules.data_feed import fetch_ohlcv
+        from data_feed import fetch_ohlcv
         df = fetch_ohlcv(symbol, interval=interval, limit=200)
         
         if df.empty:
@@ -1045,7 +1034,7 @@ if __name__ == "__main__":
     print("=" * 60)
     
     symbol = "BTC/USDT"
-    from modules.data_feed import fetch_ohlcv
+    from data_feed import fetch_ohlcv
     df = fetch_ohlcv(symbol, interval="1h", limit=200)
     
     if not df.empty:
