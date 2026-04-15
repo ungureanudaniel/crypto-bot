@@ -286,32 +286,43 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quick portfolio summary - works in both paper and live mode"""
+    """Quick portfolio summary with advanced risk metrics"""
     if not update.message:
-        logger.warning("⚠️ Summary command triggered without message object")
         return
+
     try:
-        from modules.portfolio import get_portfolio_summary
+        from modules.portfolio import get_portfolio_summary, get_detailed_stats
+        
+        # Get basic and detailed data
         summary_data = get_portfolio_summary(current_prices=get_cached_prices())
+        stats = get_detailed_stats()
 
-        total_value = summary_data.get('total_value', 0)
-        total_cash = summary_data.get('total_cash', 0)
-        total_return_pct = summary_data.get('total_return_pct', 0)
-        pnl_emoji = "🟢" if total_return_pct >= 0 else "🔴"
+        # Basic Portfolio Info
+        total_val = summary_data.get('total_value', 0)
+        ret_pct = summary_data.get('total_return_pct', 0)
+        pnl_emoji = "🍏" if ret_pct >= 0 else "🍎"
 
+        # Construct Message
         message = (
-            f"{pnl_emoji} *Portfolio*: `${total_value:,.0f}` "
-            f"({total_return_pct:+.1f}%) | "
-            f"💵 Cash: `${total_cash:,.0f}` | "
-            f"📊 {summary_data.get('positions_count', 0)} positions | "
-            f"🎯 {summary_data.get('win_rate', 0):.0f}% win rate"
+            f"{pnl_emoji} *PORTFOLIO SUMMARY*\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"💰 *Balance:* `${total_val:,.2f}` (`{ret_pct:+.2f}%`)\n"
+            f"💵 *Cash:* `${summary_data.get('total_cash', 0):,.2f}`\n"
+            f"📦 *Positions:* `{summary_data.get('positions_count', 0)}` active\n\n"
+            
+            f"📈 *PERFORMANCE*\n"
+            f"🏆 *Win Rate:* `{stats.get('win_rate', 0)}%`\n"
+            f"⚖️ *Profit Factor:* `{stats.get('profit_factor', 0)}`\n"
+            f"💎 *Sharpe Ratio:* `{stats.get('sharpe_ratio', 0)}`\n"
+            f"📉 *Max Drawdown:* `{stats.get('max_drawdown', 0)}%`\n"
+            f"📊 *Avg Trade:* `${stats.get('avg_trade_pnl', 0)}`"
         )
 
         await update.message.reply_text(message, parse_mode='Markdown')
 
     except Exception as e:
-        logger.error(f"❌ Summary error: {e}")
-        await update.message.reply_text("❌ Error getting summary")
+        logger.error(f"❌ Summary error: {e}", exc_info=True)
+        await update.message.reply_text("❌ Error generating portfolio summary.")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status"""

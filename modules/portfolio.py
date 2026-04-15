@@ -479,38 +479,42 @@ def get_detailed_stats() -> Dict:
     """Calculate advanced trading metrics from history.json"""
     history = get_trade_history(limit=1000)
     if not history:
-        return {"error": "No trade history found"}
+        return {}
 
-    # Extract PnL from closed trades
-    pnls = [t['pnl'] for t in history if t.get('action') == 'close' and 'pnl' in t]
+    # Filter for closed trades with valid PnL
+    pnls = [float(t['pnl']) for t in history if t.get('action') == 'close' and 'pnl' in t]
+    
     if not pnls:
-        return {"error": "No closed trades with PnL data"}
+        return {}
 
     # 1. Profit Factor
     gross_profits = sum(p for p in pnls if p > 0)
     gross_losses = abs(sum(p for p in pnls if p < 0))
-    profit_factor = gross_profits / gross_losses if gross_losses > 0 else float('inf')
+    profit_factor = gross_profits / gross_losses if gross_losses > 0 else (99.0 if gross_profits > 0 else 0.0)
 
-    # 2. Sharpe Ratio (Simplified for Trade-by-Trade)
-    # Risk-free rate assumed 0% for crypto simplicity
+    # 2. Sharpe Ratio (Trade-based approximation)
     avg_pnl = np.mean(pnls)
     std_pnl = np.std(pnls)
-    sharpe = (avg_pnl / std_pnl) * np.sqrt(len(pnls)) if std_pnl > 0 else 0
+    # Using sqrt(len) scales the ratio by the number of trades
+    sharpe = (avg_pnl / std_pnl) * np.sqrt(len(pnls)) if std_pnl > 1e-6 else 0.0
 
-    # 3. Drawdown Analysis
-    cumulative_pnl = np.cumsum(pnls)
-    peak = np.maximum.accumulate(cumulative_pnl)
-    # Handle case where pnl is always negative/zero
-    drawdowns = (peak - cumulative_pnl)
-    max_drawdown = np.max(drawdowns) if len(drawdowns) > 0 else 0
+    # 3. Drawdown Analysis (Percent-based is more informative)
+    # We assume an initial equity (e.g., $5000) to calculate % drawdown
+    initial_equity = 5000 
+    equity_curve = initial_equity + np.cumsum(pnls)
+    peak = np.maximum.accumulate(equity_curve)
+    
+    # Calculate % drop from peak
+    drawdown_pcts = (peak - equity_curve) / peak * 100
+    max_dd_pct = np.max(drawdown_pcts) if len(drawdown_pcts) > 0 else 0.0
 
     return {
         "total_trades": len(pnls),
-        "profit_factor": round(profit_factor, 2),
-        "sharpe_ratio": round(sharpe, 2),
-        "max_drawdown_amount": round(max_drawdown, 2),
-        "avg_trade_pnl": round(avg_pnl, 2),
-        "win_rate": round((len([p for p in pnls if p > 0]) / len(pnls)) * 100, 2)
+        "profit_factor": round(float(profit_factor), 2),
+        "sharpe_ratio": round(float(sharpe), 2),
+        "max_drawdown": round(float(max_dd_pct), 1),
+        "avg_trade_pnl": round(float(avg_pnl), 2),
+        "win_rate": round((len([p for p in pnls if p > 0]) / len(pnls)) * 100, 1)
     }
 
 # -------------------------------------------------------------------
