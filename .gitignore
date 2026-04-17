@@ -16,4 +16,5 @@ daily_performance.log
 *.log
 
 .pyc
-__pycache__/
+__pycache__/history.json
+*.tmp

@@ -12,9 +12,7 @@ services:
       retries: 3
       start_period: 120s
     volumes:
-      - ./config.json:/app/config.json
-      - ./portfolio.json:/app/portfolio.json
-      - ./history.json:/app/history.json
+      - .:/app
       - ./logs:/app/logs
     logging:
       driver: "json-file"
