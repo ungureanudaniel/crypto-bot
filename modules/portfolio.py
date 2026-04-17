@@ -136,25 +136,28 @@ def _make_serializable(obj: Any) -> Any:
     return obj
 
 def save_portfolio(portfolio: Dict) -> None:
-    """Atomic save: Writes to .tmp then renames to prevent corruption."""
+    """Safely saves the portfolio by writing directly to file within a thread lock."""
     with _portfolio_lock:
-        clean = _make_serializable(portfolio)
-        clean["last_updated"] = datetime.now().isoformat()
-        
-        tmp_file = PORTFOLIO_FILE + ".tmp"
         try:
-            with open(tmp_file, "w") as f:
+            clean = _make_serializable(portfolio)
+            clean["last_updated"] = datetime.now().isoformat()
+            
+            # We skip the .tmp + rename approach because Docker/Ubuntu OverlayFS 
+            # often marks the target file as 'Busy' during the swap.
+            with open(PORTFOLIO_FILE, "w") as f:
                 json.dump(clean, f, indent=2)
                 f.flush()
-                os.fsync(f.fileno()) # Force write to physical disk
-            
-            # Atomic swap
-            os.replace(tmp_file, PORTFOLIO_FILE)
+                os.fsync(f.fileno()) 
+                
             logger.debug(f"✅ Portfolio saved successfully.")
-        except Exception as e:
-            logger.error(f"❌ Critical failure saving portfolio: {e}")
+            
+            # Manually clean up any stuck .tmp file left by previous crashes
+            tmp_file = PORTFOLIO_FILE + ".tmp"
             if os.path.exists(tmp_file):
                 os.remove(tmp_file)
+
+        except Exception as e:
+            logger.error(f"❌ Critical failure saving portfolio: {e}")
 
 # -------------------------------------------------------------------
 # POSITION MANAGEMENT (just data access, no logic)

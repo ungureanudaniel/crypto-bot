@@ -121,7 +121,11 @@ class Backtester:
         Walk forward candle by candle from entry_idx until exit.
         Uses evaluate_exit() (trailing stop + signal reversal) on each candle.
         """
-        side        = signal['side']
+        side = signal.get('side') or signal.get('signal')
+
+        if not side:
+            logger.error(f"Malformed signal dict: {signal}")
+            return {'error': 'Malformed signal dict', 'symbol': symbol}
         entry_price = signal['entry']
         stop_loss   = signal['stop_loss']
         take_profit = signal['take_profit']
@@ -129,7 +133,7 @@ class Backtester:
         atr         = signal.get('atr', 0.0)
 
         position = {
-            'side':                side,
+            'side':                signal,
             'entry_price':         entry_price,
             'stop_loss':           stop_loss,
             'take_profit':         take_profit,
@@ -257,8 +261,12 @@ class Backtester:
             # Simulate the position
             in_position = True
             result = self._simulate_position(symbol, signal, df, i)
-            last_entry_idx = i + result['candles_held']
             in_position = False
+
+            if 'error' in result:
+                continue
+
+            last_entry_idx = i + result['candles_held']
 
             self.equity += result['net_pnl']
             self.equity_curve.append(self.equity)
