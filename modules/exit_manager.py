@@ -88,75 +88,40 @@ def check_macd_bar_exhaustion_exit(df: pd.DataFrame, position: dict) -> Tuple[bo
 # -------------------------------------------------------------------
 def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
     """
-    Re-run the indicator that generated the entry signal.
-    Returns True only if ALL of:
-      1. Indicator fires the opposite direction
-      2. Price is actually moving against the trade (momentum confirmation)
-      3. For mean-reversion signals (bollinger/rsi): previous candle also reversed
+    MODIFIED: Exit immediately when indicators flip, 
+    without waiting for price to move against us.
     """
     signal_type = position.get('signal_type', '')
     side        = position.get('side', 'long')
     opposite    = 'short' if side == 'long' else 'long'
-    entry_price = position.get('entry_price', 0.0)
 
     try:
         from modules.strategy_tools import (
-            rsi_signal,
-            bollinger_band_signal, breakout_signal, volume_breakout_signal,
-            macd_bar_exhaustion_signal
+            rsi_signal, bollinger_band_signal, breakout_signal, 
+            volume_breakout_signal, macd_bar_exhaustion_signal
         )
 
-        if len(df) < 50:
-            return False
+        if len(df) < 50: return False
 
-        current_price = float(df['close'].iloc[-1])
-        prev_price    = float(df['close'].iloc[-2])
-
-        # Price momentum must confirm
-        if side == 'long' and current_price >= prev_price:
-            return False
-        if side == 'short' and current_price <= prev_price:
-            return False
-
-        # Require at least 0.3% adverse move from entry
-        if entry_price > 0:
-            move_against = ((entry_price - current_price) / entry_price
-                            if side == 'long'
-                            else (current_price - entry_price) / entry_price)
-            if move_against < 0.003:
-                return False
-        else:
-            move_against = 0.0
+        # --- REMOVED: The requirement for price to move against us ---
+        # I want to exit on the 'FLIP', even if the price is still neutral.
 
         reversal_signal = None
-
         
+        # Check the specific indicator that got us in
         if 'macd_bar_exhaustion' in signal_type:
+            # For MACD, we check for a standard trend reversal
             reversal_signal = macd_bar_exhaustion_signal(df)
-            # For bar exhaustion, we want the opposite signal
-            if reversal_signal:
-                reversal_signal = 'short' if reversal_signal == 'long' else 'long'
         elif 'rsi' in signal_type:
             reversal_signal = rsi_signal(df)
         elif 'bollinger' in signal_type:
             reversal_signal = bollinger_band_signal(df)
-            if reversal_signal == opposite:
-                prev_window = df.iloc[:-1]
-                if len(prev_window) >= 50:
-                    if bollinger_band_signal(prev_window) != opposite:
-                        return False
         elif 'breakout' in signal_type:
             reversal_signal = breakout_signal(df)
-        elif 'volume' in signal_type:
-            reversal_signal = volume_breakout_signal(df)
-        else:
-            return False
-
+        
+        # EXIT LOGIC: If the indicator generates the OPPOSITE signal, FLIP.
         if reversal_signal == opposite:
-            logger.info(
-                f"🔄 Signal reversal confirmed: was {side}, now {reversal_signal} "
-                f"(indicator: {signal_type}, move: {move_against:.2%})"
-            )
+            logger.info(f"🔄 TREND FLIP: Indicator {signal_type} reversed to {opposite}. Exiting.")
             return True
 
         return False
@@ -164,7 +129,6 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
     except Exception as e:
         logger.debug(f"Signal reversal check failed: {e}")
         return False
-
 
 # -------------------------------------------------------------------
 # Layer 2 — Chandelier Exit (Trailing Stop)
@@ -346,16 +310,16 @@ def evaluate_exit(
         if tp and current_price <= tp:
             return True, 'take_profit'
 
-    # --- NEW: Layer 2 — MACD Bar Exhaustion exit (after 4 candles minimum) ---
+    # --- Layer 2 — MACD Bar Exhaustion exit (after 4 candles minimum) ---
     if df is not None and not df.empty:
         should_exit, reason = check_macd_bar_exhaustion_exit(df, position)
         if should_exit:
             return True, reason
 
-    # --- Layer 1: signal reversal (min 6 candles) ---
+    # --- Layer 1: signal reversal (min 3 candles) ---
     if df is not None and not df.empty:
         candles_held = position.get('candles_held', 0)
-        if candles_held >= 6:
+        if candles_held >= 3: # Wait at least 3 candles before checking for signal reversal
             if check_signal_reversal(df, position):
                 return True, 'signal_reversal'
 
