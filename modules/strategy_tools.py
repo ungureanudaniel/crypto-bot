@@ -683,29 +683,48 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                                                 use_volume_shrink=True)
             if signal:
                 signal_type = f"macd_bar_exhaustion_range_{signal}"
-                multiplier = 2.0
-                logger.debug(f"Range MACD Bar Exhaustion {signal}")
+                # RANGE SETTINGS: lower multiplier for tighter stops, fixed TP focus
+                multiplier = 1.5 
             else:
                 # Fallback to RSI and Bollinger
                 signal = rsi_signal(df)
                 if signal:
-                    signal_dir = 'up' if signal == 'long' else 'down'
-                    if trend_strength < 0.25 or signal_dir == trend_dir or trend_dir == 'side':
-                        signal_type = f"rsi_range_{signal}"
-                        multiplier = 1.5
-                        logger.debug(f"Range RSI {signal}")
-                    else:
-                        signal = None
+                    signal_type = f"rsi_range_{signal}"
+                    multiplier = 1.2
                 if not signal:
                     signal = bollinger_band_signal(df)
                     if signal:
-                        signal_dir = 'up' if signal == 'long' else 'down'
-                        if trend_strength < 0.25 or signal_dir == trend_dir or trend_dir == 'side':
-                            signal_type = f"bollinger_range_{signal}"
-                            multiplier = 1.5
-                            logger.debug(f"Range Bollinger {signal}")
-                        else:
-                            signal = None
+                        signal_type = f"bollinger_range_{signal}"
+                        multiplier = 1.2
+
+            # IF A SIGNAL WAS FOUND IN RANGE:
+            if signal:
+                # Force a Fixed Take Profit for Ranges (Mean Reversion)
+                # We tell the engine to ignore trailing stops for this trade
+                fixed_tp_dist = current_atr * 2.0 # Target the other side of the range
+                if signal == 'long':
+                    take_profit_price = current_price + fixed_tp_dist
+                else:
+                    take_profit_price = current_price - fixed_tp_dist
+                
+                # Create the return object with a flag for the exit manager
+                units, stop_loss, _ = calculate_position_units(
+                    current_price, equity, adjusted_risk, current_atr, 
+                    stop_atr_multiplier=multiplier, side=signal
+                )
+                
+                if units > 0:
+                    return {
+                        'signal': signal,
+                        'symbol': symbol,
+                        'units': units,
+                        'entry_price': current_price,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit_price, # Use our range-specific TP
+                        'type': signal_type,
+                        'regime': regime,
+                        'exit_strategy': 'fixed' # <--- IMPORTANT: Tells the bot NOT to trail
+                    }
 
         # ===== BREAKOUT MARKET =====
         elif regime_type == "breakout":

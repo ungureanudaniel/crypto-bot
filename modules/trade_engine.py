@@ -232,53 +232,84 @@ class TradingEngine:
             self.process_pair(symbol)
 
     def process_pair(self, symbol: str):
-        """Evaluates a single pair for entry"""
+        """Evaluates a single pair for entry with Regime-based filtering"""
         # Load fresh data
         df = self.data_feed.get_ohlcv(symbol, self.timeframe)
         if df is None or df.empty:
             return
 
-        # Regime Filter
-        regime = predict_regime(df)
+        base_pair_risk = self.get_pair_risk(symbol)
+        # 1. Get Regime String (e.g., "True Trend UPTREND (85% confidence)")
+        # Point 3: Regime-Based Execution
+        regime_str = predict_regime(df)
+        logger.info(f"🔍 {symbol} Regime: {regime_str}")
         
-        # Generate Signal (Passing regime to strategy)
-        signal_data = generate_trade_signal(df, self.get_cash_balance("USDT"), self.risk_per_trade, symbol, self, regime=regime)
+        # --- POINT 3: REGIME-BASED EXECUTION RULES ---
+        
+        # Rule A: Block all new entries during 'Expansion' (Volatile Chop)
+        if "Expansion" in regime_str:
+            logger.info(f"🚫 Skipping {symbol}: Volatile Chop detected.")
+            return
+
+        # Rule B: Adjust risk based on Trend Direction
+        current_risk = self.risk_per_trade
+        if "DOWNTREND" in regime_str:
+            current_risk *= 0.75  # 25% reduction for bear-market trades
+            logger.debug(f"📉 Downtrend risk reduction: {current_risk:.2%}")
+        
+        # Rule C:Optional - Filter by Confidence
+        #  parse the confidence to be extra strict:
+        # if "confidence" in regime_str and int(regime_str.split('(')[1][:2]) < 70:
+        #     logger.info(f"⚠️ Low confidence regime ({regime_str}). Skipping.")
+        #     return
+        # ---------------------------------------------
+
+        # 2. Generate Signal (Pass the ADJUSTED risk)
+        # Note: We pass the full regime_str so the strategy can log it
+        signal_data = generate_trade_signal(
+            df, 
+            self.get_cash_balance("USDT"), 
+            current_risk, 
+            symbol, 
+            self, 
+            regime=regime_str 
+        )
         signal = signal_data.get('signal')
 
         if signal in ['buy', 'sell']:
             current_price = df['close'].iloc[-1]
             
-            # Position Sizing Logic
-            units = self.calculate_position_size(symbol, current_price, signal_data.get('stop_loss'))
+            # 3. Position Sizing (Using the adjusted risk)
+            units = self.calculate_position_size(
+                symbol, 
+                current_price, 
+                signal_data.get('stop_loss'),
+                risk_override=current_risk
+            )
             
             if signal == 'buy':
                 self.open_position(
-                    symbol=symbol, 
-                    side='long', 
-                    entry_price=current_price,
-                    units=units,
-                    stop_loss=signal_data.get('stop_loss'),
+                    symbol=symbol, side='long', entry_price=current_price,
+                    units=units, stop_loss=signal_data.get('stop_loss'),
                     take_profit=signal_data.get('take_profit'),
                     signal_type=signal_data.get('strategy_name'),
                     atr=signal_data.get('atr')
                 )
             elif signal == 'sell':
-                # FIX: Route shorts directly to futures engine
                 if self.futures_engine:
                     self.futures_engine.open_short(
-                        symbol=symbol,
-                        amount=units,
-                        entry_price=current_price,
+                        symbol=symbol, amount=units, entry_price=current_price,
                         stop_loss=signal_data.get('stop_loss'),
                         take_profit=signal_data.get('take_profit')
                     )
-                else:
-                    logger.warning(f"⚠️ Short signal for {symbol} ignored: FuturesEngine not loaded")
 
-    def calculate_position_size(self, symbol, price, stop_loss):
-        """Risk-based sizing: Risks X% of account balance based on SL distance"""
+    def calculate_position_size(self, symbol, price, stop_loss, risk_override=None):
+        """Risk-based sizing using current regime risk"""
         cash = self.get_cash_balance("USDT")
-        risk_amt = cash * self.risk_per_trade
+        
+        # Use the overridden risk if provided, otherwise default to config
+        risk_pct = risk_override if risk_override is not None else self.risk_per_trade
+        risk_amt = cash * risk_pct
         
         if stop_loss and stop_loss != price:
             risk_per_unit = abs(price - stop_loss)

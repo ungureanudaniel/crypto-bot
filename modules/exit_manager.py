@@ -140,17 +140,10 @@ def update_chandelier_stop(
     atr: float,
 ) -> Tuple[Optional[float], str]:
     """
-    Hybrid trailing stop:
-    - Uses peak/trough anchoring from Chandelier concept
-    - Uses percentage-based distance (not ATR multiplier) for consistency
-    - Adapts distance to asset volatility via ATR% with per‑pair min/max
-    - Falls back to global trailing_stop_min_pct / trailing_stop_max_pct
-
-    Long:  stop = peak_since_entry × (1 - trail_pct)
-    Short: stop = trough_since_entry × (1 + trail_pct)
-
-    Breakeven floor at 1.5% profit.
-    Stop only moves in profitable direction (ratchet).
+    Upgraded Hybrid trailing stop:
+    - Stage 1: Adaptive ATR trailing based on Side (Longs get more room).
+    - Stage 2: Break-even floor triggers at 2.0% profit (Protects Capital).
+    - Stage 3: Ratchet mechanism (Stop only moves in favor).
     """
     from config_loader import config
 
@@ -160,38 +153,47 @@ def update_chandelier_stop(
     entry_price  = position.get('entry_price', current_price)
     current_stop = position.get('stop_loss', 0.0)
     side         = position.get('side', 'long')
+    regime       = position.get('regime', '') # Ensure this is passed into the dict during sim
 
-    # Adaptive trail: ATR% with per‑pair bounds
+    # --- 1. ADAPTIVE ATR CALCULATION ---
     atr_pct = (atr / entry_price) if (atr > 0 and entry_price > 0) else 0.02
 
-    # Use per‑pair trailing bounds if available, else global
+    # Fetch bounds from per-pair config or global
     trail_min = position.get('trailing_min_pct')
     trail_max = position.get('trailing_max_pct')
     if trail_min is None or trail_max is None:
         trail_min = config.config.get('trailing_stop_min_pct', 0.02)
         trail_max = config.config.get('trailing_stop_max_pct', 0.04)
 
+    # --- 2. LONG-BIAS BUFFER ---
+    # To increase Win Rate on Longs, we widen the trail slightly in Uptrends
+    # This prevents 'wick-outs' during the noise of a bull pullback.
+    if side == 'long' and "UPTREND" in regime:
+        trail_min *= 1.15  # Give 15% more breathing room
+        trail_max *= 1.15
+
     trail_pct = min(max(atr_pct, trail_min), trail_max)
 
-    breakeven_threshold = 0.015  # 1.5% profit → breakeven floor activates
+    # --- 3. BREAK-EVEN LOGIC ---
+    # Hard trigger at 2.0% to turn 'Potential Losers' into 'Scratch Trades'
+    be_trigger = 0.020 
+    # Use 0.1% buffer to ensure we cover exchange fees (0.05% entry + 0.05% exit)
+    be_floor = entry_price * (1.001 if side == 'long' else 0.999)
 
     if side == 'long':
         peak = max(position.get('peak_price', entry_price), current_price)
         position['peak_price'] = peak
 
-        profit_pct      = (current_price - entry_price) / entry_price
+        profit_pct = (current_price - entry_price) / entry_price
         chandelier_stop = peak * (1 - trail_pct)
 
-        if profit_pct >= breakeven_threshold:
-            chandelier_stop = max(chandelier_stop, entry_price)
+        # Apply Break-Even floor
+        if profit_pct >= be_trigger:
+            chandelier_stop = max(chandelier_stop, be_floor)
 
         if chandelier_stop > current_stop:
-            is_be  = (abs(chandelier_stop - entry_price) < 1e-6)
+            is_be = (abs(chandelier_stop - be_floor) < 1e-5)
             reason = 'breakeven' if is_be else 'trailing'
-            logger.info(
-                f"📈 Trail LONG: peak=${peak:.4f} stop ${current_stop:.4f}"
-                f" → ${chandelier_stop:.4f} (trail {trail_pct:.2%})"
-            )
             position['trailing_stop_active'] = True
             return chandelier_stop, reason
 
@@ -199,23 +201,21 @@ def update_chandelier_stop(
         trough = min(position.get('trough_price', entry_price), current_price)
         position['trough_price'] = trough
 
-        profit_pct      = (entry_price - current_price) / entry_price
+        profit_pct = (entry_price - current_price) / entry_price
         chandelier_stop = trough * (1 + trail_pct)
 
-        if profit_pct >= breakeven_threshold:
-            chandelier_stop = min(chandelier_stop, entry_price)
+        # Apply Break-Even floor
+        if profit_pct >= be_trigger:
+            chandelier_stop = min(chandelier_stop, be_floor)
 
         if chandelier_stop < current_stop:
-            is_be  = (abs(chandelier_stop - entry_price) < 1e-6)
+            is_be = (abs(chandelier_stop - be_floor) < 1e-5)
             reason = 'breakeven' if is_be else 'trailing'
-            logger.info(
-                f"📉 Trail SHORT: trough=${trough:.4f} stop ${current_stop:.4f}"
-                f" → ${chandelier_stop:.4f} (trail {trail_pct:.2%})"
-            )
             position['trailing_stop_active'] = True
             return chandelier_stop, reason
 
     return None, ''
+
 # -------------------------------------------------------------------
 def calculate_fibonacci_target(position: dict, current_price: float, entry_price: float, side: str) -> Optional[float]:
     """

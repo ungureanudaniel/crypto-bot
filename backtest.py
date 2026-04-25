@@ -55,7 +55,8 @@ except Exception as e:
     INITIAL_EQUITY = 5000.0
 
 class Backtester:
-    def __init__(self, coins: List[str], days: int = 365, use_regime: bool = True, verbose: bool = False):
+    def __init__(self, coins: List[str], days: int = 365, use_regime: bool = True, verbose: bool = False, config_path="config.json"):
+        self.config = self._load_config(config_path)
         self.coins = coins
         self.days = days
         self.use_regime = use_regime
@@ -63,6 +64,20 @@ class Backtester:
         self.equity = INITIAL_EQUITY
         self.trades = []
         self.equity_curve = [INITIAL_EQUITY]
+
+    def _load_config(self, path):
+        """Safely loads the JSON config file"""
+        if not os.path.exists(path):
+            print(f"⚠️ Warning: {path} not found. Using default settings.")
+            return {}
+        with open(path, 'r') as f:
+            return json.load(f)
+
+    def get_pair_risk(self, symbol: str):
+        """Hierarchical risk lookup: Pair-specific -> Global -> 1% Default"""
+        per_pair_config = self.config.get('per_pair', {})
+        pair_settings = per_pair_config.get(symbol, {})
+        return pair_settings.get('risk_per_trade', self.config.get('risk_per_trade', 0.01))
 
     def run(self):
         print(f"🚀 Starting Backtest: {self.coins} ({self.days} days)")
@@ -75,36 +90,49 @@ class Backtester:
     def run_coin(self, symbol: str) -> List[dict]:
         df = fetch_historical_data(symbol, interval=portfolio_data.get('trading_timeframe', '4h'), days=self.days)
         if df is None or df.empty: return []
-
         coin_trades = []
         i = 100 
-        
+
+        # Inside run_coin
+        base_risk = self.config.get('risk_per_trade', self.config.get('risk_per_trade', 0.03))
         while i < len(df) - 1:
             window = df.iloc[max(0, i - 150): i + 1].copy()
-            regime = predict_regime(window)
+            regime_str = predict_regime(window) if self.use_regime else "Trend UPTREND"
             
+            # --- POINT 3: MIRROR LIVE ENGINE FILTERING ---
+            if "Expansion" in regime_str:
+                i += 1
+                continue 
+            
+            # Adjust risk for Downtrends
+            current_risk = base_risk
+            if "DOWNTREND" in regime_str:
+                current_risk *= 0.75
+            # ---------------------------------------------
+
             signal_data = generate_trade_signal(
                 df=window, 
-                equity=self.equity, 
+                equity=self.equity,
+                risk_per_trade=current_risk, # Corrected parameter name
                 symbol=symbol, 
-                regime=regime
+                regime=regime_str,
             )
 
             if signal_data and signal_data.get('side', 'none') != 'none':
+                # Entry happens on the OPEN of the NEXT candle
                 entry_price = df.iloc[i+1]['open']
-                if self.verbose:
-                    print(f"🔹 SIGNAL: {symbol} {signal_data['side'].upper()} @ {entry_price:.2f} | Regime: {regime}")
                 
+                print(f"▶️ [ENTRY] {symbol} {signal_data['side'].upper()} | Price: {entry_price:.2f} | Regime: {regime_str.split('(')[0].strip()}")
+
                 result = self._simulate_position(symbol, signal_data, df, i)
                 if result:
-                    # --- DATA CAPTURE FOR SUMMARY ---
-                    result['regime'] = regime.split('(')[0]  # Capture just the regime name for summary stats')
+                    pnl_color = "🟢" if result['net_pnl'] > 0 else "🔴"
+                    print(f"⏹️ [EXIT]  {symbol} | Price: {result['exit_price']:.2f} | PnL: {pnl_color} ${result['net_pnl']:.2f} ({result['pnl_pct']:.2f}%) | Reason: {result['exit_reason']}")
+                    
+                    result['regime'] = regime_str.split('(')[0].strip()
                     self.equity += result['net_pnl']
                     self.equity_curve.append(self.equity)
                     coin_trades.append(result)
-                    
-                    if self.verbose:
-                        print(f"🔸 EXIT:   {symbol} @ {result['exit_price']:.2f} | PnL: ${result['net_pnl']:.2f} | Reason: {result['exit_reason']}")
                     
                     i += result['candles_held'] + 1 
                     continue
@@ -115,6 +143,9 @@ class Backtester:
     def _simulate_position(self, symbol: str, signal: dict, df: pd.DataFrame, entry_idx: int) -> Optional[dict]:
         if entry_idx + 1 >= len(df): return None
         
+        # 1. Fetch pair-specific config for trailing params
+        pair_config = self.config.get('per_pair', {}).get(symbol, {})
+        
         entry_price = float(df.iloc[entry_idx + 1]['open'])
         position = {
             'symbol': symbol,
@@ -124,31 +155,57 @@ class Backtester:
             'take_profit': signal.get('take_profit'),
             'units': signal.get('units', 0),
             'atr': signal.get('atr'),
+            'regime': signal.get('regime', 'Neutral'),
             'signal_type': signal.get('signal_type', 'backtest_trade'),
-            'candles_held': 0
+            'candles_held': 0,
+            # Pass config trailing params into the position object for evaluate_exit
+            'trailing_min_pct': pair_config.get('trailing_min_pct', self.config.get('trailing_stop_min_pct')),
+            'trailing_max_pct': pair_config.get('trailing_max_pct', self.config.get('trailing_stop_max_pct'))
         }
-
+        
         exit_price = None
         exit_reason = 'timeout'
         
+        # Simulation Loop
         for j in range(entry_idx + 1, len(df)):
             current_bar = df.iloc[j]
             position['candles_held'] = j - entry_idx
+            
+            # Create a rolling window for indicators used in exit logic (e.g., MACD exhaustion)
             window_at_time = df.iloc[max(0, j-50): j+1]
+            
+            # 2. EVALUATE EXIT
+            # We pass the full bar to check for intra-candle Stop Loss/Take Profit
             should_exit, reason = evaluate_exit(symbol, position, current_bar['close'], window_at_time)
             
             if should_exit:
-                exit_price = current_bar['close']
                 exit_reason = reason
+                # 3. REALISM CHECK: Did we hit SL/TP intra-candle?
+                if reason == 'stop_loss':
+                    exit_price = position['stop_loss']
+                elif reason == 'take_profit':
+                    exit_price = position['take_profit']
+                else:
+                    exit_price = current_bar['close']
                 break
             
-            if position['candles_held'] > 336: # 2 week cap
+            # Time-based exit (Hard cap at 2 weeks/336 4h candles)
+            if position['candles_held'] > 336:
                 exit_price = current_bar['close']
+                exit_reason = 'timeout'
                 break
 
         if exit_price is not None:
-            gross_pnl = ((exit_price - entry_price) if position['side'] == 'long' else (entry_price - exit_price)) * position['units']
-            costs = (entry_price + exit_price) * position['units'] * portfolio_data.get('trading_fee', 0.001)
+            # Calculate PnL based on Side
+            if position['side'] == 'long':
+                gross_pnl = (exit_price - entry_price) * position['units']
+            else: # Short
+                gross_pnl = (entry_price - exit_price) * position['units']
+            
+            # 4. DYNAMIC FEE LOOKUP
+            # Use spot_fee or futures_fee based on config, fallback to 0.001
+            fee_rate = self.config.get('futures_fee' if self.config.get('enable_futures') else 'spot_fee', 0.001)
+            costs = (entry_price + exit_price) * position['units'] * fee_rate
             net_pnl = gross_pnl - costs
             
             return {
