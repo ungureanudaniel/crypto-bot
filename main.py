@@ -5,6 +5,12 @@ import asyncio
 import logging
 import traceback
 from modules.logger_config import init_logging
+import io
+
+# Force UTF-8 encoding for Windows terminals to handle emojis
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # 1. SETUP PATHS - Anchor everything to the script location
 project_root = os.path.dirname(os.path.abspath(__file__))

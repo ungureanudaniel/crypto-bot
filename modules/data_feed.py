@@ -26,7 +26,7 @@ if CONFIG.get('trading_mode', 'paper') in ['live', 'testnet']:
     client = get_binance_client()
 else:
     client = None
-    logger.info("📄 Paper mode - using public Binance API for price data")
+    logger.info("Paper mode - using public Binance API for price data")
 
 # ------------------------------------------------------------
 # Data fetching functions
@@ -102,7 +102,7 @@ def fetch_ohlcv(
             df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             
-            logger.debug(f"✅ Fetched {len(df)} {interval} candles for {symbol}")
+            logger.debug(f"Fetched {len(df)} {interval} candles for {symbol}")
             
             return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
             
@@ -157,7 +157,7 @@ def generate_mock_ohlcv(symbol: str, interval: str, limit: int) -> pd.DataFrame:
         'volume': np.random.randint(1000, 10000, limit)
     })
     
-    logger.info(f"📊 Generated {limit} mock candles for {symbol}")
+    logger.info(f"Generated {limit} mock candles for {symbol}")
     return df
 
 def get_current_price(symbol: str, retry_count: int = 2) -> Optional[float]:
@@ -226,7 +226,7 @@ def fetch_historical_data(
                 start_time=start_time
             )
             
-            logger.info(f"📊 Fetched {len(df)} candles for {symbol} ({days} days of {interval})")
+            logger.info(f"Fetched {len(df)} candles for {symbol} ({days} days of {interval})")
             return df
             
         else:
@@ -270,7 +270,7 @@ def fetch_historical_data(
                 combined_df = combined_df.drop_duplicates(subset=['timestamp'])
                 combined_df = combined_df.sort_values('timestamp').reset_index(drop=True)
                 
-                logger.info(f"📊 Total historical data: {len(combined_df)} candles from {requests_made} requests")
+                logger.info(f"Total historical data: {len(combined_df)} candles from {requests_made} requests")
                 return combined_df
             else:
                 logger.warning(f"No data fetched for {symbol}")
@@ -289,7 +289,7 @@ def get_regime_data(
     Main function for regime detection.
     Fetches and prepares data for regime analysis.
     """
-    logger.info(f"🔄 Fetching regime data for {symbol} ({timeframe}, {days} days)...")
+    logger.info(f"Fetching regime data for {symbol} ({timeframe}, {days} days)...")
     
     df = fetch_historical_data(symbol, timeframe, days)
     

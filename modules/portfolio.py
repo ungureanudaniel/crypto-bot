@@ -2,7 +2,7 @@ import json
 import os
 import sys
 import threading
-import fcntl
+import portalocker
 import time
 import pandas as pd
 import numpy as np

@@ -63,7 +63,7 @@ def load_positions_from_file() -> Dict:
     try:
         print("🔍 DEBUG: load_positions_from_file called")
         positions = get_positions()
-        logger.info(f"📂 Loaded {len(positions)} positions from portfolio.json")
+        logger.info(f"Loaded {len(positions)} positions from portfolio.json")
         return positions
     except Exception as e:
         logger.error(f"❌ Failed to load positions: {e}")
@@ -215,9 +215,9 @@ class TradingEngine:
         except:
             self.last_trade_time_per_pair = {}
         
-        logger.info(f"🚀 Trading Engine initialized for {self.trading_mode.upper()} mode")
-        logger.info(f"📊 Monitoring {len(self.symbols)} symbols on {self.timeframe}")
-        logger.info(f"📂 Loaded {len(self.open_positions)} existing positions")
+        logger.info(f"Trading Engine initialized for {self.trading_mode.upper()} mode")
+        logger.info(f"Monitoring {len(self.symbols)} symbols on {self.timeframe}")
+        logger.info(f"Loaded {len(self.open_positions)} existing positions")
     
     def run_iteration(self):
         """Main loop called by scheduler"""

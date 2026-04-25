@@ -37,7 +37,7 @@ try:
     from modules.trade_engine import trading_engine
     from modules.futures_engine import futures_engine
     from modules.portfolio import get_portfolio_summary
-    logger.info("✅ Trading engine loaded once at scheduler startup")
+    logger.info("Trading engine loaded once at scheduler startup")
 except ImportError as e:
     logger.error(f"❌ Failed to import trading engine: {e}")
     trading_engine = None
@@ -64,18 +64,18 @@ def check_stop_losses_and_take_profits():
     try:
         positions_closed = trading_engine.check_stop_losses()
         if positions_closed:
-            logger.info(f"✅ Spot: closed positions via stop/take profit")
+            logger.info(f"Spot: closed positions via stop/take profit")
     except Exception as e:
-        logger.error(f"❌ Error in spot stop loss check: {e}")
+        logger.error(f"Error in spot stop loss check: {e}")
 
     # --- Futures stop losses ---
     try:
         if futures_engine:
             futures_closed = futures_engine.check_stops()
             if futures_closed:
-                logger.info(f"✅ Futures: closed {len(futures_closed)} position(s): {futures_closed}")
+                logger.info(f"Futures: closed {len(futures_closed)} position(s): {futures_closed}")
     except Exception as e:
-        logger.error(f"❌ Error in futures stop loss check: {e}")
+        logger.error(f"Error in futures stop loss check: {e}")
 
 def scan_for_trading_signals():
     """
@@ -89,13 +89,13 @@ def scan_for_trading_signals():
         current_positions = len(trading_engine.open_positions) + len(trading_engine.open_futures_positions)
         
         if current_positions >= trading_engine.max_positions:
-            logger.info(f"⏭️ At max positions ({current_positions}/{trading_engine.max_positions})")
+            logger.info(f"At max positions ({current_positions}/{trading_engine.max_positions})")
             return
         
         signals = trading_engine.scan_and_trade()
         
         if signals:
-            logger.info(f"🎯 Found {len(signals)} signals")
+            logger.info(f"Found {len(signals)} signals")
             
             if CONFIG.get('auto_execute_signals', False):
                 executed = 0
@@ -104,23 +104,23 @@ def scan_for_trading_signals():
                 for signal in signals:
                     if trading_engine.execute_signal(signal):
                         executed += 1
-                        logger.info(f"✅ Executed {signal['symbol']}")
+                        logger.info(f"Executed {signal['symbol']}")
                     else:
                         failed += 1
-                        logger.warning(f"❌ Failed to execute {signal['symbol']}")
+                        logger.warning(f"Failed to execute {signal['symbol']}")
                     
                     current_positions = len(trading_engine.open_positions) + len(trading_engine.open_futures_positions)
                     if current_positions >= trading_engine.max_positions:
-                        logger.info(f"⏭️ Max positions reached ({trading_engine.max_positions}), stopping execution")
+                        logger.info(f"⏭Max positions reached ({trading_engine.max_positions}), stopping execution")
                         break
                 
                 if executed > 0:
-                    logger.info(f"✅ Auto-executed {executed} signals, {failed} failed")
+                    logger.info(f"Auto-executed {executed} signals, {failed} failed")
         else:
-            logger.debug("📭 No signals found")
+            logger.debug("No signals found")
             
     except Exception as e:
-        logger.error(f"❌ Error scanning signals: {e}")
+        logger.error(f"Error scanning signals: {e}")
 
 def update_portfolio_summary():
     """
@@ -135,7 +135,7 @@ def update_portfolio_summary():
         positions_count = summary.get('positions_count', 0)
         win_rate = summary.get('win_rate', 0)
         
-        logger.info(f"💰 Portfolio: ${total_value:,.2f}")
+        logger.info(f"Portfolio: ${total_value:,.2f}")
         logger.info(f"   Cash: ${total_cash:,.2f}")
         logger.info(f"   Positions: {positions_count}")
         logger.info(f"   Return: {total_return:+.1f}%")
@@ -147,14 +147,14 @@ def update_portfolio_summary():
             try:
                 from services.notifier import notifier
                 if hasattr(notifier, 'send_message_sync') and notifier.token:
-                    pnl_emoji = "🟢" if total_return >= 0 else "🔴"
+                    pnl_emoji = "[WIN]" if total_return >= 0 else "[LOSS]"
                     notifier.send_message_sync(
                         f"{pnl_emoji} <b>Daily Portfolio Update</b>\n\n"
-                        f"💰 Value: <code>${total_value:,.2f}</code>\n"
-                        f"📈 Return: <code>{total_return:+.1f}%</code>\n"
-                        f"💵 Cash: <code>${total_cash:,.2f}</code>\n"
-                        f"🎯 Win Rate: <code>{win_rate:.1f}%</code>\n"
-                        f"📊 Active: <code>{positions_count}</code>"
+                        f"Value: <code>${total_value:,.2f}</code>\n"
+                        f"Return: <code>{total_return:+.1f}%</code>\n"
+                        f"Cash: <code>${total_cash:,.2f}</code>\n"
+                        f"Win Rate: <code>{win_rate:.1f}%</code>\n"
+                        f"Active: <code>{positions_count}</code>"
                     )
             except Exception as e:
                 logger.error(f"❌ Failed to send daily notification: {e}")
@@ -198,7 +198,7 @@ def health_check():
     try:
         trading_engine.check_drawdown()
     except Exception as e:
-        logger.error(f"❌ Error in health check: {e}")
+        logger.error(f"Error in health check: {e}")
         
     try:
         summary = get_portfolio_summary()
@@ -206,21 +206,21 @@ def health_check():
         is_healthy = return_pct > -10
         
         if not is_healthy:
-            logger.warning(f"⚠️ Portfolio health check FAILED: {return_pct:+.1f}%")
+            logger.warning(f"Portfolio health check FAILED: {return_pct:+.1f}%")
             try:
                 from services.notifier import notifier
                 if hasattr(notifier, 'send_message_sync') and notifier.token:
                     notifier.send_message_sync(
-                        f"⚠️ <b>Health Alert</b>\n"
+                        f"<b>Health Alert</b>\n"
                         f"Portfolio may be at risk\n"
                         f"Return: <code>{return_pct:+.1f}%</code>"
                     )
             except Exception as e:
-                logger.error(f"❌ Failed to send health alert: {e}")
+                logger.error(f"Failed to send health alert: {e}")
         else:
-            logger.debug("✅ Health check passed")
+            logger.debug("Health check passed")
     except Exception as e:
-        logger.error(f"❌ Error in health check: {e}")
+        logger.error(f"Error in health check: {e}")
 
 def log_daily_performance():
     """
@@ -246,16 +246,16 @@ def log_daily_performance():
                    f"Return: {log_entry['return_pct']:+.1f}% | "
                    f"Win Rate: {log_entry['win_rate']:.1f}%\n")
         
-        logger.info(f"📊 Daily snapshot saved")
+        logger.info(f"Daily snapshot saved")
     except Exception as e:
-        logger.error(f"❌ Error logging daily performance: {e}")
+        logger.error(f"Error logging daily performance: {e}")
 
 # -------------------------------------------------------------------
 # SCHEDULER THREAD MAIN LOOP
 # -------------------------------------------------------------------
 def _scheduler_loop():
     """Main scheduler loop running in separate thread"""
-    logger.info("🚀 Scheduler thread started")
+    logger.info("Scheduler thread started")
     
     last_minute = -1
     last_5min = -1
@@ -307,22 +307,22 @@ def start_scheduler():
     global _scheduler_thread
     
     if _scheduler_thread and _scheduler_thread.is_alive():
-        logger.warning("⚠️ Scheduler already running")
+        logger.warning("Scheduler already running")
         return
     
     _stop_event.clear()
     _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
     _scheduler_thread.start()
-    logger.info("✅ Scheduler thread started")
+    logger.info("Scheduler thread started")
 
 def stop_scheduler():
     """Stop the scheduler thread"""
-    logger.info("🛑 Stopping scheduler...")
+    logger.info("Stopping scheduler...")
     _stop_event.set()
     
     if _scheduler_thread:
         _scheduler_thread.join(timeout=10)
-        logger.info("✅ Scheduler thread stopped")
+        logger.info("Scheduler thread stopped")
 
 def get_all_jobs():
     """Return all scheduler jobs (for compatibility)"""
@@ -348,10 +348,10 @@ if __name__ == "__main__":
     print(f"🔧 Trading mode: {CONFIG.get('trading_mode', 'unknown')}")
     
     if trading_engine:
-        print(f"✅ Trading engine loaded")
+        print(f"Trading engine loaded")
         print(f"   Mode: {trading_engine.trading_mode}")
     
-    print("\n🧪 Testing scheduler thread...")
+    print("\nTesting scheduler thread...")
     start_scheduler()
     
     try:

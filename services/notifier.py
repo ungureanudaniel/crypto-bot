@@ -25,9 +25,9 @@ logger = logging.getLogger(__name__)
 try:
     from config_loader import config
     CONFIG = config.config
-    logger.info(f"✅ Notifier config loaded: {CONFIG.get('trading_mode', 'paper')}")
+    logger.info(f"[OK] Notifier config loaded: {CONFIG.get('trading_mode', 'paper')}")
 except ImportError:
-    logger.warning("⚠️ Could not import config_loader, using defaults")
+    logger.warning("[WARNING] Could not import config_loader, using defaults")
     CONFIG = {'trading_mode': 'paper', 'telegram_token': '', 'telegram_chat_id': ''}
 
 
@@ -42,12 +42,12 @@ class Notifier:
         if self.token and self.chat_id:
             try:
                 self.bot = Bot(token=self.token)
-                logger.info(f"📱 Notifier initialized for chat {self.chat_id}")
+                logger.info(f"Notifier initialized for chat {self.chat_id}")
             except Exception as e:
-                logger.error(f"❌ Failed to initialize Telegram bot: {e}")
+                logger.error(f"Failed to initialize Telegram bot: {e}")
                 self.bot = None
         else:
-            logger.warning("⚠️ Telegram credentials missing - notifications disabled")
+            logger.warning("Telegram credentials missing - notifications disabled")
     
     def _escape_html(self, text: str) -> str:
         """Escape HTML special characters for Telegram"""
@@ -81,14 +81,14 @@ class Notifier:
                     text=message
                 )
             
-            logger.debug(f"📤 Message sent: {message[:50]}...")
+            logger.debug(f"Message sent: {message[:50]}...")
             return True
             
         except TelegramError as e:
-            logger.error(f"❌ Telegram error: {e}")
+            logger.error(f"Telegram error: {e}")
             return False
         except Exception as e:
-            logger.error(f"❌ Failed to send message: {e}")
+            logger.error(f"Failed to send message: {e}")
             return False
     
     def send_message_sync(self, message: str, parse_mode: str = 'HTML') -> bool:
@@ -123,7 +123,7 @@ class Notifier:
                 return asyncio.run(self.send_message(message, parse_mode))
                 
         except Exception as e:
-            logger.error(f"❌ Sync send failed: {e}")
+            logger.error(f"Sync send failed: {e}")
             return False
     
     async def send_trade_notification(self, trade_data: dict) -> bool:
@@ -143,37 +143,37 @@ class Notifier:
             
             if side in ['LONG', 'BUY']:
                 message = (
-                    f"🟢 <b>TRADE OPENED</b> [{mode}]\n"
+                    f"<b>TRADE OPENED</b> [{mode}]\n"
                     f"━━━━━━━━━━━━━━━━\n"
-                    f"📊 <b>{symbol}</b>\n"
-                    f"💰 Side: LONG\n"
-                    f"💵 Entry: <code>${price:.2f}</code>\n"
-                    f"📦 Amount: <code>{amount:.6f}</code>\n"
-                    f"💎 Value: <code>${price * amount:.2f}</code>\n"
+                    f"[STATS] <b>{symbol}</b>\n"
+                    f"Side: LONG\n"
+                    f"Entry: <code>${price:.2f}</code>\n"
+                    f"Amount: <code>{amount:.6f}</code>\n"
+                    f"Value: <code>${price * amount:.2f}</code>\n"
                 )
                 if stop_loss:
                     stop_pct = ((stop_loss / price) - 1) * 100
-                    message += f"🛑 Stop: <code>${stop_loss:.2f}</code> ({stop_pct:+.1f}%)\n"
+                    message += f"Stop: <code>${stop_loss:.2f}</code> ({stop_pct:+.1f}%)\n"
                 if take_profit:
                     tp_pct = ((take_profit / price) - 1) * 100
-                    message += f"🎯 Target: <code>${take_profit:.2f}</code> ({tp_pct:+.1f}%)\n"
+                    message += f"Target: <code>${take_profit:.2f}</code> ({tp_pct:+.1f}%)\n"
             
             elif side in ['SHORT', 'SELL']:
                 message = (
-                    f"🔴 <b>SHORT OPENED</b> [{mode}]\n"
+                    f"<b>SHORT OPENED</b> [{mode}]\n"
                     f"━━━━━━━━━━━━━━━━\n"
-                    f"📊 <b>{symbol}</b>\n"
-                    f"💰 Side: SHORT\n"
-                    f"💵 Entry: <code>${price:.2f}</code>\n"
-                    f"📦 Amount: <code>{amount:.6f}</code>\n"
-                    f"💎 Value: <code>${price * amount:.2f}</code>\n"
+                    f"[STATS] <b>{symbol}</b>\n"
+                    f"Side: SHORT\n"
+                    f"Entry: <code>${price:.2f}</code>\n"
+                    f"Amount: <code>{amount:.6f}</code>\n"
+                    f"Value: <code>${price * amount:.2f}</code>\n"
                 )
                 if stop_loss:
                     stop_pct = (1 - (stop_loss / price)) * 100
-                    message += f"🛑 Stop: <code>${stop_loss:.2f}</code> ({stop_pct:+.1f}%)\n"
+                    message += f"Stop: <code>${stop_loss:.2f}</code> ({stop_pct:+.1f}%)\n"
                 if take_profit:
                     tp_pct = (1 - (take_profit / price)) * 100
-                    message += f"🎯 Target: <code>${take_profit:.2f}</code> ({tp_pct:+.1f}%)\n"
+                    message += f"Target: <code>${take_profit:.2f}</code> ({tp_pct:+.1f}%)\n"
             else:
                 return False
         
@@ -183,32 +183,32 @@ class Notifier:
             is_long = original_side in ['LONG', 'BUY']
             pnl_pct = ((price / entry_price) - 1) * 100 if is_long else (1 - (price / entry_price)) * 100
             
-            emoji = "✅" if pnl > 0 else "❌" if pnl < 0 else "⚪"
+            emoji = "[OK]" if pnl > 0 else "[LOSS]" if pnl < 0 else "[NEUTRAL]"
             pnl_sign = "+" if pnl > 0 else ""
             reason_text = f" ({reason})" if reason else ""
             
             message = (
                 f"{emoji} <b>TRADE CLOSED</b>{reason_text} [{mode}]\n"
                 f"━━━━━━━━━━━━━━━━\n"
-                f"📊 <b>{symbol}</b>\n"
-                f"💰 Side: {original_side}\n"
-                f"💵 Exit: <code>${price:.2f}</code>\n"
-                f"📈 PnL: <code>${pnl_sign}{pnl:.2f}</code> ({pnl_sign}{pnl_pct:.1f}%)\n"
+                f"[STATS] <b>{symbol}</b>\n"
+                f"Side: {original_side}\n"
+                f"Exit: <code>${price:.2f}</code>\n"
+                f"PnL: <code>${pnl_sign}{pnl:.2f}</code> ({pnl_sign}{pnl_pct:.1f}%)\n"
             )
         
         from datetime import datetime
-        message += f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        message += f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         return await self.send_message(message)
     
     async def send_alert(self, message: str, level: str = "INFO") -> bool:
         """Send an alert message with level indicator"""
         emoji_map = {
-            "INFO": "ℹ️",
-            "WARNING": "⚠️",
-            "ERROR": "🚨",
-            "SUCCESS": "✅"
+            "INFO": "[INFO]",
+            "WARNING": "[WARN]",
+            "ERROR": "[ERROR]",
+            "SUCCESS": "[OK]"
         }
-        emoji = emoji_map.get(level.upper(), "📢")
+        emoji = emoji_map.get(level.upper(), "[INFO]")
         
         # Escape any HTML in message to prevent parsing errors
         safe_message = self._escape_html(message)
@@ -218,14 +218,14 @@ class Notifier:
     async def send_daily_report(self, summary: dict) -> bool:
         """Send daily trading report"""
         message = (
-            f"📊 <b>Daily Trading Report</b>\n"
+            f"[STATS] <b>Daily Trading Report</b>\n"
             f"━━━━━━━━━━━━━━━━\n"
-            f"💰 Portfolio: <code>${summary.get('portfolio_value', 0):,.2f}</code>\n"
-            f"💵 Cash: <code>${summary.get('cash_balance', 0):,.2f}</code>\n"
-            f"📈 Return: <code>{summary.get('total_return_pct', 0):+.1f}%</code>\n"
-            f"🎯 Win Rate: <code>{summary.get('win_rate', 0):.1f}%</code>\n"
-            f"📊 Active: <code>{summary.get('active_positions', 0)}</code>\n"
-            f"📋 Total Trades: <code>{summary.get('total_trades', 0)}</code>"
+            f"Portfolio: <code>${summary.get('portfolio_value', 0):,.2f}</code>\n"
+            f"Cash: <code>${summary.get('cash_balance', 0):,.2f}</code>\n"
+            f"Return: <code>{summary.get('total_return_pct', 0):+.1f}%</code>\n"
+            f"Win Rate: <code>{summary.get('win_rate', 0):.1f}%</code>\n"
+            f"Active: <code>{summary.get('active_positions', 0)}</code>\n"
+            f"Total Trades: <code>{summary.get('total_trades', 0)}</code>"
         )
         return await self.send_message(message)
 
@@ -258,16 +258,16 @@ if __name__ == "__main__":
     import asyncio
     
     async def test():
-        print("🧪 Testing notifier...")
+        print("Testing notifier...")
         print(f"   Token: {'***' if notifier.token else 'Missing'}")
         print(f"   Chat ID: {notifier.chat_id}")
         
         if not notifier.token or not notifier.chat_id:
-            print("❌ Telegram not configured - skipping tests")
+            print("Telegram not configured - skipping tests")
             return
         
         # Test trade open
-        print("\n📤 Testing trade open notification...")
+        print("\nTesting trade open notification...")
         await notifier.send_trade_notification({
             'symbol': 'BTC/USDT',
             'side': 'LONG',
@@ -281,7 +281,7 @@ if __name__ == "__main__":
         await asyncio.sleep(2)
         
         # Test trade close (profit)
-        print("\n📤 Testing trade close notification...")
+        print("\nTesting trade close notification...")
         await notifier.send_trade_notification({
             'symbol': 'BTC/USDT',
             'side': 'CLOSE',
@@ -297,9 +297,9 @@ if __name__ == "__main__":
         await asyncio.sleep(2)
         
         # Test alert
-        print("\n📤 Testing alert notification...")
+        print("\nTesting alert notification...")
         await notifier.send_alert("Bot started successfully", "SUCCESS")
         
-        print("\n✅ All tests completed!")
+        print("\[OK] All tests completed!")
     
     asyncio.run(test())

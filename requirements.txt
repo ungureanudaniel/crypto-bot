@@ -60,7 +60,7 @@ typing_extensions==4.14.1
 regex==2026.1.15
 click==8.2.1
 colorama==0.4.6
-
+portalocker==2.7.0
 # ---------------------------------------------------------------
 # Plotting (only if you use matplotlib for local charts)
 # ---------------------------------------------------------------

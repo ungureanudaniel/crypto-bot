@@ -15,6 +15,8 @@ import logging
 import pandas as pd
 from typing import Optional, Tuple
 
+from services.telegram_bot import current_price
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +59,7 @@ def check_macd_bar_exhaustion_exit(df: pd.DataFrame, position: dict) -> Tuple[bo
         candles_held = position.get('candles_held', 0)
         
         # Minimum hold period before considering MACD exit (4 candles = 4 hours)
-        if candles_held < 4:
+        if candles_held < 5: # set to 5 
             return False, ''
         
         # Get MACD bar exhaustion signal
@@ -88,8 +90,8 @@ def check_macd_bar_exhaustion_exit(df: pd.DataFrame, position: dict) -> Tuple[bo
 # -------------------------------------------------------------------
 def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
     """
-    MODIFIED: Exit immediately when indicators flip, 
-    without waiting for price to move against us.
+    MODIFIED: Exit immediately when indicators flip.
+    Removed the 0.5% price buffer to capture the 'FLIP' instantly.
     """
     signal_type = position.get('signal_type', '')
     side        = position.get('side', 'long')
@@ -98,19 +100,15 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
     try:
         from modules.strategy_tools import (
             rsi_signal, bollinger_band_signal, breakout_signal, 
-            volume_breakout_signal, macd_bar_exhaustion_signal
+            macd_bar_exhaustion_signal
         )
 
         if len(df) < 50: return False
-
-        # --- REMOVED: The requirement for price to move against us ---
-        # I want to exit on the 'FLIP', even if the price is still neutral.
 
         reversal_signal = None
         
         # Check the specific indicator that got us in
         if 'macd_bar_exhaustion' in signal_type:
-            # For MACD, we check for a standard trend reversal
             reversal_signal = macd_bar_exhaustion_signal(df)
         elif 'rsi' in signal_type:
             reversal_signal = rsi_signal(df)
@@ -119,17 +117,20 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
         elif 'breakout' in signal_type:
             reversal_signal = breakout_signal(df)
         
-        # EXIT LOGIC: If the indicator generates the OPPOSITE signal, FLIP.
+        # EXIT LOGIC: If the indicator flips to the opposite side, exit immediately.
         if reversal_signal == opposite:
-            logger.info(f"🔄 TREND FLIP: Indicator {signal_type} reversed to {opposite}. Exiting.")
+            # We fetch these for the log message, even if we don't use them for the 'if' anymore
+            current_price = df['close'].iloc[-1]
+            
+            logger.info(f"🔄 SIGNAL FLIP DETECTED ({signal_type}): Exiting {side} @ {current_price}")
             return True
 
         return False
 
     except Exception as e:
+        # Use debug so it doesn't spam your console during backtests
         logger.debug(f"Signal reversal check failed: {e}")
         return False
-
 # -------------------------------------------------------------------
 # Layer 2 — Chandelier Exit (Trailing Stop)
 # -------------------------------------------------------------------

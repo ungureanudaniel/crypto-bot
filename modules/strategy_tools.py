@@ -31,7 +31,7 @@ async def get_ml_prediction(symbol: str, df: pd.DataFrame) -> Dict:
     except ImportError:
         logger.warning("⚠️ ml_integration module not available")
         return {}
-    
+
     if symbol not in ml_strategies:
         ml_strategies[symbol] = MLStrategy(symbol)
         await ml_strategies[symbol].ensure_trained()
@@ -267,7 +267,7 @@ def macd_bar_exhaustion_signal(df, fast=12, slow=26, signal=9,
                 rsi_confirm_ok = False
             
             if rsi_confirm_ok:
-                logger.debug(f"📈 MACD Bar Exhaustion LONG: {neg_streak.iloc[-1]} red bars, shrinking, stable, final drop, volume shrinking")
+                logger.debug(f"MACD Bar Exhaustion LONG: {neg_streak.iloc[-1]} red bars, shrinking, stable, final drop, volume shrinking")
                 return 'long'
         
         # ===== SHORT SIGNAL =====
@@ -281,7 +281,7 @@ def macd_bar_exhaustion_signal(df, fast=12, slow=26, signal=9,
                 rsi_confirm_ok = False
             
             if rsi_confirm_ok:
-                logger.debug(f"📉 MACD Bar Exhaustion SHORT: {pos_streak.iloc[-1]} green bars, shrinking, stable, final pump, volume shrinking")
+                logger.debug(f"MACD Bar Exhaustion SHORT: {pos_streak.iloc[-1]} green bars, shrinking, stable, final pump, volume shrinking")
                 return 'short'
         
         return None
@@ -416,14 +416,14 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
         risk_amount   = equity * risk_per_trade
         risk_per_unit = entry_price * stop_loss_pct
         if risk_per_unit <= 0:
-            logger.warning("⚠️ Risk per unit is zero or negative")
+            logger.warning("Risk per unit is zero or negative")
             return 0, None, None
         units_estimate  = min(risk_amount / risk_per_unit, (equity * 0.15) / entry_price)
         position_value  = units_estimate * entry_price
         actual_fee_cost = position_value * round_trip_fee
         expected_gain   = position_value * stop_loss_pct * rr
         if actual_fee_cost > expected_gain * 0.20:
-            logger.debug(f"⏭️ Fee ratio too high: fees ${actual_fee_cost:.4f} vs gain ${expected_gain:.4f}")
+            logger.debug(f"⏭Fee ratio too high: fees ${actual_fee_cost:.4f} vs gain ${expected_gain:.4f}")
             return 0, None, None
 
         # Position sizing
@@ -457,8 +457,9 @@ def calculate_position_units(entry_price, equity, risk_per_trade=0.02, atr=None,
 # Higher timeframe trend helper (cached)
 # -------------------------------------------------------------------
 _daily_trend_cache = {}
+
 def get_daily_trend(symbol: str) -> str:
-    """Return 'up', 'down', or 'side' based on daily EMA cross."""
+    """Return 'up', 'down', or 'side' based on daily EMA and Price location."""
     now = time.time()
     # cache for 1 hour
     if symbol in _daily_trend_cache:
@@ -466,16 +467,57 @@ def get_daily_trend(symbol: str) -> str:
         if now - cached_time < 3600:
             return cached_trend
     try:
-        df_daily = fetch_ohlcv(symbol, interval='1d', limit=100)
+        # Increased limit to 200 to ensure stable EMA calculations
+        df_daily = fetch_ohlcv(symbol, interval='1d', limit=200)
         if df_daily.empty or len(df_daily) < 50:
             return "side"
-        ema20 = df_daily['close'].ewm(span=20).mean()
-        ema50 = df_daily['close'].ewm(span=50).mean()
-        trend = "up" if ema20.iloc[-1] > ema50.iloc[-1] else "down"
+
+        current_price = df_daily['close'].iloc[-1]
+        ema20 = df_daily['close'].ewm(span=20, adjust=False).mean()
+        ema50 = df_daily['close'].ewm(span=50, adjust=False).mean()
+        
+        last_ema20 = ema20.iloc[-1]
+        last_ema50 = ema50.iloc[-1]
+
+        # --- RECOVERY LOGIC ---
+        # 1. Standard Crossover (Long term strength)
+        if last_ema20 > last_ema50:
+            trend = "up"
+        # 2. Price Lead (Early recovery)
+        # If price is > EMA20 and EMA20 is sloping UP, 
+        # we allow 'up' signals even if the 50 is still overhead.
+        elif current_price > last_ema20 and last_ema20 > ema20.iloc[-2]:
+            trend = "up"
+        else:
+            trend = "down"
+
         _daily_trend_cache[symbol] = (now, trend)
         return trend
+        
     except Exception as e:
         logger.debug(f"Daily trend error for {symbol}: {e}")
+        return "side"
+
+_4H_trend_cache = {}
+def get_4H_trend(symbol: str) -> str:
+    """Return 'up', 'down', or 'side' based on 4-hour EMA cross."""
+    now = time.time()
+    # cache for 1 hour
+    if symbol in _4H_trend_cache:
+        cached_time, cached_trend = _4H_trend_cache[symbol]
+        if now - cached_time < 3600:
+            return cached_trend
+    try:
+        df_4h = fetch_ohlcv(symbol, interval='4h', limit=100)
+        if df_4h.empty or len(df_4h) < 50:
+            return "side"
+        ema20 = df_4h['close'].ewm(span=20).mean()
+        ema50 = df_4h['close'].ewm(span=50).mean()
+        trend = "up" if ema20.iloc[-1] > ema50.iloc[-1] else "down"
+        _4H_trend_cache[symbol] = (now, trend)
+        return trend
+    except Exception as e:
+        logger.debug(f"4H trend error for {symbol}: {e}")
         return "side"
 
 # ===========================================================================
@@ -544,7 +586,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         if per_pair_risk is not None:
             # Apply same trend multiplier to the per‑pair risk
             adjusted_risk = per_pair_risk * risk_multiplier
-            logger.info(f"📌 Using per‑pair risk for {symbol}: {per_pair_risk:.2%} (global {risk_per_trade:.2%})")
+            logger.info(f"Using per‑pair risk for {symbol}: {per_pair_risk:.2%} (global {risk_per_trade:.2%})")
             logger.debug(f"Risk multiplier: {risk_multiplier:.2f}, Adjusted risk: {adjusted_risk:.2%}")
         else:
             adjusted_risk = risk_per_trade * risk_multiplier
@@ -588,7 +630,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         
         # ===== TRENDING MARKET =====
         if regime_type == "trend":
-            logger.debug(f"📈 Trending market - following {trend_direction} trend")
+            logger.debug(f"Trending market - following {trend_direction} trend")
             
             # Single call with all improvements: min_bars=4, RSI confirm, volume shrink
             signal = macd_bar_exhaustion_signal(df, 
@@ -631,7 +673,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
 
         # ===== RANGING MARKET =====
         elif regime_type in ["range", "compression"]:
-            logger.debug(f"📊 Ranging market – favoring mean reversion")
+            logger.debug(f"Ranging market – favoring mean reversion")
             
             # Try MACD bar exhaustion first (works well in ranges)
             signal = macd_bar_exhaustion_signal(df, 
@@ -642,7 +684,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             if signal:
                 signal_type = f"macd_bar_exhaustion_range_{signal}"
                 multiplier = 2.0
-                logger.debug(f"✅ Range MACD Bar Exhaustion {signal}")
+                logger.debug(f"Range MACD Bar Exhaustion {signal}")
             else:
                 # Fallback to RSI and Bollinger
                 signal = rsi_signal(df)
@@ -651,7 +693,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     if trend_strength < 0.25 or signal_dir == trend_dir or trend_dir == 'side':
                         signal_type = f"rsi_range_{signal}"
                         multiplier = 1.5
-                        logger.debug(f"✅ Range RSI {signal}")
+                        logger.debug(f"Range RSI {signal}")
                     else:
                         signal = None
                 if not signal:
@@ -661,7 +703,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                         if trend_strength < 0.25 or signal_dir == trend_dir or trend_dir == 'side':
                             signal_type = f"bollinger_range_{signal}"
                             multiplier = 1.5
-                            logger.debug(f"✅ Range Bollinger {signal}")
+                            logger.debug(f"Range Bollinger {signal}")
                         else:
                             signal = None
 
@@ -680,7 +722,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 if signal_dir == trend_dir or trend_strength < 0.2:
                     signal_type = f"macd_bar_exhaustion_breakout_{signal}"
                     multiplier = 2.5
-                    logger.debug(f"✅ Breakout MACD Bar Exhaustion {signal}")
+                    logger.debug(f"Breakout MACD Bar Exhaustion {signal}")
                 else:
                     signal = None
             if not signal:
@@ -690,7 +732,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     if signal_dir == trend_dir or trend_strength < 0.2:
                         signal_type = f"breakout_{signal}"
                         multiplier = 3.0
-                        logger.debug(f"✅ Breakout {signal}")
+                        logger.debug(f"Breakout {signal}")
                     else:
                         signal = None
             if not signal:
@@ -700,13 +742,13 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     if signal_dir == trend_dir or trend_strength < 0.2:
                         signal_type = f"volume_breakout_{signal}"
                         multiplier = 2.5
-                        logger.debug(f"✅ Volume breakout {signal}")
+                        logger.debug(f"Volume breakout {signal}")
                     else:
                         signal = None
 
         # ===== EXPANSION MARKET =====
         elif regime_type == "expansion":
-            logger.debug(f"🌪️ High volatility – cautious")
+            logger.debug(f"High volatility – cautious")
             adjusted_risk = risk_per_trade * 0.5
             
             # MACD bar exhaustion may be less reliable in high volatility
@@ -720,7 +762,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 if signal_dir == trend_dir:
                     signal_type = f"macd_bar_exhaustion_expansion_{signal}"
                     multiplier = 2.0
-                    logger.debug(f"✅ Expansion MACD Bar Exhaustion {signal}")
+                    logger.debug(f"Expansion MACD Bar Exhaustion {signal}")
                 else:
                     signal = None
             if not signal:
@@ -730,7 +772,7 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                     if signal_dir == trend_dir:
                         signal_type = f"breakout_expansion_{signal}"
                         multiplier = 3.0
-                        logger.debug(f"✅ Breakout in high volatility with trend")
+                        logger.debug(f"Breakout in high volatility with trend")
                     else:
                         signal = None
             if not signal:
@@ -759,62 +801,70 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 if sig:
                     signal_dir = 'up' if sig == 'long' else 'down'
                     if trend_strength > 0.25 and signal_dir != trend_dir and trend_dir != 'side':
-                        logger.debug(f"⏭️ Skipping {stype} - counter-trend")
+                        logger.debug(f"⏭Skipping {stype} - counter-trend")
                         continue
                     signal = sig
                     signal_type = stype
                     multiplier = mult
                     break
 
-        # ===== FINAL TREND VALIDATION =====
+        # ===== FINAL TREND VALIDATION & PRICING =====
         if signal:
             signal_dir = 'up' if signal == 'long' else 'down'
             
-            # Strong trend: NEVER trade against it
-            if trend_strength > 0.25 and signal_dir != trend_dir and trend_dir != 'side':
-                logger.warning(f"❌ REJECTED: {signal} signal against {trend_dir} trend (ADX={trend_strength*100:.0f})")
-                return None
-            
-            # --- Daily Trend Filter ---
-            if use_daily_trend_filter and symbol:
-                daily_trend = get_daily_trend(symbol)
-                if daily_trend != "side" and signal_dir != daily_trend:
-                    logger.warning(f"❌ REJECTED: {signal} signal against DAILY {daily_trend} trend")
-                    return None
+            # 1. Pull min_rr from config with a safe fallback
+            try:
+                from config_loader import config as _cfg
+                # Default to 2.0 if missing, as 1.5 is often too low after fees
+                min_rr = float(_cfg.config.get('min_rr', 2.0))
+            except Exception:
+                min_rr = 2.0
 
-            # --- Position Sizing and Output ---
-            # Use real-time balance if available
+            # 2. Calculate Stop Loss based on ATR
+            if signal == 'long':
+                sl_price = current_price - (current_atr * multiplier)
+                # Calculate TP using the dynamic min_rr from config
+                risk_distance = current_price - sl_price
+                tp_price = current_price + (risk_distance * min_rr)
+            else:
+                sl_price = current_price + (current_atr * multiplier)
+                risk_distance = sl_price - current_price
+                tp_price = current_price - (risk_distance * min_rr)
+
+            # 3. Handle Position Sizing
             available_balance = get_available_balance(symbol, trading_engine) or equity
-            
+
             units, sl_price, tp_price = calculate_position_units(
                 entry_price=current_price,
                 equity=available_balance,
                 risk_per_trade=adjusted_risk,
                 atr=current_atr,
-                stop_atr_multiplier=multiplier, # Uses the multiplier set in the regime logic
+                stop_atr_multiplier=multiplier,
                 side=signal
             )
-
+            
+            # 4. Final Return (Standardized Keys)
             if units > 0:
                 return {
                     'symbol': symbol,
-                    'signal': signal,
+                    'side': signal,
                     'signal_type': signal_type,
                     'units': units,
-                    'entry': current_price,
+                    'entry_price': current_price,
                     'stop_loss': sl_price,
                     'take_profit': tp_price,
                     'risk_pct': adjusted_risk,
-                    'regime': regime_type
+                    'regime': regime_type,
+                    'atr': current_atr
                 }
-                logger.debug(f"📊 Signal: {signal} | confidence: {confidence}% | trend: {trend_dir} ({trend_strength*100:.0f} ADX)")
-                return result
+                logger.info(f"Generated {signal} signal for {symbol} via {signal_type}")
+                return trade_params
 
-        logger.debug("No signals detected")
+        logger.debug("No valid signals or insufficient units")
         return None
 
     except Exception as e:
-        logger.error(f"Error in generate_trade_signal: {e}")
+        logger.error(f"Error in generate_trade_signal: {e}", exc_info=True)
         return None
 
 def get_confidence_from_regime(regime_type, signal_type):

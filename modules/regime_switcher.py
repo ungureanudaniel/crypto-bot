@@ -26,7 +26,7 @@ try:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from config_loader import config
     CONFIG = config.config
-    logger.info(f"✅ Config loaded: {CONFIG.get('trading_mode', 'paper')}")
+    logger.info(f"Config loaded: {CONFIG.get('trading_mode', 'paper')}")
 except ImportError:
     logger.warning("⚠️ Could not import config_loader, using defaults")
     CONFIG = {'trading_mode': 'paper', 'testnet': False, 'rate_limit_delay': 0.5}
@@ -49,13 +49,13 @@ def fetch_data_for_regime(symbol, interval=CONFIG.get('trading_timeframe', '4h')
         from modules.data_feed import data_feed
         df = data_feed.get_ohlcv(symbol, interval, limit=limit)
         if df is not None and not df.empty:
-            logger.info(f"✅ Fetched {len(df)} candles for {symbol}")
+            logger.info(f"Fetched {len(df)} candles for {symbol}")
             return df
         else:
             logger.warning(f"⚠️ No data for {symbol}")
             return pd.DataFrame()
     except Exception as e:
-        logger.error(f"❌ Error fetching data for {symbol}: {e}")
+        logger.error(f"Error fetching data for {symbol}: {e}")
         return pd.DataFrame()
 
 # ---------------------------
@@ -150,24 +150,33 @@ def add_features(df, required_features=None):
                     df[feature] = 0
         
         # Clean extreme values that might cause overfitting
-        for col in df.select_dtypes(include=[np.number]).columns:
-            if col not in ['timestamp']:
-                # Cap extreme values at 99th percentile
-                upper_limit = df[col].quantile(0.99)
-                lower_limit = df[col].quantile(0.01)
-                df[col] = df[col].clip(lower_limit, upper_limit)
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            if col not in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
+                # Only clip if there are valid non-NaN values
+                if df[col].notna().any():
+                    # Calculate quantiles safely
+                    lower_limit = df[col].quantile(0.01)
+                    upper_limit = df[col].quantile(0.99)
+                    
+                    # Ensure limits are actual numbers (not NaN) before clipping
+                    if pd.notna(lower_limit) and pd.notna(upper_limit):
+                        df[col] = df[col].clip(lower_limit, upper_limit)
         
-        logging.info(f"✅ Features added successfully. Final shape: {df.shape}")
+        # Final cleanup: fill any remaining NaNs with 0 before returning
+        df = df.fillna(0)
+        
+        logging.info(f"Features added successfully. Final shape: {df.shape}")
         
         # Set global feature columns if not set
         if feature_columns_used is None:
             feature_columns_used = [col for col in all_possible_features if col in df.columns]
-            logger.info(f"📊 Set feature columns: {len(feature_columns_used)} features")
+            logger.info(f"Set feature columns: {len(feature_columns_used)} features")
         
         return df.dropna()
         
     except Exception as e:
-        logging.error(f"❌ Error adding features: {e}")
+        logging.error(f"Error adding features: {e}")
         # Create basic features as fallback
         df_fallback = df.copy()
         for feature in all_possible_features:
@@ -336,27 +345,27 @@ def train_model():
             all_labels.append(labels)
             
             coin_time = time.time() - coin_start
-            logger.info(f"   ✅ Processed in {coin_time:.1f}s | Samples: {len(features)}")
+            logger.info(f"   Processed in {coin_time:.1f}s | Samples: {len(features)}")
         except Exception as e:
-            logger.error(f"   ❌ Error processing {coin}: {str(e)[:100]}")
+            logger.error(f"   Error processing {coin}: {str(e)[:100]}")
             continue
     
     if not all_features:
-        logger.error("❌ NO DATA PROCESSED - Training failed!")
+        logger.error("NO DATA PROCESSED - Training failed!")
         return False
     
     # Concatenate
     X = pd.concat(all_features, ignore_index=True)
     y = pd.concat(all_labels, ignore_index=True)
     y_dist = y.value_counts().sort_index()
-    logger.info(f"📊 Final class distribution: {y_dist.to_dict()}")
+    logger.info(f"Final class distribution: {y_dist.to_dict()}")
     
     # Clean NaNs
     nan_mask = X.isna().any(axis=1) | y.isna()
     X_clean = X[~nan_mask]
     y_clean = y[~nan_mask]
     if len(X_clean) < 50:
-        logger.error("❌ Not enough clean data after NaN removal!")
+        logger.error("Not enough clean data after NaN removal!")
         return False
     
     # Scale features
@@ -368,7 +377,7 @@ def train_model():
     unique_original = np.sort(y_clean.unique())
     class_mapping = {old: new for new, old in enumerate(unique_original)}
     y_remapped = y_clean.map(class_mapping)
-    logger.info(f"📊 Original classes: {unique_original} -> Remapped to: {list(class_mapping.values())}")
+    logger.info(f"Original classes: {unique_original} -> Remapped to: {list(class_mapping.values())}")
     
     # Split data
     try:
@@ -381,8 +390,8 @@ def train_model():
         )
         logger.warning("Stratified split failed, using regular split")
     
-    logger.info(f"📊 Train: {len(X_train)}, Test: {len(X_test)}")
-    logger.info(f"📈 Train distribution: {y_train.value_counts().sort_index().to_dict()}")
+    logger.info(f"Train: {len(X_train)}, Test: {len(X_test)}")
+    logger.info(f"Train distribution: {y_train.value_counts().sort_index().to_dict()}")
     
     # Train model
     num_classes = len(class_mapping)
@@ -406,10 +415,10 @@ def train_model():
     joblib.dump(model, MODEL_PATH)
     joblib.dump(scaler, SCALER_PATH)
     joblib.dump(class_mapping, MAPPING_PATH)
-    logger.info(f"✅ Model saved to {MODEL_PATH}")
+    logger.info(f"Model saved to {MODEL_PATH}")
     
     total_time = time.time() - start_time
-    logger.info(f"✅ TRAINING COMPLETED in {total_time:.1f} seconds")
+    logger.info(f"TRAINING COMPLETED in {total_time:.1f} seconds")
     return True
 
 # ---------------------------
@@ -496,7 +505,7 @@ def predict_regime(df):
         return f"{full_label} ({display_confidence}% confidence)"
         
     except Exception as e:
-        logger.error(f"❌ Error in predict_regime: {e}")
+        logger.error(f"Error in predict_regime: {e}")
         return simple_regime_detection_with_direction(df)
 
 def quick_predict(symbol):

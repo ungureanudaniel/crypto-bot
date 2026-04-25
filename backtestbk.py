@@ -332,33 +332,25 @@ class Backtester:
         total_return  = (self.equity - INITIAL_EQUITY) / INITIAL_EQUITY * 100
         avg_win       = winners['net_pnl'].mean() if len(winners) else 0
         avg_loss      = losers['net_pnl'].mean() if len(losers) else 0
+        
         profit_factor = (winners['net_pnl'].sum() / abs(losers['net_pnl'].sum())
                          if len(losers) and losers['net_pnl'].sum() != 0 else float('inf'))
-        avg_hold_h    = df['hours_held'].mean()
-        max_hold_h    = df['hours_held'].max()
+        
+        # Expectancy for better edge analysis
+        expectancy = ((win_rate/100) * avg_win) + ((1 - win_rate/100) * avg_loss)
 
-        # Max drawdown from equity curve
+        # Max drawdown calculation
         curve  = np.array(self.equity_curve)
         peak   = np.maximum.accumulate(curve)
         dd     = (curve - peak) / peak * 100
         max_dd = dd.min()
 
-        # Best and worst trades
-        best  = df.loc[df['net_pnl'].idxmax()]
-        worst = df.loc[df['net_pnl'].idxmin()]
-
-        # Per-coin breakdown
+        # Grouping for your original table
         by_coin = (df.groupby('symbol')
                      .agg(trades=('net_pnl', 'count'),
                           net_pnl=('net_pnl', 'sum'),
                           win_rate=('net_pnl', lambda x: (x > 0).mean() * 100))
                      .sort_values('net_pnl', ascending=False))
-
-        # Exit reason breakdown
-        exit_reasons = df['exit_reason'].value_counts().to_dict()
-
-        # Signal type breakdown
-        signal_types = df['signal_type'].value_counts().head(5).to_dict()
 
         summary = {
             'total_trades':   total_trades,
@@ -368,16 +360,17 @@ class Backtester:
             'total_return':   round(total_return, 2),
             'final_equity':   round(self.equity, 2),
             'profit_factor':  round(profit_factor, 2),
+            'expectancy':     round(expectancy, 4),
             'max_drawdown':   round(max_dd, 2),
             'avg_win':        round(avg_win, 4),
             'avg_loss':       round(avg_loss, 4),
-            'avg_hold_hours': round(avg_hold_h, 1),
-            'max_hold_hours': int(max_hold_h),
-            'exit_reasons':   exit_reasons,
-            'signal_types':   signal_types,
+            'avg_hold_hours': round(df['candles_held'].mean(), 1),
+            'max_hold_hours': int(df['candles_held'].max()),
+            'exit_reasons':   df['exit_reason'].value_counts().to_dict(),
+            'signal_types':   df['signal_type'].value_counts().head(5).to_dict(),
             'by_coin':        by_coin,
-            'best_trade':     best,
-            'worst_trade':    worst,
+            'best_trade':     df.loc[df['net_pnl'].idxmax()],
+            'worst_trade':    df.loc[df['net_pnl'].idxmin()],
         }
 
         self._print_summary(summary)
@@ -399,6 +392,7 @@ class Backtester:
         print(f"  {ret_color}  Total return:     {ret_sign}{s['total_return']:.2f}%")
         print(f"     Total PnL:        ${pnl_sign}{s['total_pnl']:.4f}")
         print(f"     Total fees paid:  ${s['total_fees']:.4f}")
+        print(f"     Expectancy:       ${s['expectancy']:+.4f} per trade")
 
         print(f"\n  🎯 Trade Stats")
         print(f"     Total trades:     {s['total_trades']}")
@@ -413,8 +407,7 @@ class Backtester:
         print(f"     Max drawdown:     {s['max_drawdown']:.2f}%")
 
         print(f"\n  🚪 Exit reasons")
-        for reason, count in sorted(s['exit_reasons'].items(),
-                                    key=lambda x: x[1], reverse=True):
+        for reason, count in sorted(s['exit_reasons'].items(), key=lambda x: x[1], reverse=True):
             pct = count / s['total_trades'] * 100
             print(f"     {reason:<20} {count:>4} ({pct:.0f}%)")
 
@@ -441,7 +434,6 @@ class Backtester:
 
         print(f"\n{'='*60}\n")
 
-
 # -------------------------------------------------------------------
 # Entry point
 # -------------------------------------------------------------------
@@ -466,3 +458,4 @@ if __name__ == '__main__':
         verbose=args.verbose,
     )
     bt.run()
+    bt._summary(bt.trades)
