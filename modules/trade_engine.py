@@ -1,5 +1,7 @@
 import sys
 import os
+
+from matplotlib import units
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
@@ -217,7 +219,14 @@ class TradingEngine:
         
         logger.info(f"Trading Engine initialized for {self.trading_mode.upper()} mode")
         logger.info(f"Monitoring {len(self.symbols)} symbols on {self.timeframe}")
-        logger.info(f"Loaded {len(self.open_positions)} existing positions")
+
+    def get_pair_risk(self, symbol: str) -> float:
+        """Get risk per trade for a specific pair, falling back to global."""
+        try:
+            pair_cfg = get_pair_config(symbol)
+            return float(pair_cfg.get('risk_per_trade', self.risk_per_trade))
+        except Exception:
+            return self.risk_per_trade
     
     def run_iteration(self):
         """Main loop called by scheduler"""
@@ -238,7 +247,6 @@ class TradingEngine:
         if df is None or df.empty:
             return
 
-        base_pair_risk = self.get_pair_risk(symbol)
         # 1. Get Regime String (e.g., "True Trend UPTREND (85% confidence)")
         # Point 3: Regime-Based Execution
         regime_str = predict_regime(df)
@@ -252,9 +260,10 @@ class TradingEngine:
             return
 
         # Rule B: Adjust risk based on Trend Direction
-        current_risk = self.risk_per_trade
+        base_pair_risk = self.get_pair_risk(symbol)
+        current_risk = base_pair_risk  # start from per-pair risk
         if "DOWNTREND" in regime_str:
-            current_risk *= 0.75  # 25% reduction for bear-market trades
+            current_risk *= 0.75  # Reduce risk by 25% in downtrends
             logger.debug(f"📉 Downtrend risk reduction: {current_risk:.2%}")
         
         # Rule C:Optional - Filter by Confidence
@@ -274,35 +283,40 @@ class TradingEngine:
             self, 
             regime=regime_str 
         )
-        signal = signal_data.get('signal')
+        if signal_data is None:
+            return
+        signal = signal_data.get('side')  # 'long' or 'short'
+        if signal not in ['long', 'short']:
 
-        if signal in ['buy', 'sell']:
-            current_price = df['close'].iloc[-1]
-            
             # 3. Position Sizing (Using the adjusted risk)
-            units = self.calculate_position_size(
-                symbol, 
-                current_price, 
-                signal_data.get('stop_loss'),
-                risk_override=current_risk
-            )
+            units = signal_data.get('units', 0)
+            if units <= 0:
+                return
             
-            if signal == 'buy':
+            entry_price = signal_data.get('entry', df['close'].iloc[-1])
+            if signal == 'long':
                 self.open_position(
-                    symbol=symbol, side='long', entry_price=current_price,
-                    units=units, stop_loss=signal_data.get('stop_loss'),
-                    take_profit=signal_data.get('take_profit'),
-                    signal_type=signal_data.get('strategy_name'),
-                    atr=signal_data.get('atr')
+                    symbol=symbol,
+                    side='long',
+                    entry_price=entry_price,
+                    units=units,
+                    stop_loss=signal_data['stop_loss'],
+                    take_profit=signal_data['take_profit'],
+                    signal_type=signal_data.get('signal_type', 'unknown'),
+                    atr=signal_data.get('atr', 0.0)
                 )
-            elif signal == 'sell':
+            elif signal == 'short':
                 if self.futures_engine:
                     self.futures_engine.open_short(
-                        symbol=symbol, amount=units, entry_price=current_price,
-                        stop_loss=signal_data.get('stop_loss'),
-                        take_profit=signal_data.get('take_profit')
+                        symbol=symbol,
+                        amount=units,
+                        entry_price=entry_price,
+                        stop_loss=signal_data['stop_loss'],
+                        take_profit=signal_data['take_profit'],
+                        signal_type=signal_data.get('signal_type', 'unknown'),
+                        atr=signal_data.get('atr', 0.0)
                     )
-
+            
     def calculate_position_size(self, symbol, price, stop_loss, risk_override=None):
         """Risk-based sizing using current regime risk"""
         cash = self.get_cash_balance("USDT")

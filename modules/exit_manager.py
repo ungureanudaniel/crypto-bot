@@ -98,7 +98,7 @@ def check_signal_reversal(df: pd.DataFrame, position: dict) -> bool:
     opposite    = 'short' if side == 'long' else 'long'
 
     try:
-        from modules.strategy_tools import (
+        from modules.indicators import (
             rsi_signal, bollinger_band_signal, breakout_signal, 
             macd_bar_exhaustion_signal
         )
@@ -263,6 +263,20 @@ def evaluate_exit(
       4. Check MACD bar exhaustion exit (NEW)
       5. Check signal reversal (after 6 candles)
     """
+
+    if position.get('exit_strategy') == 'fixed':
+        # Fixed TP/SL only — no trailing, no reversal checks
+        side = position.get('side', 'long')
+        stop = position.get('stop_loss', 0.0)
+        tp   = position.get('take_profit', 0.0)
+        if side == 'long':
+            if stop and current_price <= stop: return True, 'stop_loss'
+            if tp and current_price >= tp:     return True, 'take_profit'
+        else:
+            if stop and current_price >= stop: return True, 'stop_loss'
+            if tp and current_price <= tp:     return True, 'take_profit'
+        return False, ''
+
     if current_price <= 0:
         return False, ''
 
@@ -300,13 +314,13 @@ def evaluate_exit(
 
     if side == 'long':
         if stop and current_price <= stop:
-            reason = 'trailing_stop' if position.get('trailing_stop_active') else 'stop_loss'
+            reason = position.get('stop_reason', 'trailing_stop') if position.get('trailing_stop_active') else 'stop_loss'
             return True, reason
         if tp and current_price >= tp:
             return True, 'take_profit'
     else:  # short
         if stop and current_price >= stop:
-            reason = 'trailing_stop' if position.get('trailing_stop_active') else 'stop_loss'
+            reason = position.get('stop_reason', 'trailing_stop') if position.get('trailing_stop_active') else 'stop_loss'
             return True, reason
         if tp and current_price <= tp:
             return True, 'take_profit'
