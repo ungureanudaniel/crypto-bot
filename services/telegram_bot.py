@@ -325,38 +325,30 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error generating portfolio summary.")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show detailed status"""
     if not update.message:
-        logger.warning("⚠️ Summary command triggered without message object")
         return
     try:
         from modules.portfolio import get_portfolio_summary
         
-        # Get fresh data
         summary = get_portfolio_summary(current_prices=get_cached_prices())
-        
-        # Get trade history for win rate
-        from modules.portfolio import load_portfolio
-        portfolio = load_portfolio()
-        trade_history = portfolio.get('trade_history', [])
-        closed_trades = [t for t in trade_history if t.get('action') == 'close']
-        winning_trades = [t for t in closed_trades if t.get('pnl', 0) > 0]
-        win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0
-        
-        # Build message
+
+        # ✅ Use total_trades from summary — same source as /balance
+        total_trades = summary.get('total_trades', 0)
+        win_rate = summary.get('win_rate', 0)
+
         message_lines = [
             f"🤖 *Trading Bot Status*\n",
             f"━━━━━━━━━━━━━━━━",
             f"📊 Mode: `{summary.get('trading_mode', 'PAPER')}`",
             f"💰 Portfolio: `${summary.get('total_value', 0):,.2f}`",
-            f"💵 Cash: `${summary.get('total_cash', 0):,.2f}`",  # ← This shows your $47
-            f"📈 Return: `{summary.get('total_return', 0):+.1f}%`",
+            f"💵 Cash: `${summary.get('total_cash', 0):,.2f}`",
+            f"📈 Return: `{summary.get('total_return_pct', 0):+.1f}%`",
             f"🎯 Win Rate: `{win_rate:.1f}%`",
             f"📊 Active: `{summary.get('positions_count', 0)}/{trading_engine.max_positions}`",
-            f"📋 Total Trades: `{len(closed_trades)}`",
+            f"📋 Total Trades: `{total_trades}`",  # ✅ same source as /balance
         ]
-        
-        # Add positions
+
+        # positions block stays exactly the same as your original
         positions = summary.get('positions', {})
         if positions:
             message_lines.append(f"\n📊 *Active Positions:*")
@@ -365,13 +357,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for symbol, position in positions.items():
                 current_price = position.get('current_price', position.get('entry_price', 0))
                 entry_price = position.get('entry_price', 0)
-                amount = position.get('amount', 0)
                 pnl = position.get('pnl', 0)
                 pnl_pct = position.get('pnl_pct', 0)
-
                 pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
 
-                # Smart price formatting — enough decimals for any coin price
                 def fmt(p):
                     if p == 0: return "0"
                     if p >= 100:  return f"{p:.2f}"
@@ -388,12 +377,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"\n   Stop: `${fmt(position.get('stop_loss', 0))}`{trailing}"
                     f"\n   Target: `${fmt(position.get('take_profit', 0))}`"
                 )
-        
+
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
-        
+
     except Exception as e:
         logger.error(f"❌ Status error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually trigger scan for signals"""
