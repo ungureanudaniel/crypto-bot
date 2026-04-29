@@ -8,7 +8,7 @@ from ta.volatility import BollingerBands
 from ta.trend import MACD, ADXIndicator
 from ta.momentum import RSIIndicator
 
-from modules.data_feed_bk import fetch_ohlcv
+from modules.data_feed import fetch_ohlcv
 
 logger = logging.getLogger(__name__)
 
