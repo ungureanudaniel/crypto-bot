@@ -3,7 +3,8 @@ FROM python:3.12.10-slim
 # Set working directory
 WORKDIR /app
 
-# Update 
+# Update
+RUN apt-get update && apt-get install -y tk && rm -rf /var/lib/apt/lists/* 
 RUN apt-get update && apt-get install -y build-essential
 
 # Install dependencies
