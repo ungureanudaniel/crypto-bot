@@ -671,7 +671,7 @@ if __name__ == "__main__":
                     print(f"      ✅ Signal generated!")
                     print(f"         Type: {signal.get('signal_type', 'unknown')}")
                     print(f"         Side: {signal.get('side', 'unknown')}")
-                    print(f"         Entry: ${signal.get('entry', 0):.2f}")
+                    print(f"         Entry: ${signal.get('entry_price', 0):.2f}")
                     print(f"         Units: {signal.get('units', 0):.6f}")
                     print(f"         Stop: ${signal.get('stop_loss', 0):.2f}")
                     print(f"         Target: ${signal.get('take_profit', 0):.2f}")
@@ -708,7 +708,7 @@ if __name__ == "__main__":
         
         if signal:
             signals_by_tf[interval] = signal
-            print(f"\n   ⏱️  {interval}: {signal['side'].upper()} {signal['signal_type']} at ${signal['entry']:.2f}")
+            print(f"\n   ⏱️  {interval}: {signal['side'].upper()} {signal['signal_type']} at ${signal['entry_price']:.2f}")
         else:
             print(f"\n   ⏱️  {interval}: No signal")
     

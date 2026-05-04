@@ -293,7 +293,7 @@ class TradingEngine:
             if units <= 0:
                 return
             
-            entry_price = signal_data.get('entry', df['close'].iloc[-1])
+            entry_price = signal_data.get('entry_price', df['close'].iloc[-1])
             if signal == 'long':
                 self.open_position(
                     symbol=symbol,
@@ -966,8 +966,8 @@ class TradingEngine:
                 
                 if signal:
                     # Check for duplicate signals
-                    if signal.get('entry', 0) <= 0:
-                        logger.error(f"❌ Invalid signal for {symbol}: missing valid 'entry' (got {signal.get('entry')})")
+                    if signal.get('entry_price', 0) <= 0:
+                        logger.error(f"❌ Invalid signal for {symbol}: missing valid 'entry_price' (got {signal.get('entry_price')})")
                         continue
                     
                     if signal.get('units', 0) <= 0:
@@ -984,7 +984,7 @@ class TradingEngine:
                         })
                         self.last_signals[symbol] = signal_key
 
-                        logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} {signal['side']} signal at ${signal['entry']:.2f} (Regime: {regime})")
+                        logger.info(f"✅ {symbol}: {signal.get('signal_type', 'SIGNAL').upper()} {signal['side']} signal at ${signal['entry_price']:.2f} (Regime: {regime})")
                     else:
                         logger.info(f"⏭️ {symbol}: Duplicate signal skipped")
                         
@@ -1018,12 +1018,12 @@ class TradingEngine:
             signal = signal_data['signal']
             
             # VALIDATE required fields
-            required_fields = ['side', 'entry', 'units', 'stop_loss', 'take_profit']
+            required_fields = ['side', 'entry_price', 'units', 'stop_loss', 'take_profit']
             for field in required_fields:
                 if field not in signal:
                     logger.error(f"❌ Signal missing required field '{field}': {signal}")
                     return False
-                if field == 'entry' and signal[field] <= 0:
+                if field == 'entry_price' and signal[field] <= 0:
                     logger.error(f"❌ Signal has invalid entry price: {signal[field]}")
                     return False
                 if field == 'units' and signal[field] <= 0:
@@ -1033,7 +1033,7 @@ class TradingEngine:
             logger.info(f"   Symbol: {symbol}")
             logger.info(f"   Signal type: {signal.get('signal_type', 'unknown')}")
             logger.info(f"   Side: {signal.get('side', 'unknown')}")
-            logger.info(f"   Entry: ${signal.get('entry', 0):.2f}")
+            logger.info(f"   Entry: ${signal.get('entry_price', 0):.2f}")
             logger.info(f"   Units: {signal.get('units', 0):.6f}")
             logger.info(f"   Stop: ${signal.get('stop_loss', 0):.2f}")
             logger.info(f"   Target: ${signal.get('take_profit', 0):.2f}")
@@ -1064,7 +1064,7 @@ class TradingEngine:
                 # Check we have enough cash margin
                 quote_currency = symbol.split('/')[1]
                 leverage = signal.get('leverage', 1)
-                margin_needed = (signal['units'] * signal['entry']) / leverage
+                margin_needed = (signal['units'] * signal['entry_price']) / leverage
                 cash = self.get_cash_balance(quote_currency)
                 logger.info(f"   Margin needed: ${margin_needed:.2f}, Cash: ${cash:.2f}")
                 if cash < margin_needed:
@@ -1074,7 +1074,7 @@ class TradingEngine:
                 result = self.futures_engine.open_short(
                     symbol=symbol,
                     amount=signal['units'],
-                    entry_price=signal['entry'],
+                    entry_price=signal['entry_price'],
                     stop_loss=signal['stop_loss'],
                     take_profit=signal['take_profit'],
                     signal_type=signal.get('signal_type', 'unknown'),
@@ -1090,7 +1090,7 @@ class TradingEngine:
                             notifier.send_message_sync(
                                 f"📉 <b>SHORT OPENED</b> [{self.trading_mode.upper()}]\n"
                                 f"📊 <b>{symbol}</b>\n"
-                                f"💵 Entry: <code>${signal['entry']:.4f}</code>\n"
+                                f"💵 Entry: <code>${signal['entry_price']:.4f}</code>\n"
                                 f"📦 Units: <code>{signal['units']:.6f}</code>\n"
                                 f"🛑 Stop: <code>${signal['stop_loss']:.4f}</code>\n"
                                 f"🎯 Target: <code>${signal['take_profit']:.4f}</code>"
@@ -1103,7 +1103,7 @@ class TradingEngine:
             elif signal['side'] == 'long':
                 quote_currency = symbol.split('/')[1]
                 cash = self.get_cash_balance(quote_currency)
-                cost = signal['units'] * signal['entry']
+                cost = signal['units'] * signal['entry_price']
                 logger.info(f"   {quote_currency} balance: ${cash:.2f}, Cost: ${cost:.2f}")
 
                 if cash < cost:
@@ -1118,7 +1118,7 @@ class TradingEngine:
             result = self.open_position(
                 symbol=symbol,
                 side=signal['side'],
-                entry_price=signal['entry'],
+                entry_price=signal['entry_price'],
                 units=signal['units'],
                 stop_loss=signal['stop_loss'],
                 take_profit=signal['take_profit'],

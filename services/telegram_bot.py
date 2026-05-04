@@ -414,7 +414,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for s in breakout_signals[:3]:
                 sig = s['signal']
                 message_lines.append(
-                    f"  • {s['symbol']}: {sig['side'].upper()} @ `${sig['entry']:.2f}`"
+                    f"  • {s['symbol']}: {sig['side'].upper()} @ `${sig['entry_price']:.2f}`"
                 )
         
         if trend_signals:
@@ -422,7 +422,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for s in trend_signals[:3]:
                 sig = s['signal']
                 message_lines.append(
-                    f"  • {s['symbol']}: {sig['side'].upper()} @ `${sig['entry']:.2f}`"
+                    f"  • {s['symbol']}: {sig['side'].upper()} @ `${sig['entry_price']:.2f}`"
                 )
         
         if momentum_signals:
@@ -430,7 +430,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for s in momentum_signals[:3]:
                 sig = s['signal']
                 message_lines.append(
-                    f"  • {s['symbol']}: {sig['side'].upper()} @ `${sig['entry']:.2f}`"
+                    f"  • {s['symbol']}: {sig['side'].upper()} @ `${sig['entry_price']:.2f}`"
                 )
         
         # Add note if more signals
@@ -475,7 +475,7 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'signal' in signal_data:
             logger.info(f"      Signal type: {signal_data['signal'].get('signal_type', 'unknown')}")
             logger.info(f"      Side: {signal_data['signal'].get('side', 'unknown')}")
-            logger.info(f"      Entry: ${signal_data['signal'].get('entry', 0):.2f}")
+            logger.info(f"      Entry: ${signal_data['signal'].get('entry_price', 0):.2f}")
             logger.info(f"      Units: {signal_data['signal'].get('units', 0):.6f}")
     
     await update.message.reply_text(
@@ -503,7 +503,7 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 signal = signal_data['signal']
                 
                 # Validate required fields
-                required_fields = ['side', 'entry', 'units', 'stop_loss', 'take_profit']
+                required_fields = ['side', 'entry_price', 'units', 'stop_loss', 'take_profit']
                 missing_fields = [f for f in required_fields if f not in signal]
                 if missing_fields:
                     logger.error(f"❌ {symbol}: Missing fields: {missing_fields}")
@@ -513,7 +513,7 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Check cash balance before executing
                 cash = trading_engine.get_cash_balance()
-                cost = signal['units'] * signal['entry']
+                cost = signal['units'] * signal['entry_price']
                 
                 logger.info(f"   Cash: ${cash:.2f}, Cost: ${cost:.2f}")
                 
