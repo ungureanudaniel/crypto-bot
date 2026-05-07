@@ -59,7 +59,7 @@ class Config:
             private_key_path = os.getenv('BINANCE_TESTNET_PRIVATE_KEY')
             
             if not api_key or not private_key_path:
-                raise ValueError("❌ CRITICAL: Testnet requires BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_PRIVATE_KEY_PATH in .env")
+                raise ValueError("❌ CRITICAL: Testnet requires BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_PRIVATE_KEY in .env")
             
             # Store the path and read the private key content
             env_config['binance_api_key'] = api_key
@@ -170,7 +170,7 @@ def get_binance_client():
             if not api_key:
                 raise ValueError("❌ BINANCE_TESTNET_API_KEY not found in config")
             if not private_key:
-                raise ValueError("❌ RSA private key not found. Ensure BINANCE_TESTNET_PRIVATE_KEY_PATH is set and file exists")
+                raise ValueError("❌ RSA private key not found. Ensure BINANCE_TESTNET_PRIVATE_KEY is set and file exists")
             
             client = Client(api_key, private_key=private_key, testnet=True)
             logger.info("✅ Created Binance client with RSA authentication")

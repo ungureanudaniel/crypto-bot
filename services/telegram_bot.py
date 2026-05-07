@@ -150,6 +150,8 @@ async def health_job_callback(context: ContextTypes.DEFAULT_TYPE):
 # -------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command"""
+    logger.info(f"Received /start from {update.effective_user.id}")
+
     if not update.message:
         logger.warning("⚠️ Start command triggered without message object")
         return
@@ -182,6 +184,8 @@ async def reset_circuit_breaker(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show balance with debug info"""
+    logger.info(f"Received /start from {update.effective_user.id}")
+
     if not update.message:
         logger.warning("⚠️ Balance command triggered without message object")
         return
@@ -287,6 +291,8 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick portfolio summary with advanced risk metrics"""
+    logger.info(f"Received /start from {update.effective_user.id}")
+
     if not update.message:
         return
 
@@ -325,6 +331,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error generating portfolio summary.")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received /status from {update.effective_user.id}")
     if not update.message:
         return
     try:
@@ -387,6 +394,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually trigger scan for signals"""
+
     if not update.message:
         logger.warning("⚠️ Start command triggered without message object")
         return
@@ -452,6 +460,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Execute all pending signals"""
+
     if not update.message:
         logger.warning("⚠️ Start command triggered without message object")
         return
@@ -585,6 +594,7 @@ async def execute_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def emergency_sell_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """EMERGENCY: Sell all positions at market price"""
+
     if not update.message:
         logger.warning("⚠️ Start command triggered without message object")
         return
@@ -632,6 +642,7 @@ async def emergency_sell_all(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # -------------------------------------------------------------------
 async def execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Execute specific signal"""
+
     if not update.message:
         logger.warning("⚠️ Start command triggered without message object")
         return
@@ -696,52 +707,53 @@ async def execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 
-async def holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current holdings from portfolio"""
-    if not update.message:
-        logger.warning("⚠️ Start command triggered without message object")
-        return
-    try:
-        from modules.portfolio import load_portfolio
-        portfolio = load_portfolio()
-        holdings = portfolio.get('holdings', {})
+# async def holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     """Show current holdings from portfolio"""
+#     if not update.message:
+#         logger.warning("⚠️ Start command triggered without message object")
+#         return
+#     try:
+#         from modules.portfolio import load_portfolio
+#         portfolio = load_portfolio()
+#         holdings = portfolio.get('holdings', {})
         
-        if not holdings or all(asset == 'USDT' for asset in holdings):
-            await update.message.reply_text("📭 No holdings", parse_mode='Markdown')
-            return
+#         if not holdings or all(asset == 'USDT' for asset in holdings):
+#             await update.message.reply_text("📭 No holdings", parse_mode='Markdown')
+#             return
         
-        # Get current prices
-        current_prices = get_cached_prices()
+#         # Get current prices
+#         current_prices = get_cached_prices()
         
-        message_lines = [f"📊 *Current Holdings:*\n"]
+#         message_lines = [f"📊 *Current Holdings:*\n"]
         
-        total_value = 0
-        cash = portfolio.get('cash_balance', 0)
+#         total_value = 0
+#         cash = portfolio.get('cash_balance', 0)
         
-        for asset, amount in holdings.items():
-            if asset == 'USDT':
-                continue
-            symbol = f"{asset}/USDT"
-            price = current_prices.get(symbol, 0)
-            value = amount * price
-            total_value += value
+#         for asset, amount in holdings.items():
+#             if asset == 'USDT':
+#                 continue
+#             symbol = f"{asset}/USDT"
+#             price = current_prices.get(symbol, 0)
+#             value = amount * price
+#             total_value += value
             
-            message_lines.append(
-                f"• *{asset}*: {amount:.4f} @ ${price:.2f} = ${value:.2f}\n"
-            )
+#             message_lines.append(
+#                 f"• *{asset}*: {amount:.4f} @ ${price:.2f} = ${value:.2f}\n"
+#             )
         
-        message_lines.append(f"\n💰 *Holdings Value: ${total_value:.2f}*")
-        message_lines.append(f"💵 *Cash: ${cash:.2f}*")
-        message_lines.append(f"📊 *Total Portfolio: ${total_value + cash:.2f}*")
+#         message_lines.append(f"\n💰 *Holdings Value: ${total_value:.2f}*")
+#         message_lines.append(f"💵 *Cash: ${cash:.2f}*")
+#         message_lines.append(f"📊 *Total Portfolio: ${total_value + cash:.2f}*")
         
-        await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+#         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
         
-    except Exception as e:
-        logger.error(f"❌ Holdings error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+#     except Exception as e:
+#         logger.error(f"❌ Holdings error: {e}")
+#         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show active positions (trades with stop/target)"""
+
     if not update.message:
         logger.warning("⚠️ Start command triggered without message object")
         return
