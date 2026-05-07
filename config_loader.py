@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Dict, Any
 from dotenv import load_dotenv
+from binance.client import Client
 
 # Load environment variables from .env file
 load_dotenv()
@@ -36,36 +37,54 @@ class Config:
             'trading_mode': trading_mode,
             'telegram_token': os.getenv('TELEGRAM_TOKEN', ''),
             'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID', ''),
+            'rsa_private_key': None,  # Will store private key content if needed
+            'rsa_private_key_path': None,  # Store path for reference
         }
         
         # 3. Set API keys based on mode - FAIL if missing
         if trading_mode == 'live':
             api_key = os.getenv('BINANCE_LIVE_API_KEY')
-            api_secret = os.getenv('BINANCE_LIVE_API_SECRET')
+            api_secret = os.getenv('BINANCE_LIVE_SECRET_KEY')
             if not api_key or not api_secret:
-                raise ValueError("❌ CRITICAL: Live trading requires BINANCE_LIVE_API_KEY and BINANCE_LIVE_API_SECRET in .env")
+                raise ValueError("❌ CRITICAL: Live trading requires BINANCE_LIVE_API_KEY and BINANCE_LIVE_SECRET_KEY in .env")
             env_config['binance_api_key'] = api_key
             env_config['binance_api_secret'] = api_secret
+            env_config['auth_method'] = 'hmac'
             # Futures keys — can reuse spot keys or use dedicated ones
             env_config['binance_futures_api_key'] = os.getenv('BINANCE_FUTURES_API_KEY', api_key)
             env_config['binance_futures_api_secret'] = os.getenv('BINANCE_FUTURES_API_SECRET', api_secret)
+
+        elif trading_mode == 'testnet':
+            api_key = os.getenv('BINANCE_TESTNET_API_KEY')
+            private_key_path = os.getenv('BINANCE_TESTNET_PRIVATE_KEY')
+            
+            if not api_key or not private_key_path:
+                raise ValueError("❌ CRITICAL: Testnet requires BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_PRIVATE_KEY_PATH in .env")
+            
+            # Store the path and read the private key content
+            env_config['binance_api_key'] = api_key
+            env_config['rsa_private_key_path'] = private_key_path
+            env_config['auth_method'] = 'rsa'
+            
+            # Read and store private key content for later use
+            try:
+                with open(private_key_path, 'r') as f:
+                    env_config['rsa_private_key'] = f.read()
+            except FileNotFoundError:
+                raise ValueError(f"❌ CRITICAL: Private key file not found at {private_key_path}")
+            
+            # For testnet, we still need placeholder secret for compatibility
+            env_config['binance_api_secret'] = ''
+            env_config['binance_futures_api_key'] = os.getenv('BINANCE_FUTURES_TESTNET_API_KEY', api_key)
+            env_config['binance_futures_api_secret'] = os.getenv('BINANCE_FUTURES_TESTNET_API_SECRET', '')
+            env_config['futures_auth_method'] = 'hmac'  # Futures typically still use HMAC
 
         elif trading_mode == 'paper':
             env_config['binance_api_key'] = ''
             env_config['binance_api_secret'] = ''
             env_config['binance_futures_api_key'] = ''
             env_config['binance_futures_api_secret'] = ''
-
-        elif trading_mode == 'testnet':
-            api_key = os.getenv('BINANCE_TESTNET_API_KEY')
-            api_secret = os.getenv('BINANCE_TESTNET_PRIVATE_KEY')
-            if not api_key or not api_secret:
-                raise ValueError("❌ CRITICAL: Testnet trading requires BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_PRIVATE_KEY in .env")
-            env_config['binance_api_key'] = api_key
-            env_config['binance_api_secret'] = api_secret
-            # Futures testnet uses the same credentials by default
-            env_config['binance_futures_api_key'] = os.getenv('BINANCE_FUTURES_TESTNET_API_KEY', api_key)
-            env_config['binance_futures_api_secret'] = os.getenv('BINANCE_FUTURES_TESTNET_API_SECRET', api_secret)
+            env_config['auth_method'] = 'none'
         else:
             raise ValueError(f"❌ CRITICAL: Invalid TRADING_MODE '{trading_mode}'. Must be 'live', 'testnet', or 'paper'")
         
@@ -88,6 +107,7 @@ class Config:
         merged_config['enable_futures'] = merged_config.get('enable_futures', True)
         
         return merged_config
+
     
     def get(self, key: str, default=None):
         """Get config value with optional default (raises only if no default provided)"""
@@ -123,25 +143,16 @@ def get_pair_config(symbol: str) -> dict:
 _binance_client = None
 
 def get_binance_client():
-    """Return a singleton Binance client instance."""
     global _binance_client
     if _binance_client is not None:
         return _binance_client
 
     trading_mode = config.config['trading_mode'].lower()
     
-    # PAPER MODE: Return None (no client needed)
     if trading_mode == 'paper':
         logger.info("📄 Paper mode - no Binance client needed")
         _binance_client = None
         return None
-
-    # For live/testnet, require API keys
-    api_key = config.config.get('binance_api_key', '')
-    api_secret = config.config.get('binance_api_secret', '')
-    
-    if not api_key or not api_secret:
-        raise ValueError(f"❌ CRITICAL: API keys required for {trading_mode} mode")
 
     from binance.client import Client
     from binance.exceptions import BinanceAPIException
@@ -150,14 +161,30 @@ def get_binance_client():
 
     try:
         if trading_mode == 'testnet':
-            client = Client(api_key, api_secret, testnet=True)
-        else:  # live mode
+            # RSA-only for testnet
+            api_key = config.get('binance_api_key', '')
+            private_key = config.get('rsa_private_key', '')
+            
+            if not api_key:
+                raise ValueError("❌ BINANCE_TESTNET_API_KEY not found in config")
+            if not private_key:
+                raise ValueError("❌ RSA private key not found. Ensure BINANCE_TESTNET_PRIVATE_KEY_PATH is set and file exists")
+            
+            client = Client(api_key, private_key=private_key, testnet=True)
+            logger.info("✅ Created Binance client with RSA authentication")
+            
+        else:  # live mode – must use HMAC
+            api_key = config.get('binance_api_key', '')
+            api_secret = config.get('binance_api_secret', '')
+            if not api_key or not api_secret:
+                raise ValueError("API keys required for live mode")
             client = Client(api_key, api_secret)
+            logger.info("✅ Created Binance live client (HMAC)")
 
-        # Test connection – fail fast
+        # Test connection and authentication
         client.ping()
         logger.info("✅ Shared client ping successful")
-        client.get_account()
+        client.get_account()   # works for both RSA (testnet) and HMAC (live)
         logger.info("✅ Shared client authentication successful")
         logger.info(f"🌐 API URL: {client.API_URL}")
 
@@ -167,6 +194,7 @@ def get_binance_client():
     except (ImportError, BinanceAPIException, Exception) as e:
         logger.error(f"❌ Failed to initialize shared Binance client: {e}")
         raise
+
 
 # -------------------------------------------------------------------
 # Shared Binance Futures client (singleton)
