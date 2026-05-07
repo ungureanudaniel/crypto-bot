@@ -330,6 +330,52 @@ def get_trade_history(limit: int = 100) -> List[Dict]:
         logger.error(f"Error reading trade history: {e}")
         return []
 
+def get_exchange_balances():
+    """Fetch real balances from Binance exchange"""
+    from config_loader import get_binance_client
+    
+    client = get_binance_client()
+    if not client:
+        return None, None
+    
+    account = client.get_account()
+    
+    # Get USDT balance
+    usdt_balance = 0
+    for balance in account['balances']:
+        if balance['asset'] == 'USDT':
+            usdt_balance = float(balance['free'])
+            break
+    
+    # Get other assets with value
+    other_assets = []
+    total_value = usdt_balance
+    
+    for balance in account['balances']:
+        asset = balance['asset']
+        free = float(balance['free'])
+        if asset != 'USDT' and free > 0.01:
+            try:
+                symbol = f"{asset}USDT"
+                ticker = client.get_symbol_ticker(symbol=symbol)
+                price = float(ticker['price'])
+                value = free * price
+                total_value += value
+                other_assets.append({
+                    'asset': asset,
+                    'amount': free,
+                    'price': price,
+                    'value': value
+                })
+            except:
+                pass
+    
+    return {
+        'usdt': usdt_balance,
+        'total_value': total_value,
+        'assets': sorted(other_assets, key=lambda x: x['value'], reverse=True)
+    }, account
+
 # -------------------------------------------------------------------
 # PERFORMANCE METRICS
 # -------------------------------------------------------------------

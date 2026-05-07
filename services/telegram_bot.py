@@ -194,92 +194,40 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         from config_loader import get_binance_client
+        from modules.portfolio import get_exchange_balances
         
         trading_mode = trading_engine.trading_mode if trading_engine else 'paper'
-        
-        # PAPER MODE - use portfolio.json
-        if trading_mode == 'paper':
-            from modules.portfolio import get_portfolio_summary
-            summary = get_portfolio_summary(current_prices=get_cached_prices())
-            response = (
-                f"💰 *Paper Portfolio Balance*\n\n"
-                f"Total Value: `${summary.get('total_value', 0):,.2f}`\n"
-                f"Cash: `${summary.get('total_cash', 0):,.2f}`\n"
-                f"Return: `{summary.get('total_return_pct', 0):+.1f}%`\n"
-            )
-            await update.message.reply_text(response, parse_mode='Markdown')
-            return
-        
-        # LIVE/TESTNET MODE - fetch from exchange
-        client = get_binance_client()
-        if not client:
-            await update.message.reply_text("❌ Not connected to exchange")
-            return
-        
-        # Get account balances
-        account = client.get_account()
-        
-        # Get current prices for valuation
-        tickers = {}
-        for balance in account['balances']:
-            asset = balance['asset']
-            free = float(balance['free'])
-            locked = float(balance['locked'])
-            if free > 0 or locked > 0:
-                # Get price in USDT if pair exists
-                try:
-                    symbol = f"{asset}USDT"
-                    ticker = client.get_symbol_ticker(symbol=symbol)
-                    price = float(ticker['price'])
-                    tickers[asset] = price
-                except:
-                    tickers[asset] = 0
-        
-        # Calculate total value
-        total_value = 0
-        balances_list = []
-        
-        for balance in account['balances']:
-            asset = balance['asset']
-            free = float(balance['free'])
-            locked = float(balance['locked'])
-            total = free + locked
-            
-            if total > 0.000001 and asset != 'USDT':
-                price = tickers.get(asset, 0)
-                value = total * price
-                total_value += value
-                if value > 0.01:  # Only show meaningful balances
-                    balances_list.append(f"   {asset}: {total:.4f} (≈${value:.2f})")
-        
-        # Get USDT balance
-        usdt_balance = 0
-        for balance in account['balances']:
-            if balance['asset'] == 'USDT':
-                usdt_balance = float(balance['free'])
-                total_value += usdt_balance
-                break
-        
-        # Format response
+    
+    if trading_mode == 'paper':
+        # Use portfolio.json for paper mode
+        from modules.portfolio import get_portfolio_summary
+        summary = get_portfolio_summary(current_prices=get_cached_prices())
         response = (
-            f"💰 *Live Exchange Balance* [{trading_mode.upper()}]\n\n"
-            f"💵 USDT: `{usdt_balance:,.2f}`\n"
+            f"💰 *Paper Portfolio Balance*\n\n"
+            f"Total Value: `${summary.get('total_value', 0):,.2f}`\n"
+            f"Cash: `${summary.get('total_cash', 0):,.2f}`\n"
+            f"Return: `{summary.get('total_return_pct', 0):+.1f}%`"
+        )
+    else:
+        # Use real exchange for testnet/live
+        exchange_data, _ = get_exchange_balances()
+        if not exchange_data:
+            await update.message.reply_text("❌ Could not fetch exchange balances")
+            return
+        
+        response = (
+            f"💰 *Exchange Balance* [{trading_mode.upper()}]\n\n"
+            f"💵 USDT: `{exchange_data['usdt']:,.2f}`\n"
+            f"📈 Total Value: `{exchange_data['total_value']:,.2f}`\n"
         )
         
-        if balances_list:
-            response += f"\n📊 *Other Assets:*\n" + "\n".join(balances_list[:15])
-            if len(balances_list) > 15:
-                response += f"\n   ... and {len(balances_list) - 15} more"
-        
-        response += f"\n\n📈 *Total Value:* `${total_value:,.2f}`"
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"❌ Balance error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+        if exchange_data['assets']:
+            response += f"\n📊 *Other Assets:*\n"
+            for asset in exchange_data['assets'][:5]:
+                response += f"   • {asset['asset']}: `{asset['amount']:.4f}` (≈${asset['value']:.2f})\n"
+    
+    await update.message.reply_text(response, parse_mode='Markdown')
+
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick portfolio summary with advanced risk metrics"""
