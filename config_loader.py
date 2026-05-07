@@ -129,6 +129,8 @@ class Config:
 
 # Global config instance
 config = Config()
+print(f"🔑 TELEGRAM_TOKEN from config: {config.get('telegram_token')}")
+print(f"📱 TELEGRAM_CHAT_ID from config: {config.get('telegram_chat_id')}")
 
 def get_pair_config(symbol: str) -> dict:
     """

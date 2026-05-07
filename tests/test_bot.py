@@ -1,4 +1,3 @@
-# test_bot.py
 import asyncio
 from asyncio.log import logger
 import sys
