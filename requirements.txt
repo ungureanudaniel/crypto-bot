@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------
 aiohttp==3.12.14
 aiosignal==1.4.0
-aiodns==3.5.0
+aiodns==3.2.0
 aiohappyeyeballs==2.6.1
 anyio==4.9.0
 requests==2.32.4
@@ -22,6 +22,7 @@ websocket-client==1.9.0
 websockets==16.0
 pycryptodome==3.23.0
 cryptography==45.0.5
+pycares==4.9.0
 
 # ---------------------------------------------------------------
 # Telegram bot
