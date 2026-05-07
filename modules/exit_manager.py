@@ -245,16 +245,23 @@ def evaluate_exit(
 
     # --- Candle counter ---
     if df is not None and not df.empty:
+        # Prefer a real timestamp column; otherwise fall back to the datetime index
         if 'timestamp' in df.columns:
             current_candle_time = df['timestamp'].iloc[-1]
+        elif isinstance(df.index, pd.DatetimeIndex):
+            current_candle_time = df.index[-1]
         else:
-            current_candle_time = len(df) - 1
+            current_candle_time = pd.Timestamp.now()
+            logger.warning(f"No timestamp column or DatetimeIndex – using current time for {symbol}")
+
 
         last_candle = position.get('last_candle_time')
+        # 🔧 Fix: Convert stored string back to Timestamp if needed
+        if last_candle is not None and isinstance(last_candle, str):
+            last_candle = pd.Timestamp(last_candle)
         if last_candle is None or current_candle_time > last_candle:
             position['candles_held'] = position.get('candles_held', 0) + 1
             position['last_candle_time'] = current_candle_time
-            # ✅ log so you can confirm it's counting correctly
             logger.debug(f"[{symbol}] candles_held={position['candles_held']} last_candle={current_candle_time}")
 
     position.setdefault('symbol', symbol)
