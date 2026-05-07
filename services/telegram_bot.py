@@ -1164,7 +1164,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /balance - Show balance
     /summary - Quick portfolio summary
     /positions - Show open positions
-    /holdings - Show current holdings
     /price SYMBOL - Show current price of a symbol
     /help - This help
 
@@ -1274,7 +1273,6 @@ async def run_telegram_bot_async():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("positions", positions))
     application.add_handler(CommandHandler("price", current_price))
-    application.add_handler(CommandHandler("holdings", holdings))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("executeall", execute_all))
