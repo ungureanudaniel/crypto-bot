@@ -194,39 +194,80 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         from config_loader import get_binance_client
-        from modules.portfolio import get_exchange_balances
+        from modules.portfolio import get_portfolio_summary
         
         trading_mode = trading_engine.trading_mode if trading_engine else 'paper'
-    
-    if trading_mode == 'paper':
-        # Use portfolio.json for paper mode
-        from modules.portfolio import get_portfolio_summary
-        summary = get_portfolio_summary(current_prices=get_cached_prices())
-        response = (
-            f"💰 *Paper Portfolio Balance*\n\n"
-            f"Total Value: `${summary.get('total_value', 0):,.2f}`\n"
-            f"Cash: `${summary.get('total_cash', 0):,.2f}`\n"
-            f"Return: `{summary.get('total_return_pct', 0):+.1f}%`"
-        )
-    else:
-        # Use real exchange for testnet/live
-        exchange_data, _ = get_exchange_balances()
-        if not exchange_data:
-            await update.message.reply_text("❌ Could not fetch exchange balances")
-            return
         
-        response = (
-            f"💰 *Exchange Balance* [{trading_mode.upper()}]\n\n"
-            f"💵 USDT: `{exchange_data['usdt']:,.2f}`\n"
-            f"📈 Total Value: `{exchange_data['total_value']:,.2f}`\n"
-        )
+        # PAPER MODE - use portfolio.json
+        if trading_mode == 'paper':
+            summary = get_portfolio_summary(current_prices=get_cached_prices())
+            response = (
+                f"💰 *Paper Portfolio Balance*\n\n"
+                f"Total Value: `${summary.get('total_value', 0):,.2f}`\n"
+                f"Cash: `${summary.get('total_cash', 0):,.2f}`\n"
+                f"Return: `{summary.get('total_return_pct', 0):+.1f}%`"
+            )
+        else:
+            # LIVE/TESTNET MODE - fetch from exchange
+            client = get_binance_client()
+            if not client:
+                await update.message.reply_text("❌ Not connected to exchange")
+                return
+            
+            # Get account balances
+            account = client.get_account()
+            
+            # Get USDT balance
+            usdt_balance = 0
+            for balance in account['balances']:
+                if balance['asset'] == 'USDT':
+                    usdt_balance = float(balance['free'])
+                    break
+            
+            # Get other assets with value
+            other_assets = []
+            total_value = usdt_balance
+            
+            for balance in account['balances']:
+                asset = balance['asset']
+                free = float(balance['free'])
+                if asset != 'USDT' and free > 0.01:
+                    try:
+                        symbol = f"{asset}USDT"
+                        ticker = client.get_symbol_ticker(symbol=symbol)
+                        price = float(ticker['price'])
+                        value = free * price
+                        total_value += value
+                        other_assets.append({
+                            'asset': asset,
+                            'amount': free,
+                            'price': price,
+                            'value': value
+                        })
+                    except:
+                        pass
+            
+            # Sort by value
+            other_assets.sort(key=lambda x: x['value'], reverse=True)
+            
+            response = (
+                f"💰 *Exchange Balance* [{trading_mode.upper()}]\n\n"
+                f"💵 USDT: `{usdt_balance:,.2f}`\n"
+                f"📈 Total Value: `{total_value:,.2f}`\n"
+            )
+            
+            if other_assets:
+                response += f"\n📊 *Other Assets:*\n"
+                for asset in other_assets[:5]:
+                    response += f"   • {asset['asset']}: `{asset['amount']:.4f}` (≈${asset['value']:.2f})\n"
         
-        if exchange_data['assets']:
-            response += f"\n📊 *Other Assets:*\n"
-            for asset in exchange_data['assets'][:5]:
-                response += f"   • {asset['asset']}: `{asset['amount']:.4f}` (≈${asset['value']:.2f})\n"
-    
-    await update.message.reply_text(response, parse_mode='Markdown')
+        await update.message.reply_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"❌ Balance error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
