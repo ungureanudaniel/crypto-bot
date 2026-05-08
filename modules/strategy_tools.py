@@ -182,6 +182,83 @@ def detect_trend(df, symbol: str = "") -> tuple:
         logger.debug(f"Trend detection error: {e}")
         return "side", 0.0, 0.5
 
+def detect_fib_support(df, lookback=100, tolerance=0.02) -> dict | None:
+    """
+    Detects if current price is near a key Fibonacci retracement level.
+    Draws fib from the significant swing high to swing low in the lookback window.
+    
+    Returns dict with fib level info if price is near one, None otherwise.
+    """
+    try:
+        close     = df['close']
+        high      = df['high']
+        low       = df['low']
+        
+        # Find swing high and swing low over lookback
+        swing_high = high.rolling(lookback).max().iloc[-1]
+        swing_low  = low.rolling(lookback).min().iloc[-1]
+        
+        if swing_high <= swing_low:
+            return None
+        
+        price_range   = swing_high - swing_low
+        current_price = close.iloc[-1]
+        
+        # Key Fibonacci retracement levels
+        fib_levels = {
+            '0.236': swing_high - price_range * 0.236,
+            '0.382': swing_high - price_range * 0.382,
+            '0.500': swing_high - price_range * 0.500,
+            '0.618': swing_high - price_range * 0.618,
+            '0.786': swing_high - price_range * 0.786,
+        }
+        
+        # Check if current price is within tolerance % of any fib level
+        for level_name, level_price in fib_levels.items():
+            distance_pct = abs(current_price - level_price) / level_price
+            if distance_pct <= tolerance:
+                return {
+                    'level': level_name,
+                    'price': level_price,
+                    'swing_high': swing_high,
+                    'swing_low': swing_low,
+                    'distance_pct': distance_pct
+                }
+        
+        return None
+        
+    except Exception:
+        return None
+
+def detect_potential_bottom(df, lookback=20) -> bool:
+    try:
+        close = df['close']
+        low   = df['low']
+
+        recent_low  = low.rolling(lookback).min().iloc[-1]
+        recent_high = close.rolling(lookback).max().iloc[-1]
+        price_range = recent_high - recent_low
+
+        if price_range <= 0:
+            return False
+
+        current_price = close.iloc[-1]
+        pct_from_low  = (current_price - recent_low) / price_range
+
+        if pct_from_low > 0.25:
+            return False
+
+        last_two_green = (
+            close.iloc[-1] > df['open'].iloc[-1] and
+            close.iloc[-2] > df['open'].iloc[-2]
+        )
+        vol_increasing = df['volume'].iloc[-1] > df['volume'].iloc[-3:].mean()
+
+        return last_two_green and vol_increasing
+
+    except Exception:
+        return False
+
 # ===========================================================================
 # Main signal Generator
 # ===========================================================================
@@ -255,6 +332,60 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
         signal_type = None
         multiplier = 2.0
         
+        # ===== BOTTOM FISHING OVERRIDE =====  ← ADD THIS ENTIRE BLOCK HERE
+        fib_support = detect_fib_support(df, lookback=100, tolerance=0.02)
+        at_bottom   = detect_potential_bottom(df)
+
+        # Strong case: fib + bottom candles
+        # Weaker case: just fib at a key level (0.618 or 0.786 only)
+        strong_fib = fib_support and fib_support['level'] in ('0.618', '0.786')
+        
+        if trend_direction == "down" and (
+            (fib_support and at_bottom) or      # ← any fib + reversal candles
+            (strong_fib)                         # ← 0.618/0.786 alone is enough
+        ):
+            fib_info = f"fib {fib_support['level']} @ ${fib_support['price']:.4f}" if fib_support else "bottom pattern"
+            logger.info(f"🔍 Bottom confluence for {symbol}: {fib_info} — attempting range-bottom long")
+
+            bottom_signal = rsi_signal(df)
+            if not bottom_signal:
+                bottom_signal = bollinger_band_signal(df)
+
+            if bottom_signal == 'long':
+                # Stronger sizing at 0.786 — historically very reliable fib
+                if fib_support and fib_support['level'] == '0.786':
+                    bottom_risk = adjusted_risk * 0.75  # 75% risk at golden fib
+                elif fib_support and fib_support['level'] == '0.618':
+                    bottom_risk = adjusted_risk * 0.6
+                else:
+                    bottom_risk = adjusted_risk * 0.5   # 50% risk otherwise
+
+                available_balance = get_available_balance(symbol, trading_engine) or equity
+                units, sl, tp = calculate_position_units(
+                    entry_price=current_price,
+                    equity=available_balance,
+                    risk_per_trade=bottom_risk,
+                    atr=current_atr,
+                    stop_atr_multiplier=1.5,
+                    side='long'
+                )
+                if units > 0:
+                    logger.info(f"✅ Bottom long at {fib_info} for {symbol} @ ${current_price:.4f}")
+                    return {
+                        'symbol': symbol,
+                        'side': 'long',
+                        'signal_type': f"bottom_fib_{fib_support['level'] if fib_support else 'range'}_long",
+                        'units': units,
+                        'entry_price': current_price,
+                        'stop_loss': sl,
+                        'take_profit': tp,
+                        'risk_pct': bottom_risk,
+                        'regime': regime_type,
+                        'atr': current_atr,
+                        'exit_strategy': 'fixed',
+                        'fib_level': fib_support['level'] if fib_support else None
+                    }
+
         # ===== TRENDING MARKET =====
         if regime_type == "trend":
             logger.debug(f"Trending market - following {trend_direction} trend")
