@@ -44,7 +44,7 @@ def load_portfolio() -> Dict:
                     if 'futures_positions' not in data:
                         data['futures_positions'] = {}
                     if 'initial_balance' not in data:
-                        data['initial_balance'] = data['cash'].get('USDC', 100.0)
+                        data['initial_balance'] = data['cash'].get('USDC', 9.00)
                     
                     return data
                     
