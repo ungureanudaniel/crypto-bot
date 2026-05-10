@@ -57,7 +57,7 @@ def get_available_balance(symbol, trading_engine):
     try:
         account = trading_engine.binance_client.get_account()
         for balance in account['balances']:
-            if balance['asset'] == 'USDT':
+            if balance['asset'] == 'USDC':
                 return float(balance['free'])
     except Exception as e:
         logger.debug(f"Could not get live balance: {e}")
@@ -660,7 +660,7 @@ if __name__ == "__main__":
     print("=" * 60)
     
     # Test configuration
-    test_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    test_symbols = ["BTC/USDC", "ETH/USDC", "SOL/USDC"]
     test_timeframes = ["1h", "4h"]
     test_equity = 10000
     
@@ -817,7 +817,7 @@ if __name__ == "__main__":
     print("⏱️  TEST 4: Multiple Timeframe Analysis")
     print("=" * 60)
     
-    symbol = "BTC/USDT"
+    symbol = "BTC/USDC"
     print(f"\n🔍 Analyzing {symbol} across timeframes...")
     
     signals_by_tf = {}
@@ -856,7 +856,7 @@ if __name__ == "__main__":
     print("📊 TEST 5: Signal Generation Speed")
     print("=" * 60)
     
-    symbol = "BTC/USDT"
+    symbol = "BTC/USDC"
     from modules.data_feed import fetch_ohlcv
     df = fetch_ohlcv(symbol, interval="1h", limit=200)
     
@@ -883,7 +883,7 @@ if __name__ == "__main__":
     print("=" * 60)
     
     from modules.data_feed import fetch_ohlcv
-    df = fetch_ohlcv("BTC/USDT", interval="1h", limit=200)
+    df = fetch_ohlcv("BTC/USDC", interval="1h", limit=200)
     
     edge_cases = [
         ("Empty DataFrame", pd.DataFrame()),

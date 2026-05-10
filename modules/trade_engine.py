@@ -285,7 +285,7 @@ class TradingEngine:
         # Note: We pass the full regime_str so the strategy can log it
         signal_data = generate_trade_signal(
             df, 
-            self.get_cash_balance("USDT"), 
+            self.get_cash_balance("USDC"), 
             current_risk, 
             symbol, 
             self, 
@@ -327,7 +327,7 @@ class TradingEngine:
             
     def calculate_position_size(self, symbol, price, stop_loss, risk_override=None):
         """Risk-based sizing using current regime risk"""
-        cash = self.get_cash_balance("USDT")
+        cash = self.get_cash_balance("USDC")
         
         # Use the overridden risk if provided, otherwise default to config
         risk_pct = risk_override if risk_override is not None else self.risk_per_trade
@@ -365,7 +365,7 @@ class TradingEngine:
 
         return not self.circuit_breaker_triggered
 
-    def get_cash_balance(self, quote_currency: str = "USDT") -> float:
+    def get_cash_balance(self, quote_currency: str = "USDC") -> float:
         """Get balance for specific quote currency"""
         
         # PAPER MODE
@@ -447,7 +447,7 @@ class TradingEngine:
         position = self.open_positions[symbol]
         amount = position['amount']
         entry_price = position['entry_price']
-        quote_currency = position.get('quote_currency', 'USDT')
+        quote_currency = position.get('quote_currency', 'USDC')
         
         # Calculate PnL
         if position['side'] == 'long':
@@ -592,14 +592,14 @@ class TradingEngine:
                 binance_symbol = symbol.replace('/', '')
 
                 if side == 'long':
-                    usdt_balance = get_usdt_balance(self.binance_client)
+                    usdc_balance = get_usdc_balance(self.binance_client)
                     cost = units * entry_price
 
-                    logger.info(f"   USDT balance: ${usdt_balance:.2f}")
+                    logger.info(f"   USDC balance: ${usdc_balance:.2f}")
                     logger.info(f"   Required: ${cost:.2f}")
 
-                    if usdt_balance < cost:
-                        logger.error(f"❌ Insufficient USDT: have ${usdt_balance:.2f}, need ${cost:.2f}")
+                    if usdc_balance < cost:
+                        logger.error(f"❌ Insufficient USDC: have ${usdc_balance:.2f}, need ${cost:.2f}")
                         return False
 
                     is_valid, adjusted_units, error = self.validate_and_adjust_order(symbol, units)

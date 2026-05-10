@@ -269,7 +269,7 @@ if __name__ == "__main__":
         # Test trade open
         print("\nTesting trade open notification...")
         await notifier.send_trade_notification({
-            'symbol': 'BTC/USDT',
+            'symbol': 'BTC/USDC',
             'side': 'LONG',
             'price': 50000,
             'amount': 0.001,
@@ -283,7 +283,7 @@ if __name__ == "__main__":
         # Test trade close (profit)
         print("\nTesting trade close notification...")
         await notifier.send_trade_notification({
-            'symbol': 'BTC/USDT',
+            'symbol': 'BTC/USDC',
             'side': 'CLOSE',
             'price': 52000,
             'amount': 0.001,

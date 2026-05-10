@@ -217,23 +217,23 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Get account balances
             account = client.get_account()
             
-            # Get USDT balance
-            usdt_balance = 0
+            # Get USDC balance
+            usdc_balance = 0
             for balance in account['balances']:
-                if balance['asset'] == 'USDT':
-                    usdt_balance = float(balance['free'])
+                if balance['asset'] == 'USDC':
+                    usdc_balance = float(balance['free'])
                     break
             
             # Get other assets with value
             other_assets = []
-            total_value = usdt_balance
+            total_value = usdc_balance
             
             for balance in account['balances']:
                 asset = balance['asset']
                 free = float(balance['free'])
-                if asset != 'USDT' and free > 0.01:
+                if asset != 'USDC' and free > 0.01:
                     try:
-                        symbol = f"{asset}USDT"
+                        symbol = f"{asset}USDC"
                         ticker = client.get_symbol_ticker(symbol=symbol)
                         price = float(ticker['price'])
                         value = free * price
@@ -252,7 +252,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             response = (
                 f"💰 *Exchange Balance* [{trading_mode.upper()}]\n\n"
-                f"💵 USDT: `{usdt_balance:,.2f}`\n"
+                f"💵 USDC: `{usdc_balance:,.2f}`\n"
                 f"📈 Total Value: `{total_value:,.2f}`\n"
             )
             
@@ -322,7 +322,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Calculate total value
         total_value = 0
-        usdt_balance = 0
+        usdc_balance = 0
         asset_count = 0
         
         # Get current prices
@@ -330,9 +330,9 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for balance in account['balances']:
             asset = balance['asset']
             free = float(balance['free'])
-            if free > 0.01 and asset != 'USDT':
+            if free > 0.01 and asset != 'USDC':
                 try:
-                    symbol = f"{asset}USDT"
+                    symbol = f"{asset}USDC"
                     ticker = client.get_symbol_ticker(symbol=symbol)
                     price = float(ticker['price'])
                     tickers[asset] = price
@@ -342,11 +342,11 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
         
-        # Get USDT balance
+        # Get USDC balance
         for balance in account['balances']:
-            if balance['asset'] == 'USDT':
-                usdt_balance = float(balance['free'])
-                total_value += usdt_balance
+            if balance['asset'] == 'USDC':
+                usdc_balance = float(balance['free'])
+                total_value += usdc_balance
                 break
         
         # Calculate return (need initial balance - store in config or use current as baseline)
@@ -361,7 +361,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{pnl_emoji} *PORTFOLIO SUMMARY* [{trading_mode.upper()}]\n"
             f"━━━━━━━━━━━━━━━\n"
             f"💰 *Balance:* `${total_value:,.2f}` (`{ret_pct:+.2f}%`)\n"
-            f"💵 *USDT:* `${usdt_balance:,.2f}`\n"
+            f"💵 *USDC:* `${usdc_balance:,.2f}`\n"
             f"📦 *Positions:* `{positions_count}` active\n"
             f"🪙 *Assets:* `{asset_count}` tokens\n\n"
             
@@ -371,20 +371,20 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         # Add top holdings if any non-USDT assets
-        non_usdt_assets = []
+        non_usdc_assets = []
         for balance in account['balances']:
             asset = balance['asset']
             free = float(balance['free'])
-            if asset != 'USDT' and free > 0.1:
+            if asset != 'USDC' and free > 0.1:
                 price = tickers.get(asset, 0)
                 value = free * price
                 if value > 1.0:
-                    non_usdt_assets.append((asset, value))
+                    non_usdc_assets.append((asset, value))
         
-        if non_usdt_assets:
-            non_usdt_assets.sort(key=lambda x: x[1], reverse=True)
+        if non_usdc_assets:
+            non_usdc_assets.sort(key=lambda x: x[1], reverse=True)
             message += f"\n\n📊 *Top Holdings:*\n"
-            for asset, value in non_usdt_assets[:3]:
+            for asset, value in non_usdc_assets[:3]:
                 message += f"   • {asset}: `${value:.2f}`\n"
         
         await update.message.reply_text(message, parse_mode='Markdown')
@@ -468,19 +468,19 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Calculate total value
         total_value = 0
-        usdt_balance = 0
+        usdc_balance = 0
         
         # Get current prices
         for balance in account['balances']:
             asset = balance['asset']
             free = float(balance['free'])
             
-            if asset == 'USDT':
-                usdt_balance = free
+            if asset == 'USDC':
+                usdc_balance = free
                 total_value += free
             elif free > 0.01:
                 try:
-                    symbol = f"{asset}USDT"
+                    symbol = f"{asset}USDC"
                     ticker = client.get_symbol_ticker(symbol=symbol)
                     price = float(ticker['price'])
                     total_value += free * price
@@ -507,7 +507,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"━━━━━━━━━━━━━━━━",
             f"📊 Mode: `{trading_mode.upper()}`",
             f"💰 Portfolio: `${total_value:,.2f}`",
-            f"💵 USDT: `${usdt_balance:,.2f}`",
+            f"💵 USDC: `${usdc_balance:,.2f}`",
             f"📈 Return: `{total_return_pct:+.1f}%`",
             f"🎯 Win Rate: `{win_rate:.1f}%`",
             f"📊 Active: `{total_positions}/{trading_engine.max_positions}`",
@@ -992,7 +992,6 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         total_pnl = 0
         position_count = 0
-        
         # Show SPOT positions
         if spot_positions:
             message_lines.append(f"📦 *SPOT Positions:*\n")
@@ -1030,7 +1029,7 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_lines.append(
                     f"{emoji} *{symbol}* (LONG)"
                     f"\n   Entry: `${fmt_price(entry_price)}` → `${fmt_price(current_price)}`"
-                    f"\n   P&L: `{pnl:+.2f} USDT` ({pnl_pct:+.1f}%)"
+                    f"\n   P&L: `{pnl:+.2f} USDC` ({pnl_pct:+.1f}%)"
                     f"\n   🛑 Stop: `${fmt_price(stop)}`{trailing}"
                     f"\n   🎯 Target: `${fmt_price(target)}`\n"
                 )
@@ -1073,7 +1072,7 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_lines.append(
                     f"{emoji} *{symbol}* (SHORT x{leverage})"
                     f"\n   Entry: `${fmt_price(entry_price)}` → `${fmt_price(current_price)}`"
-                    f"\n   P&L: `{pnl:+.2f} USDT` ({pnl_pct:+.1f}%)"
+                    f"\n   P&L: `{pnl:+.2f} USDC` ({pnl_pct:+.1f}%)"
                     f"\n   🛑 Stop: `${fmt_price(stop)}`"
                     f"\n   🎯 Target: `${fmt_price(target)}`\n"
                 )
@@ -1099,8 +1098,8 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
             "Usage: `/limitbuy SYMBOL AMOUNT PRICE`\n"
-            "Example: `/limitbuy BTC/USDT 0.001 50000`\n"
-            "         `/limitbuy SOL/USDT 2 122`",
+            "Example: `/limitbuy BTC/USDC 0.001 50000`\n"
+            "         `/limitbuy SOL/USDC 2 122`",
             parse_mode='Markdown'
         )
         return
@@ -1176,8 +1175,8 @@ async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
             "Usage: `/limitsell SYMBOL AMOUNT PRICE`\n"
-            "Example: `/limitsell BTC/USDT 0.001 55000`\n"
-            "         `/limitsell SOL/USDT 2 130`",
+            "Example: `/limitsell BTC/USDC 0.001 55000`\n"
+            "         `/limitsell SOL/USDC 2 130`",
             parse_mode='Markdown'
         )
         return

@@ -659,6 +659,6 @@ def simple_regime_detection_with_direction(df):
 # ---------------------------
 if __name__ == "__main__":
     print("🧪 Testing regime switcher...")
-    test_coin = "BTC/USDT"
+    test_coin = "BTC/USDC"
     result = quick_predict(test_coin)
     print(f"Result for {test_coin}: {result}")

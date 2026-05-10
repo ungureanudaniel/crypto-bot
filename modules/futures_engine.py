@@ -454,7 +454,7 @@ if __name__ == "__main__":
 
     # Simulate a paper short
     ok = futures_engine.open_short(
-        symbol="BTC/USDT",
+        symbol="BTC/USDC",
         amount=0.001,
         entry_price=65000,
         stop_loss=66300,
@@ -466,6 +466,6 @@ if __name__ == "__main__":
     print(f"Open futures positions: {list(positions.keys())}")
 
     # Close it
-    result = futures_engine.close_position("BTC/USDT", exit_price=63000, reason="test")
+    result = futures_engine.close_position("BTC/USDC", exit_price=63000, reason="test")
     if result:
         print(f"Closed with PnL: ${result['pnl']:+.2f}")

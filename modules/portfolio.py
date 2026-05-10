@@ -44,7 +44,7 @@ def load_portfolio() -> Dict:
                     if 'futures_positions' not in data:
                         data['futures_positions'] = {}
                     if 'initial_balance' not in data:
-                        data['initial_balance'] = data['cash'].get('USDT', 100.0)
+                        data['initial_balance'] = data['cash'].get('USDC', 100.0)
                     
                     return data
                     
@@ -341,9 +341,9 @@ def get_exchange_balances():
     account = client.get_account()
     
     # Get USDT balance
-    usdt_balance = 0
+    usdc_balance = 0
     for balance in account['balances']:
-        if balance['asset'] == 'USDT':
+        if balance['asset'] == 'USDC':
             usdt_balance = float(balance['free'])
             break
     
@@ -354,9 +354,9 @@ def get_exchange_balances():
     for balance in account['balances']:
         asset = balance['asset']
         free = float(balance['free'])
-        if asset != 'USDT' and free > 0.01:
+        if asset != 'USDC' and free > 0.01:
             try:
-                symbol = f"{asset}USDT"
+                symbol = f"{asset}USDC"
                 ticker = client.get_symbol_ticker(symbol=symbol)
                 price = float(ticker['price'])
                 value = free * price
@@ -371,7 +371,7 @@ def get_exchange_balances():
                 pass
     
     return {
-        'usdt': usdt_balance,
+        'usdc': usdc_balance,
         'total_value': total_value,
         'assets': sorted(other_assets, key=lambda x: x['value'], reverse=True)
     }, account
@@ -575,19 +575,19 @@ if __name__ == "__main__":
     
     # Test adding a position (normally done by trade_engine)
     portfolio = load_portfolio()
-    portfolio["positions"]["BTC/USDT"] = {
+    portfolio["positions"]["BTC/USDC"] = {
         "side": "long",
         "amount": 0.001,
         "entry_price": 68765,
         "current_price": 68765,
         "stop_loss": 65326,
         "take_profit": 72203,
-        "quote_currency": "USDT"
+        "quote_currency": "USDC"
     }
     save_portfolio(portfolio)
     
     # Test summary with current prices
-    current_prices = {"BTC/USDT": 69000}
+    current_prices = {"BTC/USDC": 69000}
     summary = get_portfolio_summary(current_prices)
     
     print(f"\n💰 Portfolio Summary:")

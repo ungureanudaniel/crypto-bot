@@ -45,7 +45,7 @@ def main():
     # 3. PRE-FLIGHT CHECKS (Connectivity)
     try:
         from modules.data_feed import get_current_price
-        test_price = get_current_price("BTC/USDT")
+        test_price = get_current_price("BTC/USDC")
         if test_price:
             logger.info(f"✅ API Connectivity verified. BTC: ${test_price}")
     except Exception as e:

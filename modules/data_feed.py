@@ -32,7 +32,7 @@ else:
 # Data fetching functions
 # ------------------------------------------------------------
 def format_symbol(symbol: str) -> str:
-    """Format trading symbol for Binance (BTC/USDT -> BTCUSDT)"""
+    """Format trading symbol for Binance (BTC/USDC -> BTCUSDC)"""
     symbol = symbol.strip().upper()
     
     if '/' in symbol:
@@ -136,11 +136,11 @@ def generate_mock_ohlcv(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     
     # Generate mock price data based on symbol
     base_price = {
-        'BTC/USDT': 65000,
-        'ETH/USDT': 3500,
-        'SOL/USDT': 150,
-        'BNB/USDT': 600,
-        'XRP/USDT': 0.5,
+        'BTC/USDC': 65000,
+        'ETH/USDC': 3500,
+        'SOL/USDC': 150,
+        'BNB/USDC': 600,
+        'XRP/USDC': 0.5,
     }.get(symbol, 100)
     
     # Create random walk
@@ -366,7 +366,7 @@ if __name__ == "__main__":
     print(f"🔧 Testnet: {CONFIG.get('testnet', False)}")
     
     # Test current price
-    symbol = 'BTC/USDT'
+    symbol = 'BTC/USDC'
     price = get_current_price(symbol)
     if price:
         print(f"\n💰 Current {symbol}: ${price:,.2f}")
