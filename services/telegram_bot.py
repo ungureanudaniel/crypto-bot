@@ -350,7 +350,9 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         
         # Calculate return (need initial balance - store in config or use current as baseline)
-        initial_balance = 10000.0  # Default testnet initial balance
+        from modules.portfolio import get_portfolio_summary
+        summary = get_portfolio_summary()
+        initial_balance = float(summary.get('initial_balance', 14.23))
         ret_pct = ((total_value - initial_balance) / initial_balance) * 100
         pnl_emoji = "🍏" if ret_pct >= 0 else "🍎"
         

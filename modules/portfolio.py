@@ -70,10 +70,10 @@ def load_portfolio() -> Dict:
             "positions": {},
             "futures_positions": {},
             "cash": {
-                "USDT": 5000.00,
-                "USDC": 0.00
+                "USDT": 0.00,
+                "USDC": 9.0
             },
-            "initial_balance": 5000.00,
+            "initial_balance": 9.0,
             "trade_history": [],
             "performance_metrics": {
                 "total_trades": 0,
@@ -87,7 +87,7 @@ def load_portfolio() -> Dict:
 def _get_default_portfolio() -> Dict:
     """Get default portfolio - used when file is missing or corrupted"""
     # Try to preserve existing cash if possible
-    default_cash = 5000.00  # Changed from 100 to 5000
+    default_cash = 9.00 
     
     # Check if there's a backup with actual cash
     backup_file = PORTFOLIO_FILE + ".backup"
@@ -105,8 +105,8 @@ def _get_default_portfolio() -> Dict:
         "positions": {},
         "futures_positions": {},
         "cash": {
-            "USDT": default_cash,
-            "USDC": 0.00
+            "USDT": 0,
+            "USDC": default_cash
         },
         "initial_balance": default_cash,
         "trade_history": [],
