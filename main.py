@@ -6,7 +6,8 @@ import logging
 import traceback
 from modules.logger_config import init_logging
 import io
-
+import matplotlib
+matplotlib.use('Agg')
 # Force UTF-8 encoding for Windows terminals to handle emojis
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')

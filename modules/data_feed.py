@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------------
 CONFIG = config.config
 if CONFIG.get('trading_mode', 'paper') in ['live', 'testnet']:
-    client = get_binance_client()
+    client = get_binance_client
 else:
     client = None
     logger.info("Paper mode - using public Binance API for price data")

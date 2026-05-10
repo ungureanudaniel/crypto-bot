@@ -12,11 +12,9 @@ Three layers:
 """
 
 import logging
-from turtle import position
 import pandas as pd
 from typing import Optional, Tuple
 
-from services.telegram_bot import current_price
 
 logger = logging.getLogger(__name__)
 
@@ -169,9 +167,9 @@ def update_chandelier_stop(
     be_trigger = 0.020
     be_floor = entry_price * (1.001 if side == 'long' else 0.999)
 
-    # ✅ NEW: don't activate trailing until price has moved 1.5% in your favor
     # Prevents chandelier from stopping you out on normal entry-candle noise
-    activation_threshold = config.config.get('trailing_activation_pct', 0.015)
+    activation_threshold = position.get('trailing_activation_pct') or config.config.get('trailing_activation_pct', 0.15)
+
 
     if side == 'long':
         profit_pct = (current_price - entry_price) / entry_price

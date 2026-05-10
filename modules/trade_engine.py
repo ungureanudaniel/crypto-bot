@@ -45,7 +45,6 @@ except ImportError:
 # CONFIG LOADING
 # -------------------------------------------------------------------
 CONFIG = config.config
-client = get_binance_client()
 
 # -------------------------------------------------------------------
 # PORTFOLIO POSITION HELPERS
@@ -182,11 +181,16 @@ class TradingEngine:
         self.binance_client = get_binance_client()
 
         # Initialize futures client for short execution
-        try:
-            self.futures_client = get_futures_client()
-        except Exception as e:
-            logger.warning(f"⚠️ Futures client not available: {e}")
+        if self.trading_mode == 'paper':
             self.futures_client = None
+            logger.info("📄 Paper mode — futures client skipped")
+        else:
+            try:
+                self.futures_client = get_futures_client()
+            except Exception as e:
+                logger.warning(f"⚠️ Futures client not available: {e}")
+                self.futures_client = None
+
 
         # Load open futures positions
         try:
@@ -197,12 +201,16 @@ class TradingEngine:
             self.open_futures_positions = {}
 
         # Futures engine for short execution
-        try:
-            from modules.futures_engine import futures_engine as _fe
-            self.futures_engine = _fe
-        except Exception as e:
-            logger.warning(f"⚠️ FuturesEngine not available: {e}")
+        if self.trading_mode == 'paper':
             self.futures_engine = None
+        else:
+            try:
+                from modules.futures_engine import futures_engine as _fe
+                self.futures_engine = _fe
+            except Exception as e:
+                logger.warning(f"⚠️ FuturesEngine not available: {e}")
+                self.futures_engine = None
+
 
         # Track pending signals to avoid duplicates
         self.last_signals = {}

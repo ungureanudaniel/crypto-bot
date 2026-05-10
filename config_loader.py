@@ -231,8 +231,12 @@ def get_futures_client():
     try:
         # Preferred: binance-futures-connector pip package
         from binance.um_futures import UMFutures
+        trading_mode = config.config['trading_mode'].lower()
+        target_url = 'https://testnet.binancefuture.com' if trading_mode == 'testnet' else 'https://fapi.binance.com'
         base_url = 'https://testnet.binancefuture.com' if trading_mode == 'testnet' else None
-        client = UMFutures(key=api_key, secret=api_secret, base_url=base_url)
+        # Initialize client
+        client = UMFutures(key=api_key, secret=api_secret, base_url=target_url)
+        client.base_url = target_url
         client.ping()
         logger.info("✅ Futures client (UMFutures) connected")
         _futures_client = client
