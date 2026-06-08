@@ -567,129 +567,126 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # LIVE/TESTNET MODE - fetch from exchange
         from config_loader import get_binance_client
-        
+        from modules.portfolio import load_portfolio
+
         client = get_binance_client()
         if not client:
             await update.message.reply_text("❌ Not connected to exchange")
             return
-        
-        # Get account balances
+
         account = client.get_account()
-        
-        # Calculate total value
-        total_value = 0
-        usdc_balance = 0
-        
-        # Get current prices
-        for balance in account['balances']:
-            asset = balance['asset']
-            free = float(balance['free'])
-            
-            if asset == 'USDC':
-                usdc_balance = free
-                total_value += free
-            elif free > 0.01:
+
+        # ✅ Get all balances directly — no pairing needed for the count
+        usdc_balance = 0.0
+        usdt_balance = 0.0
+        other_assets = {}
+
+        for b in account['balances']:
+            free   = float(b['free'])
+            locked = float(b['locked'])
+            total  = free + locked
+            if total < 0.0001:
+                continue
+            if b['asset'] == 'USDC':
+                usdc_balance = total
+            elif b['asset'] == 'USDT':
+                usdt_balance = total
+            else:
+                other_assets[b['asset']] = total
+
+        # Get prices for non-stable assets — try USDC then USDT
+        other_value = 0.0
+        for asset, amount in other_assets.items():
+            for quote in ('USDC', 'USDT'):
                 try:
-                    symbol = f"{asset}USDC"
-                    ticker = client.get_symbol_ticker(symbol=symbol)
-                    price = float(ticker['price'])
-                    total_value += free * price
-                except:
-                    pass
-        
-        # Calculate return (using 10000 as initial testnet balance)
-        initial_balance = 10000.0
-        total_return_pct = ((total_value - initial_balance) / initial_balance) * 100
-        
-        # Get real positions from trading engine
-        active_positions = len(trading_engine.open_positions) if trading_engine else 0
-        futures_positions = len(trading_engine.open_futures_positions) if hasattr(trading_engine, 'open_futures_positions') else 0
-        total_positions = active_positions + futures_positions
-        
-        # Get win rate from trade history (from history.json)
+                    ticker = client.get_symbol_ticker(symbol=f"{asset}{quote}")
+                    other_value += amount * float(ticker['price'])
+                    break
+                except Exception:
+                    continue
+
+        total_value = usdc_balance + usdt_balance + other_value
+
+        # ✅ Use real initial_balance from portfolio.json
+        portfolio     = load_portfolio()
+        initial       = portfolio.get('initial_balance', total_value)
+        return_pct    = ((total_value - initial) / initial * 100) if initial > 0 else 0.0
+        return_icon   = "📈" if return_pct >= 0 else "📉"
+
+        # Performance stats
         from modules.portfolio import get_performance_summary
-        perf = get_performance_summary()
-        win_rate = perf.get('win_rate', 0)
+        perf         = get_performance_summary()
+        win_rate     = perf.get('win_rate', 0)
         total_trades = perf.get('total_trades', 0)
-        
+
+        active_pos   = len(trading_engine.open_positions) if trading_engine else 0
+        futures_pos  = len(getattr(trading_engine, 'open_futures_positions', {}))
+
         message_lines = [
             f"🤖 *Trading Bot Status* [{trading_mode.upper()}]\n",
             f"━━━━━━━━━━━━━━━━",
             f"📊 Mode: `{trading_mode.upper()}`",
-            f"💰 Portfolio: `${total_value:,.2f}`",
             f"💵 USDC: `${usdc_balance:,.2f}`",
-            f"📈 Return: `{total_return_pct:+.1f}%`",
+            f"💰 Total Value: `${total_value:,.2f}`",
+            f"{return_icon} Return: `{return_pct:+.1f}%` vs initial `${initial:,.2f}`",
             f"🎯 Win Rate: `{win_rate:.1f}%`",
-            f"📊 Active: `{total_positions}/{trading_engine.max_positions}`",
+            f"📊 Active: `{active_pos + futures_pos}/{trading_engine.max_positions}`",
             f"📋 Total Trades: `{total_trades}`",
         ]
-        
-        # Show active spot positions from trading engine
+
+        # Active spot positions
         if trading_engine and trading_engine.open_positions:
             message_lines.append(f"\n📊 *Active Spot Positions:*")
             message_lines.append(f"━━━━━━━━━━━━━━━━")
-            
+
             for symbol, position in trading_engine.open_positions.items():
                 current_price = trading_engine.get_current_prices().get(symbol, position.get('entry_price', 0))
-                entry_price = position.get('entry_price', 0)
-                amount = position.get('amount', 0)
-                
-                if position.get('side') == 'long':
-                    pnl = (current_price - entry_price) * amount
-                    pnl_pct = ((current_price / entry_price) - 1) * 100
-                else:
-                    pnl = (entry_price - current_price) * amount
-                    pnl_pct = (1 - (current_price / entry_price)) * 100
-                
+                entry_price   = position.get('entry_price', 0)
+                amount        = position.get('amount', 0)
+                side          = position.get('side', 'long')
+
+                pnl     = (current_price - entry_price) * amount if side == 'long' else (entry_price - current_price) * amount
+                pnl_pct = ((current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+                if side == 'short': pnl_pct = -pnl_pct
+
                 pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-                
+                trailing  = " 🔄" if position.get('trailing_stop_active') else ""
+
                 def fmt(p):
-                    if p == 0: return "0"
-                    if p >= 100: return f"{p:.2f}"
-                    if p >= 1: return f"{p:.3f}"
+                    if p == 0:    return "0"
+                    if p >= 100:  return f"{p:.2f}"
+                    if p >= 1:    return f"{p:.3f}"
                     if p >= 0.01: return f"{p:.4f}"
                     return f"{p:.6f}"
-                
-                trailing = " 🔄" if position.get('trailing_stop_active') else ""
+
                 message_lines.append(
-                    f"\n{pnl_emoji} *{symbol}* ({position.get('side', 'unknown').upper()})"
-                    f"\n   Entry: `${fmt(entry_price)}`"
-                    f"\n   Current: `${fmt(current_price)}`"
+                    f"\n{pnl_emoji} *{symbol}* ({side.upper()})"
+                    f"\n   Entry: `${fmt(entry_price)}` → `${fmt(current_price)}`"
+                    f"\n   Amount: `{amount:.6f}`"
                     f"\n   P&L: `${pnl:+.4f}` ({pnl_pct:+.2f}%)"
                     f"\n   Stop: `${fmt(position.get('stop_loss', 0))}`{trailing}"
                     f"\n   Target: `${fmt(position.get('take_profit', 0))}`"
                 )
-        
-        # Show futures positions if any
-        if hasattr(trading_engine, 'open_futures_positions') and trading_engine.open_futures_positions:
-            message_lines.append(f"\n📊 *Active Futures Positions:*")
+
+        # Active futures positions
+        if getattr(trading_engine, 'open_futures_positions', {}):
+            message_lines.append(f"\n📉 *Active Futures Positions:*")
             message_lines.append(f"━━━━━━━━━━━━━━━━")
-            
+
             for symbol, position in trading_engine.open_futures_positions.items():
                 current_price = trading_engine.get_current_prices().get(symbol, position.get('entry_price', 0))
-                entry_price = position.get('entry_price', 0)
-                amount = position.get('amount', 0)
-                
-                if position.get('side') == 'short':
-                    pnl = (entry_price - current_price) * amount
-                    pnl_pct = ((entry_price / current_price) - 1) * 100
-                else:
-                    pnl = (current_price - entry_price) * amount
-                    pnl_pct = ((current_price / entry_price) - 1) * 100
-                
+                entry_price   = position.get('entry_price', 0)
+                amount        = position.get('amount', 0)
+                side          = position.get('side', 'short')
+
+                pnl     = (entry_price - current_price) * amount if side == 'short' else (current_price - entry_price) * amount
+                pnl_pct = (pnl / position.get('margin_used', 1)) * 100
+
                 pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-                
-                def fmt(p):
-                    if p == 0: return "0"
-                    if p >= 100: return f"{p:.2f}"
-                    if p >= 1: return f"{p:.3f}"
-                    if p >= 0.01: return f"{p:.4f}"
-                    return f"{p:.6f}"
-                
+
                 message_lines.append(
-                    f"\n{pnl_emoji} *{symbol}* (SHORT)"
-                    f"\n   Entry: `${fmt(entry_price)}`"
-                    f"\n   Current: `${fmt(current_price)}`"
+                    f"\n{pnl_emoji} *{symbol}* ({side.upper()})"
+                    f"\n   Entry: `${fmt(entry_price)}` → `${fmt(current_price)}`"
                     f"\n   P&L: `${pnl:+.4f}` ({pnl_pct:+.2f}%)"
                     f"\n   Stop: `${fmt(position.get('stop_loss', 0))}`"
                     f"\n   Target: `${fmt(position.get('take_profit', 0))}`"
