@@ -208,60 +208,63 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Return: `{summary.get('total_return_pct', 0):+.1f}%`"
             )
         else:
-            # LIVE/TESTNET MODE - fetch from exchange
             client = get_binance_client()
             if not client:
                 await update.message.reply_text("❌ Not connected to exchange")
                 return
-            
-            # Get account balances
+
             account = client.get_account()
-            
-            # Get USDC balance
-            usdc_balance = 0
-            for balance in account['balances']:
-                if balance['asset'] == 'USDC':
-                    usdc_balance = float(balance['free'])
-                    break
-            
-            # Get other assets with value
-            other_assets = []
-            total_value = usdc_balance
-            
-            for balance in account['balances']:
-                asset = balance['asset']
-                free = float(balance['free'])
-                if asset != 'USDC' and free > 0.01:
-                    try:
-                        symbol = f"{asset}USDC"
-                        ticker = client.get_symbol_ticker(symbol=symbol)
-                        price = float(ticker['price'])
-                        value = free * price
-                        total_value += value
-                        other_assets.append({
-                            'asset': asset,
-                            'amount': free,
-                            'price': price,
-                            'value': value
-                        })
-                    except:
-                        pass
-            
-            # Sort by value
-            other_assets.sort(key=lambda x: x['value'], reverse=True)
-            
+
+            # Just show everything with a non-zero balance — no pairing needed
+            usdc = 0.0
+            usdt = 0.0
+            assets = []
+
+            for b in account['balances']:
+                free   = float(b['free'])
+                locked = float(b['locked'])
+                total  = free + locked
+                if total < 0.0001:
+                    continue
+
+                if b['asset'] == 'USDC':
+                    usdc = total
+                elif b['asset'] == 'USDT':
+                    usdt = total
+                else:
+                    assets.append({
+                        'asset':  b['asset'],
+                        'free':   free,
+                        'locked': locked,
+                        'total':  total,
+                    })
+
+            assets.sort(key=lambda x: x['total'], reverse=True)
+
+            from modules.portfolio import load_portfolio
+            portfolio  = load_portfolio()
+            initial    = portfolio.get('initial_balance', usdc + usdt)
+            return_pct = ((usdc + usdt - initial) / initial * 100) if initial > 0 else 0.0
+
             response = (
                 f"💰 *Exchange Balance* [{trading_mode.upper()}]\n\n"
-                f"💵 USDC: `{usdc_balance:,.2f}`\n"
-                f"📈 Total Value: `{total_value:,.2f}`\n"
+                f"💵 USDC: `{usdc:.4f}`\n"
             )
-            
-            if other_assets:
-                response += f"\n📊 *Other Assets:*\n"
-                for asset in other_assets[:5]:
-                    response += f"   • {asset['asset']}: `{asset['amount']:.4f}` (≈${asset['value']:.2f})\n"
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
+            if usdt > 0.0001:
+                response += f"💵 USDT: `{usdt:.4f}`\n"
+
+            if assets:
+                response += f"\n🪙 *All Assets:*\n"
+                for a in assets:
+                    line = f"   • {a['asset']}: `{a['total']:.6f}`"
+                    if a['locked'] > 0:
+                        line += f" (locked: `{a['locked']:.6f}`)"
+                    response += line + "\n"
+
+            response += f"\n📊 Stablecoin Return: `{return_pct:+.1f}%` vs initial `${initial:,.2f}`"
+
+            await update.message.reply_text(response, parse_mode='Markdown')
+
         
     except Exception as e:
         logger.error(f"❌ Balance error: {e}")
@@ -394,6 +397,111 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ Summary error: {e}", exc_info=True)
         await update.message.reply_text("❌ Error generating portfolio summary.")
+
+async def sync_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch real open positions directly from exchange and sync to bot"""
+    if not update.message:
+        return
+    await update.message.reply_text("🔍 Fetching real positions from exchange...", parse_mode='Markdown')
+
+    try:
+        from config_loader import get_binance_client
+        from modules.portfolio import load_portfolio, save_portfolio
+        from datetime import datetime
+
+        client = get_binance_client()
+        if not client:
+            await update.message.reply_text("❌ Not connected to exchange", parse_mode='Markdown')
+            return
+
+        # Get all non-zero balances
+        account = client.get_account()
+        skip_assets = {'USDC', 'USDT', 'BNB', 'BAT', 'BCX', 'ICX', 'CHZ',
+                       'ALGO', 'COMP', 'AXS', '1INCH', 'SKY', '2Z'}  # dust/untracked
+
+        holdings = {}
+        for b in account['balances']:
+            asset = b['asset']
+            free = float(b['free'])
+            locked = float(b['locked'])
+            total = free + locked
+            if total > 0.001 and asset not in skip_assets:
+                holdings[asset] = total
+
+        if not holdings:
+            await update.message.reply_text("📭 No open positions found on exchange", parse_mode='Markdown')
+            return
+
+        # Get current prices and build position display
+        lines = ["📊 *Open Positions on Exchange*\n", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+        portfolio = load_portfolio()
+        tracked = portfolio.get('positions', {})
+        total_value = 0.0
+
+        for asset, amount in holdings.items():
+            symbol_usdc = f"{asset}USDC"
+            symbol_usdt = f"{asset}USDT"
+
+            # Try USDC pair first, then USDT
+            current_price = None
+            quote = None
+            for sym, q in [(symbol_usdc, 'USDC'), (symbol_usdt, 'USDT')]:
+                try:
+                    ticker = client.get_symbol_ticker(symbol=sym)
+                    current_price = float(ticker['price'])
+                    quote = q
+                    break
+                except Exception:
+                    continue
+
+            if not current_price:
+                lines.append(f"⚪ *{asset}*: `{amount:.6f}` (no price available)\n")
+                continue
+
+            value = amount * current_price
+            total_value += value
+
+            # Check if bot is tracking this position
+            bot_symbol = f"{asset}/{quote}"
+            is_tracked = bot_symbol in tracked
+            tracked_icon = "🤖" if is_tracked else "⚠️"
+
+            # Get bot's stop/target if tracked
+            stop_info = ""
+            if is_tracked:
+                pos = tracked[bot_symbol]
+                entry = pos.get('entry_price', 0)
+                stop = pos.get('stop_loss', 0)
+                tp = pos.get('take_profit', 0)
+                pnl = (current_price - entry) * amount
+                pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0
+                pnl_icon = "🟢" if pnl >= 0 else "🔴"
+                stop_info = (
+                    f"\n   Entry: `${entry:.4f}`"
+                    f"\n   {pnl_icon} PnL: `${pnl:+.2f}` ({pnl_pct:+.1f}%)"
+                    f"\n   🛑 Stop: `${stop:.4f}`"
+                    f"\n   🎯 Target: `${tp:.4f}`"
+                )
+            else:
+                stop_info = "\n   ⚠️ *Not tracked by bot — no stop loss active!*"
+
+            lines.append(
+                f"{tracked_icon} *{asset}* ({bot_symbol})"
+                f"\n   Amount: `{amount:.6f}`"
+                f"\n   Price: `${current_price:.4f}`"
+                f"\n   Value: `${value:.2f}`"
+                f"{stop_info}\n"
+            )
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"📈 *Total Position Value: ${total_value:.2f}*")
+        lines.append(f"\n🤖 = tracked by bot | ⚠️ = untracked (no stop loss!)")
+
+        await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Sync positions error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show bot status with real exchange data"""
@@ -956,217 +1064,319 @@ async def execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show active positions (trades with stop/target)"""
-
+    """Show active positions — combines bot-tracked and real exchange positions"""
     if not update.message:
-        logger.warning("⚠️ Positions command triggered without message object")
         return
-    
+
     try:
+        from config_loader import get_binance_client
+
         trading_mode = trading_engine.trading_mode if trading_engine else 'paper'
-        
-        # Check if there are any positions
-        spot_positions = trading_engine.open_positions if trading_engine else {}
+        client = get_binance_client() if trading_mode != 'paper' else None
+
+        # ── 1. BOT-TRACKED POSITIONS (from portfolio.json) ──────────
+        spot_positions    = trading_engine.open_positions if trading_engine else {}
         futures_positions = trading_engine.open_futures_positions if hasattr(trading_engine, 'open_futures_positions') else {}
-        
-        total_positions = len(spot_positions) + len(futures_positions)
-        
-        if total_positions == 0:
-            await update.message.reply_text("📭 No active positions", parse_mode='Markdown')
-            return
-        
-        # Get current prices
-        current_prices = get_cached_prices()
-        
-        # Also fetch fresh prices directly if needed
-        if trading_engine and trading_engine.binance_client:
+
+        # ── 2. REAL EXCHANGE POSITIONS (from Binance) ────────────────
+        exchange_holdings = {}
+        if client:
             try:
-                for symbol in list(spot_positions.keys()) + list(futures_positions.keys()):
-                    if symbol not in current_prices or current_prices.get(symbol, 0) <= 0:
-                        binance_symbol = symbol.replace('/', '')
-                        ticker = trading_engine.binance_client.get_symbol_ticker(symbol=binance_symbol)
-                        current_prices[symbol] = float(ticker['price'])
+                # Assets we don't want to show as positions
+                skip_assets = {
+                    'USDC', 'USDT', 'BNB',
+                    # dust from your account
+                    'BAT', 'BCX', 'ICX', 'CHZ', 'ALGO',
+                    'COMP', 'AXS', '1INCH', 'SKY', '2Z'
+                }
+                account = client.get_account()
+                for b in account['balances']:
+                    asset = b['asset']
+                    total = float(b['free']) + float(b['locked'])
+                    if total > 0.001 and asset not in skip_assets:
+                        exchange_holdings[asset] = total
             except Exception as e:
-                logger.debug(f"Could not fetch fresh prices: {e}")
-        
-        message_lines = [f"📊 *Active Positions* [{trading_mode.upper()}]\n"]
-        message_lines.append(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-        
-        total_pnl = 0
+                logger.warning(f"Could not fetch exchange balances: {e}")
+
+        # ── 3. CURRENT PRICES ────────────────────────────────────────
+        current_prices = get_cached_prices()
+
+        def get_price(symbol: str) -> float:
+            """Try cache first, then fetch live."""
+            if symbol in current_prices and current_prices[symbol] > 0:
+                return current_prices[symbol]
+            if client:
+                for quote in ('USDC', 'USDT'):
+                    try:
+                        binance_sym = symbol.replace('/', '').replace(f'/{quote}', '') + quote
+                        ticker = client.get_symbol_ticker(symbol=binance_sym)
+                        return float(ticker['price'])
+                    except Exception:
+                        continue
+            return 0.0
+
+        # ── 4. BUILD OUTPUT ──────────────────────────────────────────
+        message_lines = [f"📊 *Active Positions* [{trading_mode.upper()}]\n",
+                         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+
+        total_pnl     = 0.0
         position_count = 0
-        # Show SPOT positions
+
+        def fmt(p: float) -> str:
+            if p == 0:    return "0"
+            if p >= 1000: return f"{p:.2f}"
+            if p >= 100:  return f"{p:.3f}"
+            if p >= 1:    return f"{p:.4f}"
+            return f"{p:.6f}"
+
+        # ── Bot-tracked SPOT positions ────────────────────────────────
         if spot_positions:
-            message_lines.append(f"📦 *SPOT Positions:*\n")
-            
-            for symbol, position in spot_positions.items():
-                current_price = current_prices.get(symbol, position.get('current_price', position.get('entry_price', 0)))
-                entry_price = position.get('entry_price', 0)
-                amount = position.get('amount', 0)
-                side = position.get('side', 'long')
-                
-                if current_price <= 0:
-                    current_price = entry_price
-                
-                if side == 'long':
-                    pnl = (current_price - entry_price) * amount
-                    pnl_pct = ((current_price / entry_price) - 1) * 100
-                else:
-                    pnl = (entry_price - current_price) * amount
-                    pnl_pct = (1 - (current_price / entry_price)) * 100
-                
-                total_pnl += pnl
+            message_lines.append("🤖 *Bot-Tracked Spot Positions:*\n")
+            for symbol, pos in spot_positions.items():
+                price   = get_price(symbol) or pos.get('current_price', pos.get('entry_price', 0))
+                entry   = pos.get('entry_price', 0)
+                amount  = pos.get('amount', 0)
+                side    = pos.get('side', 'long')
+                stop    = pos.get('stop_loss', 0)
+                target  = pos.get('take_profit', 0)
+                trailing = " 🔄" if pos.get('trailing_stop_active') else ""
+
+                pnl     = (price - entry) * amount if side == 'long' else (entry - price) * amount
+                pnl_pct = ((price / entry) - 1) * 100 if entry > 0 else 0
+                if side == 'short': pnl_pct = -pnl_pct
+
+                total_pnl     += pnl
                 position_count += 1
-                
                 emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-                stop = position.get('stop_loss', 0)
-                target = position.get('take_profit', 0)
-                trailing = " 🔄" if position.get('trailing_stop_active') else ""
-                
-                def fmt_price(p):
-                    if p >= 1000: return f"{p:.2f}"
-                    if p >= 100: return f"{p:.3f}"
-                    if p >= 1: return f"{p:.4f}"
-                    return f"{p:.6f}"
-                
+
+                # Remove this asset from exchange_holdings so we don't double-count
+                asset = symbol.split('/')[0]
+                exchange_holdings.pop(asset, None)
+
                 message_lines.append(
-                    f"{emoji} *{symbol}* (LONG)"
-                    f"\n   Entry: `${fmt_price(entry_price)}` → `${fmt_price(current_price)}`"
-                    f"\n   P&L: `{pnl:+.2f} USDC` ({pnl_pct:+.1f}%)"
-                    f"\n   🛑 Stop: `${fmt_price(stop)}`{trailing}"
-                    f"\n   🎯 Target: `${fmt_price(target)}`\n"
+                    f"{emoji} *{symbol}* ({side.upper()})"
+                    f"\n   Entry: `${fmt(entry)}` → `${fmt(price)}`"
+                    f"\n   Amount: `{amount:.6f}`"
+                    f"\n   P&L: `${pnl:+.2f}` ({pnl_pct:+.1f}%)"
+                    f"\n   🛑 Stop: `${fmt(stop)}`{trailing}"
+                    f"\n   🎯 Target: `${fmt(target)}`\n"
                 )
-        
-        # Show FUTURES positions (shorts)
+
+        # ── Bot-tracked FUTURES positions ─────────────────────────────
         if futures_positions:
-            if spot_positions:
-                message_lines.append(f"\n📉 *FUTURES Positions:*\n")
-            
-            for symbol, position in futures_positions.items():
-                current_price = current_prices.get(symbol, position.get('current_price', position.get('entry_price', 0)))
-                entry_price = position.get('entry_price', 0)
-                amount = position.get('amount', 0)
-                side = position.get('side', 'short')
-                
-                if current_price <= 0:
-                    current_price = entry_price
-                
-                if side == 'short':
-                    pnl = (entry_price - current_price) * amount
-                    pnl_pct = ((entry_price / current_price) - 1) * 100
-                else:
-                    pnl = (current_price - entry_price) * amount
-                    pnl_pct = ((current_price / entry_price) - 1) * 100
-                
-                total_pnl += pnl
+            message_lines.append("\n📉 *Bot-Tracked Futures Positions:*\n")
+            for symbol, pos in futures_positions.items():
+                price    = get_price(symbol) or pos.get('entry_price', 0)
+                entry    = pos.get('entry_price', 0)
+                amount   = pos.get('amount', 0)
+                side     = pos.get('side', 'short')
+                stop     = pos.get('stop_loss', 0)
+                target   = pos.get('take_profit', 0)
+                leverage = pos.get('leverage', 1)
+
+                pnl     = (entry - price) * amount if side == 'short' else (price - entry) * amount
+                pnl_pct = (pnl / (pos.get('margin_used', 1))) * 100
+
+                total_pnl     += pnl
                 position_count += 1
-                
                 emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-                stop = position.get('stop_loss', 0)
-                target = position.get('take_profit', 0)
-                leverage = position.get('leverage', 1)
-                
-                def fmt_price(p):
-                    if p >= 1000: return f"{p:.2f}"
-                    if p >= 100: return f"{p:.3f}"
-                    if p >= 1: return f"{p:.4f}"
-                    return f"{p:.6f}"
-                
+
+                asset = symbol.split('/')[0]
+                exchange_holdings.pop(asset, None)
+
                 message_lines.append(
                     f"{emoji} *{symbol}* (SHORT x{leverage})"
-                    f"\n   Entry: `${fmt_price(entry_price)}` → `${fmt_price(current_price)}`"
-                    f"\n   P&L: `{pnl:+.2f} USDC` ({pnl_pct:+.1f}%)"
-                    f"\n   🛑 Stop: `${fmt_price(stop)}`"
-                    f"\n   🎯 Target: `${fmt_price(target)}`\n"
+                    f"\n   Entry: `${fmt(entry)}` → `${fmt(price)}`"
+                    f"\n   Amount: `{amount:.6f}`"
+                    f"\n   P&L: `${pnl:+.2f}` ({pnl_pct:+.1f}%)"
+                    f"\n   🛑 Stop: `${fmt(stop)}`"
+                    f"\n   🎯 Target: `${fmt(target)}`\n"
                 )
-        
-        # Add summary line
-        message_lines.append(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        message_lines.append(f"📈 *Total Unrealized P&L: ${total_pnl:+.2f}*")
+
+        # ── Untracked exchange positions (manual buys) ────────────────
+        if exchange_holdings:
+            message_lines.append("\n⚠️ *Untracked Exchange Positions (no stop loss!):*\n")
+            for asset, amount in exchange_holdings.items():
+                # Try USDC then USDT price
+                price = 0.0
+                quote_used = 'USDC'
+                for quote in ('USDC', 'USDT'):
+                    if client:
+                        try:
+                            ticker = client.get_symbol_ticker(symbol=f"{asset}{quote}")
+                            price  = float(ticker['price'])
+                            quote_used = quote
+                            break
+                        except Exception:
+                            continue
+
+                value = amount * price
+                if value < 0.50:  # skip real dust
+                    continue
+
+                position_count += 1
+                message_lines.append(
+                    f"⚠️ *{asset}/{quote_used}*"
+                    f"\n   Amount: `{amount:.6f}`"
+                    f"\n   Price: `${fmt(price)}`"
+                    f"\n   Value: `${value:.2f}`"
+                    f"\n   ❌ No stop loss — use `/setstop` or `/syncpositions`\n"
+                )
+
+        # ── Summary ───────────────────────────────────────────────────
+        if position_count == 0:
+            await update.message.reply_text("📭 No active positions", parse_mode='Markdown')
+            return
+
+        message_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        if total_pnl != 0:
+            message_lines.append(f"📈 *Total Unrealized P&L: ${total_pnl:+.2f}*")
         message_lines.append(f"📊 *Total Positions: {position_count}*")
-        
+        message_lines.append(f"\n🤖 bot-managed  ⚠️ untracked")
+
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
-        
+
     except Exception as e:
-        logger.error(f"❌ Positions error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"Positions error: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Place manual limit buy order"""
+    """Place manual limit buy order and register it for stop loss management"""
     if not update.message:
-        logger.warning("⚠️ Start command triggered without message object")
         return
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
-            "Usage: `/limitbuy SYMBOL AMOUNT PRICE`\n"
-            "Example: `/limitbuy BTC/USDC 0.001 50000`\n"
-            "         `/limitbuy SOL/USDC 2 122`",
+            "Usage: `/limitbuy SYMBOL AMOUNT PRICE [STOP] [TARGET]`\n"
+            "Example: `/limitbuy SOL/USDC 0.2 140 126 200`\n"
+            "Stop and target are optional — defaults to 3% stop, 9% target",
             parse_mode='Markdown'
         )
         return
-    
+
     symbol = context.args[0].upper()
-    
+
     try:
         amount = float(context.args[1])
-        price = float(context.args[2])
+        price  = float(context.args[2])
     except ValueError:
         await update.message.reply_text("❌ Amount and price must be numbers", parse_mode='Markdown')
         return
-    
-    # Get optional stop loss and take profit
-    stop_loss = None
-    take_profit = None
-    if len(context.args) >= 4:
-        try:
-            stop_loss = float(context.args[3])
-        except:
-            pass
-    if len(context.args) >= 5:
-        try:
-            take_profit = float(context.args[4])
-        except:
-            pass
-    
+
+    stop_loss   = float(context.args[3]) if len(context.args) >= 4 else round(price * 0.97, 4)
+    take_profit = float(context.args[4]) if len(context.args) >= 5 else round(price * 1.09, 4)
+
+    # Basic validation
+    order_value = amount * price
+    if order_value < 5:
+        await update.message.reply_text(
+            f"❌ Order value `${order_value:.2f}` is below Binance minimum ($5).\n"
+            f"Increase amount or price.",
+            parse_mode='Markdown'
+        )
+        return
+
+    if stop_loss >= price:
+        await update.message.reply_text("❌ Stop loss must be below buy price", parse_mode='Markdown')
+        return
+
+    if take_profit <= price:
+        await update.message.reply_text("❌ Take profit must be above buy price", parse_mode='Markdown')
+        return
+
     await update.message.reply_text(
-        f"📝 Placing manual limit BUY order...",
+        f"📝 Placing limit BUY for {symbol}...\n"
+        f"Amount: `{amount}` @ `${price}`\n"
+        f"Stop: `${stop_loss}` | Target: `${take_profit}`",
         parse_mode='Markdown'
     )
-    
+
     try:
-        success, message = trading_engine.place_manual_limit_order(
-            symbol=symbol,
-            side='buy',
-            quantity=amount,
-            price=price,
-            stop_loss=stop_loss if stop_loss is not None else price * 0.98,
-            take_profit=take_profit if take_profit is not None else price * 1.05
-        )
-        
-        if success:
-            response = (
-                f"✅ *Manual Limit BUY Order Placed!*\n\n"
-                f"Symbol: {symbol}\n"
-                f"Amount: {amount:.6f}\n"
-                f"Price: `${price:.2f}`\n"
-                f"Total: `${amount * price:.2f}`\n"
-            )
-            
-            if stop_loss:
-                response += f"Stop Loss: `${stop_loss:.2f}`\n"
-            if take_profit:
-                response += f"Take Profit: `${take_profit:.2f}`\n"
-            
-            await update.message.reply_text(response, parse_mode='Markdown')
+        trading_mode = trading_engine.trading_mode
+
+        # ── LIVE/TESTNET: place real order on exchange ────────────────
+        if trading_mode in ('live', 'testnet') and trading_engine.binance_client:
+            binance_symbol = symbol.replace('/', '')
+
+            # Validate and adjust quantity for LOT_SIZE + MIN_NOTIONAL
+            is_valid, adjusted_amount, error = trading_engine.validate_and_adjust_order(symbol, amount)
+            if not is_valid:
+                await update.message.reply_text(f"❌ Order validation failed: {error}", parse_mode='Markdown')
+                return
+
+            if adjusted_amount != amount:
+                await update.message.reply_text(
+                    f"ℹ️ Quantity adjusted: `{amount}` → `{adjusted_amount}` (LOT_SIZE rules)",
+                    parse_mode='Markdown'
+                )
+                amount = adjusted_amount
+
+            try:
+                order = trading_engine.binance_client.order_limit_buy(
+                    symbol=binance_symbol,
+                    quantity=round(amount, 6),
+                    price=str(price)
+                )
+                order_id = order['orderId']
+                logger.info(f"✅ Limit buy placed: {order_id} for {symbol}")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Exchange error: {str(e)[:150]}", parse_mode='Markdown')
+                return
+
+        # ── PAPER: simulate immediately ───────────────────────────────
+        elif trading_mode == 'paper':
+            order_id = f"paper_{int(__import__('time').time())}"
+            quote    = symbol.split('/')[1]
+            cash     = trading_engine.get_cash_balance(quote)
+            cost     = amount * price
+            if cash < cost:
+                await update.message.reply_text(
+                    f"❌ Insufficient {quote}: have `${cash:.2f}`, need `${cost:.2f}`",
+                    parse_mode='Markdown'
+                )
+                return
         else:
+            await update.message.reply_text("❌ No valid trading mode or exchange connection", parse_mode='Markdown')
+            return
+
+        # ── REGISTER IN BOT so stop loss watcher picks it up ─────────
+        # This is the critical step that was missing before
+        success = trading_engine.open_position(
+            symbol=symbol,
+            side='long',
+            entry_price=price,
+            units=amount,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            signal_type='manual_limit_buy',
+            atr=0.0
+        )
+
+        if success:
+            sl_pct  = ((price - stop_loss) / price) * 100
+            tp_pct  = ((take_profit - price) / price) * 100
+            rr      = tp_pct / sl_pct if sl_pct > 0 else 0
+
             await update.message.reply_text(
-                f"❌ Failed: {message}",
+                f"✅ *Limit BUY Registered!*\n\n"
+                f"📊 Symbol: `{symbol}`\n"
+                f"💵 Price: `${price}`\n"
+                f"📦 Amount: `{amount}`\n"
+                f"💰 Value: `${amount * price:.2f}`\n\n"
+                f"🛑 Stop Loss: `${stop_loss}` (-{sl_pct:.1f}%)\n"
+                f"🎯 Take Profit: `${take_profit}` (+{tp_pct:.1f}%)\n"
+                f"⚖️ R:R = `{rr:.1f}x`\n\n"
+                f"🤖 Bot is now watching this position.",
                 parse_mode='Markdown'
             )
-            
+        else:
+            await update.message.reply_text(
+                f"⚠️ Order placed on exchange but *failed to register* in bot.\n"
+                f"Use `/syncpositions` to manually register it with a stop loss.",
+                parse_mode='Markdown'
+            )
+
     except Exception as e:
-        logger.error(f"❌ Limit buy error: {e}")
+        logger.error(f"Limit buy error: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error: {str(e)[:150]}", parse_mode='Markdown')
 
 async def limit_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1453,6 +1663,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /status - Full status
     /balance - Show balance
     /summary - Quick portfolio summary
+    /sync_positions - Sync positions with exchange
     /positions - Show open positions
     /price SYMBOL - Show current price of a symbol
     /help - This help
@@ -1562,6 +1773,7 @@ async def run_telegram_bot_async():
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("positions", positions))
+    application.add_handler(CommandHandler("sync_positions", sync_positions))
     application.add_handler(CommandHandler("price", current_price))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("scan", scan))
