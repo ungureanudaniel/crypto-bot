@@ -1349,22 +1349,29 @@ async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if success:
+            # Read back from open_positions to confirm what was actually saved
+            registered = trading_engine.open_positions.get(symbol, {})
+            actual_stop = registered.get('stop_loss', stop_loss)
+            actual_tp   = registered.get('take_profit', take_profit)
+            actual_amt  = registered.get('amount', amount)
+
             sl_pct  = ((price - stop_loss) / price) * 100
             tp_pct  = ((take_profit - price) / price) * 100
             rr      = tp_pct / sl_pct if sl_pct > 0 else 0
 
             await update.message.reply_text(
-                f"✅ *Limit BUY Registered!*\n\n"
+                f"✅ *Position Registered!*\n\n"
                 f"📊 Symbol: `{symbol}`\n"
-                f"💵 Price: `${price}`\n"
-                f"📦 Amount: `{amount}`\n"
-                f"💰 Value: `${amount * price:.2f}`\n\n"
-                f"🛑 Stop Loss: `${stop_loss}` (-{sl_pct:.1f}%)\n"
-                f"🎯 Take Profit: `${take_profit}` (+{tp_pct:.1f}%)\n"
+                f"💵 Entry: `${price}`\n"
+                f"📦 Amount: `{actual_amt:.6f}`\n"
+                f"💰 Value: `${actual_amt * price:.2f}`\n\n"
+                f"🛑 Stop Loss: `${actual_stop}` (-{sl_pct:.1f}%)\n"
+                f"🎯 Take Profit: `${actual_tp}` (+{tp_pct:.1f}%)\n"
                 f"⚖️ R:R = `{rr:.1f}x`\n\n"
-                f"🤖 Bot is now watching this position.",
+                f"🤖 Bot is now watching this position.\n"
+                f"Use `/positions` to verify.",
                 parse_mode='Markdown'
-            )
+                )
         else:
             await update.message.reply_text(
                 f"⚠️ Order placed on exchange but *failed to register* in bot.\n"
