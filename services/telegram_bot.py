@@ -1237,6 +1237,78 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Positions error: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
+async def open_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch all open orders directly from Binance exchange"""
+    if not update.message:
+        return
+
+    await update.message.reply_text("🔍 Fetching open orders from exchange...", parse_mode='Markdown')
+
+    try:
+        from config_loader import get_binance_client, config
+
+        client = get_binance_client()
+        if not client:
+            await update.message.reply_text("❌ Not connected to exchange", parse_mode='Markdown')
+            return
+
+        coins = config.config.get('coins', [])
+        # Add any extra symbols you might have manual orders on
+        extra = ['ZEC/USDC', 'ETH/USDC', 'SOL/USDC', 'BTC/USDC',
+                 'ZEC/USDT', 'ETH/USDT', 'SOL/USDT', 'BTC/USDT']
+        all_symbols = list(set(coins + extra))
+
+        all_orders = []
+        for symbol in all_symbols:
+            binance_symbol = symbol.replace('/', '')
+            try:
+                orders = client.get_open_orders(symbol=binance_symbol)
+                for o in orders:
+                    all_orders.append({
+                        'symbol':    symbol,
+                        'side':      o['side'],
+                        'type':      o['type'],
+                        'qty':       float(o['origQty']),
+                        'filled':    float(o['executedQty']),
+                        'price':     float(o['price']) if o['price'] != '0.00000000' else None,
+                        'status':    o['status'],
+                        'order_id':  o['orderId'],
+                        'time':      o['time'],
+                    })
+            except Exception:
+                continue
+
+        if not all_orders:
+            await update.message.reply_text("📭 No open orders on exchange", parse_mode='Markdown')
+            return
+
+        from datetime import datetime
+        lines = [f"📋 *Open Orders on Exchange ({len(all_orders)})*\n",
+                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+
+        for o in all_orders:
+            side_icon  = "🟢" if o['side'] == 'BUY' else "🔴"
+            filled_pct = (o['filled'] / o['qty'] * 100) if o['qty'] > 0 else 0
+            price_str  = f"`${o['price']:.4f}`" if o['price'] else "`market`"
+            time_str   = datetime.fromtimestamp(o['time'] / 1000).strftime('%m-%d %H:%M')
+
+            lines.append(
+                f"{side_icon} *{o['symbol']}* — {o['type']}\n"
+                f"   Side: `{o['side']}`\n"
+                f"   Qty: `{o['qty']:.6f}` (filled: `{filled_pct:.0f}%`)\n"
+                f"   Price: {price_str}\n"
+                f"   Value: `${o['qty'] * (o['price'] or 0):.2f}`\n"
+                f"   Status: `{o['status']}`\n"
+                f"   Time: `{time_str}`\n"
+                f"   ID: `{o['order_id']}`\n"
+            )
+
+        await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Open orders error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
 async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Place manual limit buy order and register it for stop loss management"""
     if not update.message:
@@ -1668,6 +1740,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /balance - Show balance
     /summary - Quick portfolio summary
     /sync_positions - Sync positions with exchange
+    /open_orders - Show open orders on exchange
     /positions - Show open positions
     /price SYMBOL - Show current price of a symbol
     /help - This help
@@ -1780,6 +1853,7 @@ async def run_telegram_bot_async():
     application.add_handler(CommandHandler("sync_positions", sync_positions))
     application.add_handler(CommandHandler("price", current_price))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("open_orders", open_orders))
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("executeall", execute_all))
     application.add_handler(CommandHandler("execute", execute))
