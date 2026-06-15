@@ -182,6 +182,79 @@ async def reset_circuit_breaker(update: Update, context: ContextTypes.DEFAULT_TY
     trading_engine.circuit_breaker_triggered = False
     await update.message.reply_text("✅ Circuit breaker manually reset. Trading resumed.", parse_mode='Markdown')
 
+async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel a specific order by ID"""
+    if not update.message:
+        return
+
+    # Check if order ID was provided
+    if not context.args or len(context.args) == 0:
+        await update.message.reply_text(
+            "❌ Usage: `/cancel_order <order_id> [symbol]`\n\n"
+            "Example: `/cancel_order 12345678 BTC/USDT`\n"
+            "If symbol not provided, will search all symbols.",
+            parse_mode='Markdown'
+        )
+        return
+
+    try:
+        order_id = context.args[0]
+        symbol = context.args[1] if len(context.args) > 1 else None
+
+        from config_loader import get_binance_client, config
+        client = get_binance_client()
+
+        if not client:
+            await update.message.reply_text("❌ Not connected to exchange", parse_mode='Markdown')
+            return
+
+        trading_mode = config.config.get('trading_mode', 'paper')
+        if trading_mode == 'paper':
+            await update.message.reply_text("📄 Paper mode - no real orders to cancel", parse_mode='Markdown')
+            return
+
+        # If symbol provided, cancel directly
+        if symbol:
+            binance_symbol = symbol.replace('/', '')
+            result = client.cancel_order(symbol=binance_symbol, orderId=int(order_id))
+            await update.message.reply_text(
+                f"✅ Cancelled order `{order_id}` for `{symbol}`\n"
+                f"   Side: `{result['side']}` | Type: `{result['type']}`\n"
+                f"   Qty: `{result['origQty']}` | Price: `${float(result['price']):.4f}`",
+                parse_mode='Markdown'
+            )
+            return
+
+        # Search for order across all symbols
+        coins = config.config.get('coins', [])
+        all_symbols = list(set(coins + ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BTC/USDC', 'ETH/USDC']))
+
+        found = False
+        for sym in all_symbols:
+            try:
+                binance_symbol = sym.replace('/', '')
+                orders = client.get_open_orders(symbol=binance_symbol)
+                for o in orders:
+                    if str(o['orderId']) == str(order_id):
+                        result = client.cancel_order(symbol=binance_symbol, orderId=int(order_id))
+                        await update.message.reply_text(
+                            f"✅ Cancelled order `{order_id}` for `{sym}`\n"
+                            f"   Side: `{result['side']}` | Type: `{result['type']}`\n"
+                            f"   Qty: `{result['origQty']}` | Price: `${float(result['price']):.4f}`",
+                            parse_mode='Markdown'
+                        )
+                        found = True
+                        break
+            except:
+                continue
+
+        if not found:
+            await update.message.reply_text(f"❌ Order `{order_id}` not found", parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Cancel order error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show REAL balance from exchange (not paper portfolio)"""
     logger.info(f"Received /balance from {update.effective_user.id}")
@@ -223,7 +296,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for b in account['balances']:
                 free   = float(b['free'])
                 locked = float(b['locked'])
-                total  = free + locked
+                total  = free + locked # show total balance (free + locked) for better transparency, especially if there are open orders locking funds
                 if total < 0.0001:
                     continue
 
@@ -238,7 +311,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         'locked': locked,
                         'total':  total,
                     })
-
+            # Sort assets by total value descending (assuming we have price data to calculate value, otherwise just sort by total balance)
             assets.sort(key=lambda x: x['total'], reverse=True)
 
             from modules.portfolio import load_portfolio
@@ -1252,61 +1325,261 @@ async def open_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Not connected to exchange", parse_mode='Markdown')
             return
 
+        trading_mode = config.config.get('trading_mode', 'paper')
+        if trading_mode == 'paper':
+            await update.message.reply_text("📄 Paper mode - no real exchange orders", parse_mode='Markdown')
+            return
+
+        # Get symbols from config and add common pairs
         coins = config.config.get('coins', [])
-        # Add any extra symbols you might have manual orders on
         extra = ['ZEC/USDC', 'ETH/USDC', 'SOL/USDC', 'BTC/USDC',
-                 'ZEC/USDT', 'ETH/USDT', 'SOL/USDT', 'BTC/USDT']
+                 'ZEC/USDT', 'ETH/USDT', 'SOL/USDT', 'BTC/USDT',
+                 'ADA/USDT', 'XRP/USDT', 'DOGE/USDT']  # added more common pairs
         all_symbols = list(set(coins + extra))
 
         all_orders = []
+        error_symbols = []
+
         for symbol in all_symbols:
             binance_symbol = symbol.replace('/', '')
             try:
                 orders = client.get_open_orders(symbol=binance_symbol)
                 for o in orders:
+                    # Calculate remaining quantity
+                    remaining = float(o['origQty']) - float(o['executedQty'])
+                    
                     all_orders.append({
                         'symbol':    symbol,
                         'side':      o['side'],
                         'type':      o['type'],
                         'qty':       float(o['origQty']),
                         'filled':    float(o['executedQty']),
+                        'remaining': remaining,
                         'price':     float(o['price']) if o['price'] != '0.00000000' else None,
                         'status':    o['status'],
                         'order_id':  o['orderId'],
                         'time':      o['time'],
                     })
-            except Exception:
+            except Exception as e:
+                error_symbols.append(symbol)
+                logger.debug(f"Could not fetch orders for {symbol}: {e}")
                 continue
 
         if not all_orders:
-            await update.message.reply_text("📭 No open orders on exchange", parse_mode='Markdown')
+            msg = "📭 No open orders on exchange"
+            if error_symbols:
+                msg += f"\n\n⚠️ Could not check: {', '.join(error_symbols[:5])}"
+                if len(error_symbols) > 5:
+                    msg += f" and {len(error_symbols)-5} more"
+            await update.message.reply_text(msg, parse_mode='Markdown')
             return
 
         from datetime import datetime
-        lines = [f"📋 *Open Orders on Exchange ({len(all_orders)})*\n",
-                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+        lines = [f"📋 *Open Orders on Exchange* [{trading_mode.upper()}]\n",
+                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+
+        # Sort orders by symbol
+        all_orders.sort(key=lambda x: (x['symbol'], x['time']))
+
+        total_unfilled_value = 0
 
         for o in all_orders:
             side_icon  = "🟢" if o['side'] == 'BUY' else "🔴"
             filled_pct = (o['filled'] / o['qty'] * 100) if o['qty'] > 0 else 0
-            price_str  = f"`${o['price']:.4f}`" if o['price'] else "`market`"
-            time_str   = datetime.fromtimestamp(o['time'] / 1000).strftime('%m-%d %H:%M')
+            price_str  = f"`${o['price']:.4f}`" if o['price'] else "`MARKET`"
+            time_str   = datetime.fromtimestamp(o['time'] / 1000).strftime('%H:%M:%S')
+            date_str   = datetime.fromtimestamp(o['time'] / 1000).strftime('%m-%d')
+            
+            # Calculate unfilled value
+            unfilled_value = o['remaining'] * (o['price'] or 0)
+            total_unfilled_value += unfilled_value
 
             lines.append(
-                f"{side_icon} *{o['symbol']}* — {o['type']}\n"
-                f"   Side: `{o['side']}`\n"
-                f"   Qty: `{o['qty']:.6f}` (filled: `{filled_pct:.0f}%`)\n"
-                f"   Price: {price_str}\n"
-                f"   Value: `${o['qty'] * (o['price'] or 0):.2f}`\n"
-                f"   Status: `{o['status']}`\n"
-                f"   Time: `{time_str}`\n"
-                f"   ID: `{o['order_id']}`\n"
+                f"{side_icon} *{o['symbol']}*\n"
+                f"   📊 `{o['type']}` | Side: `{o['side']}` | ID: `{o['order_id']}`\n"
+                f"   📦 Qty: `{o['qty']:.6f}` (filled: `{filled_pct:.1f}%`, remaining: `{o['remaining']:.6f}`)\n"
+                f"   💰 Price: {price_str}\n"
+                f"   💵 Unfilled Value: `${unfilled_value:.2f}`\n"
+                f"   ⏰ Time: `{date_str} {time_str}`\n"
+                f"   📌 Status: `{o['status']}`\n"
             )
+
+        lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"💰 *Total Open Order Value: ${total_unfilled_value:.2f}*")
+
+        if error_symbols:
+            lines.append(f"\n⚠️ Could not check: {', '.join(error_symbols[:3])}")
 
         await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
 
     except Exception as e:
         logger.error(f"Open orders error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
+async def cancel_symbol_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel all open orders for a specific symbol"""
+    if not update.message:
+        return
+
+    if not context.args or len(context.args) == 0:
+        await update.message.reply_text(
+            "❌ Usage: `/cancel_symbol <symbol>`\n\n"
+            "Example: `/cancel_symbol BTC/USDT`\n"
+            "This will cancel ALL open orders for that symbol.",
+            parse_mode='Markdown'
+        )
+        return
+
+    symbol = context.args[0]
+    
+    # Confirm with user
+    await update.message.reply_text(
+        f"⚠️ *Confirm cancellation of ALL orders for {symbol}?*\n\n"
+        f"Type `/confirm_cancel_{symbol.replace('/', '_')}` to confirm.\n"
+        f"*(This safety check prevents accidental cancellations)*",
+        parse_mode='Markdown'
+    )
+    
+    # Store pending confirmation
+    context.user_data['pending_cancel_symbol'] = symbol
+
+async def confirm_cancel_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirm cancellation of orders for a symbol"""
+    if not update.message:
+        return
+
+    symbol = context.user_data.get('pending_cancel_symbol')
+    if not symbol:
+        await update.message.reply_text("❌ No pending cancellation", parse_mode='Markdown')
+        return
+
+    try:
+        from config_loader import get_binance_client, config
+        client = get_binance_client()
+
+        if not client:
+            await update.message.reply_text("❌ Not connected to exchange", parse_mode='Markdown')
+            return
+
+        binance_symbol = symbol.replace('/', '')
+        orders = client.get_open_orders(symbol=binance_symbol)
+        
+        if not orders:
+            await update.message.reply_text(f"📭 No open orders for {symbol}", parse_mode='Markdown')
+            return
+
+        cancelled = []
+        failed = []
+
+        for order in orders:
+            try:
+                result = client.cancel_order(symbol=binance_symbol, orderId=order['orderId'])
+                cancelled.append({
+                    'id': order['orderId'],
+                    'side': order['side'],
+                    'qty': order['origQty'],
+                    'price': order['price']
+                })
+            except Exception as e:
+                failed.append(order['orderId'])
+
+        # Clear pending confirmation
+        del context.user_data['pending_cancel_symbol']
+
+        response = f"✅ *Cancelled {len(cancelled)} orders for {symbol}*\n\n"
+        for c in cancelled[:5]:
+            response += f"   • Order `{c['id']}`: {c['side']} {c['qty']} @ ${float(c['price']):.4f}\n"
+        if len(cancelled) > 5:
+            response += f"   ... and {len(cancelled) - 5} more\n"
+        if failed:
+            response += f"\n⚠️ Failed to cancel: {failed}"
+
+        await update.message.reply_text(response, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Cancel symbol orders error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
+
+async def cancel_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel ALL open orders across all symbols - requires confirmation"""
+    if not update.message:
+        return
+
+    await update.message.reply_text(
+        "⚠️ *DANGER: This will cancel ALL open orders across ALL symbols!*\n\n"
+        "Type `/confirm_cancel_all` to confirm this action.\n"
+        "*(This cannot be undone)*",
+        parse_mode='Markdown'
+    )
+    
+    context.user_data['pending_cancel_all'] = True
+
+async def confirm_cancel_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirm cancellation of ALL orders"""
+    if not update.message:
+        return
+
+    if not context.user_data.get('pending_cancel_all'):
+        await update.message.reply_text("❌ No pending cancellation", parse_mode='Markdown')
+        return
+
+    try:
+        from config_loader import get_binance_client, config
+        client = get_binance_client()
+
+        if not client:
+            await update.message.reply_text("❌ Not connected to exchange", parse_mode='Markdown')
+            return
+
+        await update.message.reply_text("🔍 Scanning for open orders...", parse_mode='Markdown')
+
+        # Get all symbols that might have orders
+        coins = config.config.get('coins', [])
+        all_symbols = list(set(coins + ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 
+                                        'BTC/USDC', 'ETH/USDC', 'SOL/USDC',
+                                        'ADA/USDT', 'XRP/USDT', 'DOGE/USDT']))
+
+        total_cancelled = 0
+        results = []
+
+        for symbol in all_symbols:
+            try:
+                binance_symbol = symbol.replace('/', '')
+                orders = client.get_open_orders(symbol=binance_symbol)
+                
+                for order in orders:
+                    try:
+                        result = client.cancel_order(symbol=binance_symbol, orderId=order['orderId'])
+                        total_cancelled += 1
+                        results.append({
+                            'symbol': symbol,
+                            'id': order['orderId'],
+                            'side': order['side']
+                        })
+                    except Exception as e:
+                        logger.debug(f"Failed to cancel order {order['orderId']}: {e}")
+            except Exception as e:
+                logger.debug(f"Error checking {symbol}: {e}")
+
+        # Clear pending confirmation
+        del context.user_data['pending_cancel_all']
+
+        response = f"✅ *Cancelled {total_cancelled} orders total*\n\n"
+        if results:
+            # Group by symbol
+            by_symbol = {}
+            for r in results:
+                by_symbol.setdefault(r['symbol'], []).append(r)
+            
+            for symbol, orders in list(by_symbol.items())[:10]:
+                response += f"   • {symbol}: {len(orders)} orders\n"
+            if len(by_symbol) > 10:
+                response += f"   ... and {len(by_symbol) - 10} more symbols\n"
+
+        await update.message.reply_text(response, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Cancel all orders error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
 async def limit_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1739,8 +2012,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /status - Full status
     /balance - Show balance
     /summary - Quick portfolio summary
-    /sync_positions - Sync positions with exchange
-    /open_orders - Show open orders on exchange
+    /syncpositions - Sync positions with exchange
+    /openorders - Show open orders on exchange
     /positions - Show open positions
     /price SYMBOL - Show current price of a symbol
     /help - This help
@@ -1754,6 +2027,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /limitbuy SYMBOL AMOUNT PRICE [STOP] [TARGET] - Limit buy
     /limitsell SYMBOL AMOUNT PRICE - Limit sell
     /pendingorders - Show pending orders on exchange
+    /cancelorder ORDER_ID - Cancel a specific order
+    /cancelsymbol SYMBOL - Cancel all orders for a symbol
+    /cancelall - Cancel all orders on exchange
     /sellall - EMERGENCY: Sell all positions at market price
     /cancelall - Cancel all orders on exchange
 
@@ -1850,10 +2126,10 @@ async def run_telegram_bot_async():
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("positions", positions))
-    application.add_handler(CommandHandler("sync_positions", sync_positions))
+    application.add_handler(CommandHandler("syncpositions", sync_positions))
     application.add_handler(CommandHandler("price", current_price))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("open_orders", open_orders))
+    application.add_handler(CommandHandler("openorders", open_orders))
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("executeall", execute_all))
     application.add_handler(CommandHandler("execute", execute))
@@ -1862,6 +2138,8 @@ async def run_telegram_bot_async():
     application.add_handler(CommandHandler("pendingorders", pending_orders))
     application.add_handler(CommandHandler("sellall", emergency_sell_all))
     application.add_handler(CommandHandler("cancelall", cancel_all_orders))
+    application.add_handler(CommandHandler("cancelsymbol", cancel_symbol_orders))
+    application.add_handler(CommandHandler("cancelorder", cancel_order))
     application.add_handler(CommandHandler("summary", summary))
     application.add_handler(CommandHandler("setstop", set_stop_loss))
     application.add_handler(CommandHandler("stop", stop))
