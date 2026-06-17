@@ -1435,7 +1435,7 @@ async def cancel_symbol_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     # Confirm with user
     await update.message.reply_text(
         f"⚠️ *Confirm cancellation of ALL orders for {symbol}?*\n\n"
-        f"Type `/confirm_cancel_{symbol.replace('/', '_')}` to confirm.\n"
+        f"Type `/confirm_cancel` to confirm.\n"
         f"*(This safety check prevents accidental cancellations)*",
         parse_mode='Markdown'
     )
@@ -1889,71 +1889,6 @@ async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Pending orders error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
 
-async def cancel_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel all pending orders on exchange"""
-    if not update.message:
-        logger.warning("⚠️ Start command triggered without message object")
-        return
-    await update.message.reply_text("🗑️ Cancelling all pending orders on exchange...", parse_mode='Markdown')
-    
-    try:
-        if not trading_engine.binance_client:
-            await update.message.reply_text("❌ No exchange connection", parse_mode='Markdown')
-            return
-        
-        cancelled = 0
-        failed = 0
-        failed_symbols = []
-        
-        for symbol in CONFIG.get('coins', ['BTC/USDC', 'ETH/USDC']):
-            try:
-                binance_symbol = symbol.replace('/', '')
-                
-                # First, get open orders for this symbol
-                open_orders = trading_engine.binance_client.get_open_orders(symbol=binance_symbol)
-                
-                if not open_orders:
-                    logger.debug(f"No open orders for {symbol}")
-                    continue
-                
-                # Cancel each order individually
-                for order in open_orders:
-                    try:
-                        result = trading_engine.binance_client.cancel_order(
-                            symbol=binance_symbol,
-                            orderId=order['orderId']
-                        )
-                        if result:
-                            cancelled += 1
-                            logger.info(f"✅ Cancelled order {order['orderId']} for {symbol}")
-                    except Exception as e:
-                        logger.debug(f"Failed to cancel order {order['orderId']}: {e}")
-                        failed += 1
-                
-                # Small delay to avoid rate limits
-                time.sleep(0.1)
-                
-            except Exception as e:
-                logger.debug(f"Error processing orders for {symbol}: {e}")
-                failed += 1
-                failed_symbols.append(symbol)
-        
-        # Prepare response
-        if cancelled > 0:
-            response = f"✅ Cancelled {cancelled} order(s) on exchange"
-            if failed > 0:
-                response += f"\n⚠️ Failed to cancel {failed} order(s)"
-            if failed_symbols:
-                response += f"\n   Symbols with issues: {', '.join(failed_symbols[:3])}"
-        else:
-            response = "📭 No orders to cancel"
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"❌ Cancel error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}", parse_mode='Markdown')
-
 async def set_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set stop loss for position"""
     if not update.message:
@@ -2138,6 +2073,7 @@ async def run_telegram_bot_async():
     application.add_handler(CommandHandler("pendingorders", pending_orders))
     application.add_handler(CommandHandler("sellall", emergency_sell_all))
     application.add_handler(CommandHandler("cancelall", cancel_all_orders))
+    application.add_handler(CommandHandler("confirm_cancel", confirm_cancel_symbol))
     application.add_handler(CommandHandler("cancelsymbol", cancel_symbol_orders))
     application.add_handler(CommandHandler("cancelorder", cancel_order))
     application.add_handler(CommandHandler("summary", summary))
