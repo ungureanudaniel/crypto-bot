@@ -437,80 +437,67 @@ class TradingEngine:
         return positions_closed
     
     def close_position(self, symbol: str, exit_price: float, reason: str) -> bool:
-        """
-        Close an existing position
-        """
+        """Close an existing position and execute sell on exchange"""
         if symbol not in self.open_positions:
             logger.warning(f"⚠️ No position found for {symbol}")
             return False
-        
-        position = self.open_positions[symbol]
-        amount = position['amount']
-        entry_price = position['entry_price']
+
+        position      = self.open_positions[symbol]
+        amount        = position['amount']
+        entry_price   = position['entry_price']
         quote_currency = position.get('quote_currency', 'USDC')
-        
-        # Calculate PnL
+
         if position['side'] == 'long':
-            pnl = (exit_price - entry_price) * amount
+            pnl     = (exit_price - entry_price) * amount
             pnl_pct = (exit_price / entry_price - 1) * 100
-        else:  # short
-            pnl = (entry_price - exit_price) * amount
+        else:
+            pnl     = (entry_price - exit_price) * amount
             pnl_pct = (1 - exit_price / entry_price) * 100
-        
-        # PAPER MODE - update cash
-        if self.trading_mode == 'paper':
-            logger.info(f"📄 PAPER CLOSE: {position['side'].upper()} {amount:.6f} {symbol} at ${exit_price:.2f}")
-            
-            # Add cash back (original cost + profit)
-            cash_return = amount * exit_price
-            update_cash(quote_currency, cash_return, "add")
-        
-        # Execute REAL trade if in live/testnet mode
-        elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
+
+        if self.trading_mode in ['live', 'testnet'] and self.binance_client:
             try:
                 binance_symbol = symbol.replace('/', '')
-                
                 if position['side'] == 'long':
                     order = self.binance_client.order_market_sell(
                         symbol=binance_symbol,
                         quantity=round(amount, 6)
                     )
-                    logger.info(f"📤 Live SELL order executed: {order['orderId']}")
+                    logger.info(f"📤 Live SELL executed: {order['orderId']}")
+                # shorts close via futures_engine, not here
             except Exception as e:
-                logger.error(f"❌ Failed to execute live sell order: {e}")
+                logger.error(f"❌ Failed to execute live sell: {e}")
                 return False
-        
-        # Remove from open positions
+        else:
+            logger.warning(f"⚠️ Cannot close position — no exchange client or unsupported mode: {self.trading_mode}")
+            return False
+
         del self.open_positions[symbol]
-        
-        # Save updated positions to file
         save_positions_to_file(self.open_positions)
-        
-        # Record trade in history
+
         add_trade({
-            'symbol': symbol,
-            'action': 'close',
-            'side': position['side'],
-            'amount': amount,
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'pnl': pnl,
-            'pnl_pct': pnl_pct,
-            'reason': reason,
-            'mode': self.trading_mode,
-            'signal_type': position.get('signal_type', 'unknown'),
-            'quote_currency': quote_currency
+            'symbol':       symbol,
+            'action':       'close',
+            'side':         position['side'],
+            'amount':       amount,
+            'entry_price':  entry_price,
+            'exit_price':   exit_price,
+            'pnl':          pnl,
+            'pnl_pct':      pnl_pct,
+            'reason':       reason,
+            'mode':         self.trading_mode,
+            'signal_type':  position.get('signal_type', 'unknown'),
+            'quote_currency': quote_currency,
         })
-        # Log the trade
+
         log_trade('close',
                 symbol=symbol,
                 side=position['side'],
-                entry=position['entry_price'],
+                entry=entry_price,
                 exit=exit_price,
                 pnl=pnl,
                 pnl_pct=pnl_pct,
                 reason=reason)
-        # Send notification
+
         if has_notifier:
             try:
                 notifier.send_message_sync(
@@ -522,174 +509,137 @@ class TradingEngine:
                 )
             except Exception:
                 pass
-        
-        logger.info(f"✅ Closed {symbol}: PnL ${pnl:.2f} ({pnl_pct:+.1f}%) ({self.trading_mode})")
+
+        logger.info(f"✅ Closed {symbol}: PnL ${pnl:.2f} ({pnl_pct:+.1f}%) | Reason: {reason}")
         return True
 
     def open_position(self, symbol: str, side: str, entry_price: float,
                  units: float, stop_loss: float, take_profit: float,
-                 signal_type: str = '', **kwargs) -> bool:
-
+                 signal_type: str = '', skip_exchange: bool = False, **kwargs) -> bool:
         """Open a new position with stop loss and take profit"""
-        # DEBUG
         logger.info(f"🔍 OPEN POSITION ATTEMPT:")
         logger.info(f"   Symbol: {symbol}")
         logger.info(f"   Side: {side}")
         logger.info(f"   Entry: ${entry_price:.2f}")
         logger.info(f"   Units: {units:.6f}")
         logger.info(f"   Value: ${units * entry_price:.2f}")
-        
-        # Check minimum order value
-        min_order_value = 10
-        if units * entry_price < min_order_value:
-            logger.warning(f"⚠️ Order value ${units * entry_price:.2f} below minimum ${min_order_value}")
+        logger.info(f"   skip_exchange: {skip_exchange}")
+
+        if units * entry_price < 5:
+            logger.warning(f"⚠️ Order value ${units * entry_price:.2f} below minimum $5")
             return False
-        
-        # Validation checks
+
         if units <= 0:
             logger.warning(f"⚠️ Invalid units: {units}")
             return False
-        
+
         if entry_price <= 0:
             logger.warning(f"⚠️ Invalid entry price: {entry_price}")
             return False
-        
-        # Check if already in position
+
         if symbol in self.open_positions:
             logger.info(f"⏭️ Already in position for {symbol}")
             return False
-        
-        # Check max positions
+
         if len(self.open_positions) >= self.max_positions:
             logger.info(f"⏭️ At max positions ({self.max_positions})")
             return False
-        
-        base_currency = symbol.split('/')[0]
+
         quote_currency = symbol.split('/')[1]
-        
-        # ===== EXECUTION BASED ON MODE =====
         execution_success = False
-        
-        # PAPER MODE
-        if self.trading_mode == 'paper':
-            logger.info(f"📄 PAPER TRADE: {side.upper()} {units:.6f} {symbol} at ${entry_price:.2f}")
 
-            # Check cash balance
-            cash_balance = self.get_cash_balance(quote_currency)
-            cost = units * entry_price
-            
-            if cash_balance < cost:
-                logger.error(f"❌ Insufficient {quote_currency}: have ${cash_balance:.2f}, need ${cost:.2f}")
-                return False
-            
-            # Deduct cash
-            update_cash(quote_currency, cost, "subtract")
-            execution_success = True
-        
-        # LIVE/TESTNET MODE — longs only (shorts route via futures_engine)
-        elif self.trading_mode in ['live', 'testnet'] and self.binance_client:
-            try:
-                binance_symbol = symbol.replace('/', '')
+        if self.trading_mode in ['live', 'testnet']:
 
-                if side == 'long':
-                    usdc_balance = get_usdc_balance(self.binance_client)
-                    cost = units * entry_price
+            if skip_exchange:
+                logger.info(f"📋 Registering existing exchange position for {symbol}")
+                execution_success = True
 
-                    logger.info(f"   USDC balance: ${usdc_balance:.2f}")
-                    logger.info(f"   Required: ${cost:.2f}")
+            elif self.binance_client:
+                try:
+                    if side == 'long':
+                        usdc_balance = get_usdc_balance(self.binance_client)
+                        cost = units * entry_price
+                        logger.info(f"   USDC balance: ${usdc_balance:.2f}")
+                        logger.info(f"   Required: ${cost:.2f}")
 
-                    if usdc_balance < cost:
-                        logger.error(f"❌ Insufficient USDC: have ${usdc_balance:.2f}, need ${cost:.2f}")
+                        if usdc_balance < cost:
+                            logger.error(f"❌ Insufficient USDC: have ${usdc_balance:.2f}, need ${cost:.2f}")
+                            return False
+
+                        is_valid, adjusted_units, error = self.validate_and_adjust_order(symbol, units)
+                        if not is_valid:
+                            logger.error(f"❌ Order validation failed: {error}")
+                            return False
+                        if adjusted_units != units:
+                            logger.info(f"🔄 Quantity adjusted: {units} → {adjusted_units}")
+                            units = adjusted_units
+
+                        order = self.binance_client.order_market_buy(
+                            symbol=symbol.replace('/', ''),
+                            quantity=round(units, 6)
+                        )
+                        logger.info(f"✅ Live BUY order executed: {order['orderId']}")
+                        execution_success = True
+
+                    elif side == 'short':
+                        logger.error("❌ Use futures_engine for shorts")
                         return False
 
-                    is_valid, adjusted_units, error = self.validate_and_adjust_order(symbol, units)
-                    if not is_valid:
-                        logger.error(f"❌ Order validation failed: {error}")
-                        return False
-                    if adjusted_units != units:
-                        logger.info(f"🔄 Quantity adjusted: {units} → {adjusted_units}")
-                        units = adjusted_units
-
-                    order = self.binance_client.order_market_buy(
-                        symbol=binance_symbol,
-                        quantity=round(units, 6)
-                    )
-                    logger.info(f"✅ Live BUY order executed: {order['orderId']}")
-                    execution_success = True
-
-                elif side == 'short':
-                    # Shorts must go through futures_engine — should not reach here
-                    logger.error("❌ open_position called with side='short' — use futures_engine instead")
+                except Exception as e:
+                    logger.error(f"❌ Failed to execute live order: {e}")
                     return False
-
-            except Exception as e:
-                logger.error(f"❌ Failed to execute live order: {e}")
+            else:
+                logger.warning("⚠️ No Binance client available")
                 return False
-        
+
         else:
-            logger.warning("⚠️ No valid trading mode or binance client")
+            logger.warning(f"⚠️ Unsupported trading mode: {self.trading_mode}")
             return False
-        
-        # ===== ONLY IF EXECUTION SUCCEEDED =====
+
         if execution_success:
-            # Add to open positions — store signal_type and atr for exit_manager
-            self.open_positions[symbol] = {
-                'side': side,
-                'amount': units,
-                'entry_price': entry_price,
-                'current_price': entry_price,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'quote_currency': quote_currency,
-                'value': units * entry_price,
-                'pnl': 0.0,
-                'pnl_pct': 0.0,
-                'signal_type': signal_type if signal_type else 'unknown',
-                'atr': kwargs.get('atr', 0.0),
-                'trailing_stop_active': False,
-                'entry_time': datetime.now().isoformat(),
-                'mode': self.trading_mode,
-                'candles_held': 0,
-                'last_candle_time': None,
-            }
-            # Log the trade
-            log_trade('open',
-                    symbol=symbol,
-                    side=side,
-                    entry=entry_price,
-                    units=units,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit)
-
-            # Fetch per‑pair trailing bounds
             pair_cfg = get_pair_config(symbol)
-            trailing_min = pair_cfg.get('trailing_min_pct')
-            trailing_max = pair_cfg.get('trailing_max_pct')
 
-            # Update the position dictionary with the bounds (even if None, for clarity)
-            self.open_positions[symbol].update({
-                'trailing_min_pct': trailing_min,
-                'trailing_max_pct': trailing_max,
-            })
+            self.open_positions[symbol] = {
+                'side':                    side,
+                'amount':                  units,
+                'entry_price':             entry_price,
+                'current_price':           entry_price,
+                'stop_loss':               stop_loss,
+                'take_profit':             take_profit,
+                'quote_currency':          quote_currency,
+                'value':                   units * entry_price,
+                'pnl':                     0.0,
+                'pnl_pct':                 0.0,
+                'signal_type':             signal_type if signal_type else 'unknown',
+                'atr':                     kwargs.get('atr', 0.0),
+                'trailing_stop_active':    False,
+                'entry_time':              datetime.now().isoformat(),
+                'mode':                    self.trading_mode,
+                'candles_held':            0,
+                'last_candle_time':        None,
+                'trailing_min_pct':        pair_cfg.get('trailing_min_pct', 0.04),
+                'trailing_max_pct':        pair_cfg.get('trailing_max_pct', 0.08),
+                'trailing_activation_pct': 0.15,
+            }
 
-            # Save updated positions to file
+            log_trade('open', symbol=symbol, side=side, entry=entry_price,
+                    units=units, stop_loss=stop_loss, take_profit=take_profit)
+
             save_positions_to_file(self.open_positions)
-            
-            # Record trade in history
+
             add_trade({
-                'symbol': symbol,
-                'action': 'open',
-                'side': side,
-                'amount': units,
-                'price': entry_price,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'mode': self.trading_mode,
-                'signal_type': signal_type if signal_type else 'unknown',
-                'quote_currency': quote_currency
+                'symbol':         symbol,
+                'action':         'open',
+                'side':           side,
+                'amount':         units,
+                'price':          entry_price,
+                'stop_loss':      stop_loss,
+                'take_profit':    take_profit,
+                'mode':           self.trading_mode,
+                'signal_type':    signal_type if signal_type else 'unknown',
+                'quote_currency': quote_currency,
             })
-            
-            # Send notification
+
             if has_notifier:
                 try:
                     notifier.send_message_sync(
@@ -703,10 +653,10 @@ class TradingEngine:
                     )
                 except Exception:
                     pass
-            
+
             logger.info(f"✅ Opened {side.upper()} position: {units:.6f} {symbol} at ${entry_price:.2f}")
             return True
-        
+
         return False
 
     def validate_and_adjust_order(self, symbol: str, quantity: float) -> Tuple[bool, float, str]:
