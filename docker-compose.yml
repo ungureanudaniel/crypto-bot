@@ -2,6 +2,7 @@ services:
   trader_bot:
     build: .
     container_name: binance_trader_bot
+    network_mode: host
     init: true
     stop_grace_period: 15s
     restart: unless-stopped
