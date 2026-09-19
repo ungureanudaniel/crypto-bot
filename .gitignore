@@ -22,3 +22,8 @@ __pycache__/
 *.pkl
 *.pyo
 *.pyd
+
+pending_orders.json
+breaker_state.json
+backtest_data/
+backtest_results/

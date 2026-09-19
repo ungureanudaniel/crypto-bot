@@ -198,6 +198,15 @@ def _live_open(symbol: str, side: str, amount: float,
                trailing_min_pct: Optional[float] = None,
                trailing_max_pct: Optional[float] = None) -> bool:
     """Open a real futures position on Binance."""
+    # SAFETY: this path places a market order and records SL/TP only locally. Nothing enforces
+    # them on the exchange and _live_check_stops() never evaluates stops or exits, so a live
+    # short would run with NO stop loss (and shorts have unbounded loss). Opt-in only, and only
+    # once exchange-side stops + exit management exist for futures.
+    if not CONFIG.get('futures_live_enabled', False):
+        logger.error(f"🛑 Live futures order for {symbol} blocked: futures_live_enabled is false "
+                     f"(the live futures path has no exchange-side stop loss yet).")
+        return False
+
     client = get_futures_client()
     if not client:
         logger.error("❌ No futures client available")

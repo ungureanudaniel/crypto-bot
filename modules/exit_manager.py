@@ -264,6 +264,12 @@ def evaluate_exit(
 
     position.setdefault('symbol', symbol)
 
+    # Slow trend-following positions: ratcheting channel stop only (no TP, no indicator exits)
+    from modules import trend_hold
+    if trend_hold.is_trend_hold(position):
+        from config_loader import config as _config
+        return trend_hold.evaluate_exit(position, current_price, df, _config.config)
+
     # --- Layer 3: Chandelier stop update ---
     if atr > 0:
         new_stop, _ = update_chandelier_stop(position, current_price, atr, df=df)

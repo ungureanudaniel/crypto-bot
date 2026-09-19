@@ -55,9 +55,10 @@ def get_available_balance(symbol, trading_engine):
         return 0
 
     try:
+        quote = symbol.split('/')[1] if symbol and '/' in symbol else 'USDT'
         account = trading_engine.binance_client.get_account()
         for balance in account['balances']:
-            if balance['asset'] == 'USDC':
+            if balance['asset'] == quote:
                 return float(balance['free'])
     except Exception as e:
         logger.debug(f"Could not get live balance: {e}")
@@ -272,6 +273,10 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
             logger.debug("Insufficient data")
             return None
 
+        if _cfg.config.get('strategy_mode') == 'trend_hold':
+            from modules import trend_hold
+            return trend_hold.entry_signal(df, equity, risk_per_trade, symbol, _cfg.config)
+
         trend_dir, trend_strength, trend_conf = detect_trend(df, symbol=symbol or "")
         
         # Adjust risk based on trend strength
@@ -473,14 +478,16 @@ def generate_trade_signal(df, equity, risk_per_trade=0.02, symbol=None, trading_
                 
                 if units > 0:
                     return {
-                        'signal': signal,
                         'symbol': symbol,
+                        'side': signal,
+                        'signal_type': signal_type,
                         'units': units,
                         'entry_price': current_price,
                         'stop_loss': stop_loss,
                         'take_profit': take_profit_price,
-                        'type': signal_type,
-                        'regime': regime,
+                        'risk_pct': adjusted_risk,
+                        'regime': regime_type,
+                        'atr': current_atr,
                         'exit_strategy': 'fixed'
                     }
 

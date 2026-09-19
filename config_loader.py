@@ -57,24 +57,28 @@ class Config:
         elif trading_mode == 'testnet':
             api_key = os.getenv('BINANCE_TESTNET_API_KEY')
             private_key_path = os.getenv('BINANCE_TESTNET_PRIVATE_KEY')
-            
-            if not api_key or not private_key_path:
-                raise ValueError("❌ CRITICAL: Testnet requires BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_PRIVATE_KEY in .env")
-            
-            # Store the path and read the private key content
+            testnet_secret = os.getenv('BINANCE_TESTNET_SECRET_KEY')
+
+            if not api_key or not (private_key_path or testnet_secret):
+                raise ValueError("❌ CRITICAL: Testnet requires BINANCE_TESTNET_API_KEY and either "
+                                 "BINANCE_TESTNET_SECRET_KEY (HMAC key) or BINANCE_TESTNET_PRIVATE_KEY "
+                                 "(Ed25519/RSA private key file) in .env")
+
             env_config['binance_api_key'] = api_key
-            env_config['rsa_private_key_path'] = private_key_path
-            env_config['auth_method'] = 'rsa'
-            
-            # Read and store private key content for later use
-            try:
-                with open(private_key_path, 'r') as f:
-                    env_config['rsa_private_key'] = f.read()
-            except FileNotFoundError:
-                raise ValueError(f"❌ CRITICAL: Private key file not found at {private_key_path}")
-            
-            # For testnet, we still need placeholder secret for compatibility
-            env_config['binance_api_secret'] = ''
+            if testnet_secret:
+                # HMAC-SHA256 testnet key (the default kind on testnet.binance.vision)
+                env_config['auth_method'] = 'hmac'
+                env_config['binance_api_secret'] = testnet_secret
+            else:
+                env_config['rsa_private_key_path'] = private_key_path
+                env_config['auth_method'] = 'rsa'
+                try:
+                    with open(private_key_path, 'r') as f:
+                        env_config['rsa_private_key'] = f.read()
+                except FileNotFoundError:
+                    raise ValueError(f"❌ CRITICAL: Private key file not found at {private_key_path}")
+                # For testnet, we still need placeholder secret for compatibility
+                env_config['binance_api_secret'] = ''
             env_config['binance_futures_api_key'] = os.getenv('BINANCE_FUTURES_TESTNET_API_KEY', api_key)
             env_config['binance_futures_api_secret'] = os.getenv('BINANCE_FUTURES_TESTNET_API_SECRET', '')
             env_config['futures_auth_method'] = 'hmac'  # Futures typically still use HMAC
@@ -129,8 +133,6 @@ class Config:
 
 # Global config instance
 config = Config()
-print(f"🔑 TELEGRAM_TOKEN from config: {config.get('telegram_token')}")
-print(f"📱 TELEGRAM_CHAT_ID from config: {config.get('telegram_chat_id')}")
 
 def get_pair_config(symbol: str) -> dict:
     """
@@ -163,18 +165,20 @@ def get_binance_client():
 
     try:
         if trading_mode == 'testnet':
-            # RSA-only for testnet
             api_key = config.get('binance_api_key', '')
-            private_key = config.get('rsa_private_key', '')
-            
             if not api_key:
                 raise ValueError("❌ BINANCE_TESTNET_API_KEY not found in config")
-            if not private_key:
-                raise ValueError("❌ RSA private key not found. Ensure BINANCE_TESTNET_PRIVATE_KEY is set and file exists")
-            
-            client = Client(api_key, private_key=private_key, testnet=True)
-            logger.info("✅ Created Binance client with RSA authentication")
-            
+
+            if config.config.get('auth_method') == 'hmac':
+                client = Client(api_key, config.get('binance_api_secret', ''), testnet=True)
+                logger.info("✅ Created Binance testnet client (HMAC)")
+            else:
+                private_key = config.get('rsa_private_key', '')
+                if not private_key:
+                    raise ValueError("❌ Private key not found. Ensure BINANCE_TESTNET_PRIVATE_KEY is set and file exists")
+                client = Client(api_key, private_key=private_key, testnet=True)
+                logger.info("✅ Created Binance client with RSA authentication")
+
         else:  # live mode – must use HMAC
             api_key = config.get('binance_api_key', '')
             api_secret = config.get('binance_api_secret', '')

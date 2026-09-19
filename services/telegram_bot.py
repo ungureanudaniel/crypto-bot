@@ -177,10 +177,9 @@ async def reset_circuit_breaker(update: Update, context: ContextTypes.DEFAULT_TY
     if not update.message:
         logger.warning("⚠️ Balance command triggered without message object")
         return
-    await update.message.reply_text("💰 Fetching balance...", parse_mode='Markdown')
-
-    trading_engine.circuit_breaker_triggered = False
-    await update.message.reply_text("✅ Circuit breaker manually reset. Trading resumed.", parse_mode='Markdown')
+    # Rebases the peak equity to now, so the same drawdown doesn't trip it again immediately
+    trading_engine.reset_circuit_breaker(rebase=True)
+    await update.message.reply_text("✅ Circuit breaker manually reset (peak equity rebased). Trading resumed.", parse_mode='Markdown')
 
 async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel a specific order by ID"""
@@ -2056,6 +2055,11 @@ async def run_telegram_bot_async():
     except Exception as e:
         logger.error(f"❌ Failed to start scheduler: {e}")
     
+    # New command layer FIRST: it adds the chat-id guard and takes over start/help/status/positions/
+    # orders/sellall/stop (first matching handler wins); every other old command below still works.
+    from services.tg_commands import register_commands
+    register_commands(application)
+
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("balance", balance))
@@ -2087,6 +2091,11 @@ async def run_telegram_bot_async():
     try:
         # Run polling - this is async, so we await it
         await application.initialize()
+        try:
+            from services.tg_commands import menu
+            await application.bot.set_my_commands(menu())        # the command menu next to the message box
+        except Exception as e:
+            logger.warning(f"⚠️ Could not set the Telegram command menu: {e}")
         await application.start()
         
         # Start polling

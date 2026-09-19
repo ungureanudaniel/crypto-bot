@@ -6,7 +6,7 @@ from matplotlib import units
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
 from modules.logger_config import setup_logging, log_trade
-from datetime import datetime
+from datetime import datetime, time
 from typing import Dict, List, Optional, Tuple
 from modules.data_feed import data_feed
 from modules.strategy_tools import generate_trade_signal
@@ -18,6 +18,16 @@ from modules.portfolio import (
     get_portfolio_summary
 )
 from config_loader import get_binance_client, get_futures_client, get_pair_config, config
+import json
+import threading
+import time as _time   # `time` is shadowed by datetime.time above
+from modules.order_manager import SpotOrderManager
+from modules import market_gate, trend_hold
+
+PENDING_ORDERS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   'pending_orders.json')
+BREAKER_STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                  'breaker_state.json')
 
 # ============================================================================
 # SETUP LOGGING
@@ -179,11 +189,13 @@ class TradingEngine:
         
         # Initialize real trading client if needed
         self.binance_client = get_binance_client()
+        if self.trading_mode in ('live', 'testnet') and self.binance_client:
+            self.symbols = self._tradable_symbols(self.symbols)
 
         # Initialize futures client for short execution
-        if self.trading_mode == 'paper':
+        if self.trading_mode == 'paper' or not self.shorts_enabled:
             self.futures_client = None
-            logger.info("📄 Paper mode — futures client skipped")
+            logger.info("📄 Futures client skipped (paper mode or shorts disabled)")
         else:
             try:
                 self.futures_client = get_futures_client()
@@ -201,7 +213,7 @@ class TradingEngine:
             self.open_futures_positions = {}
 
         # Futures engine for short execution
-        if self.trading_mode == 'paper':
+        if self.trading_mode == 'paper' or not self.shorts_enabled:
             self.futures_engine = None
         else:
             try:
@@ -225,6 +237,27 @@ class TradingEngine:
         except:
             self.last_trade_time_per_pair = {}
         
+        # ---- Circuit breaker state (peak equity is persisted across restarts) ----
+        self._equity_peak = None
+        self._equity_cache = (0.0, None)
+        self.paused = False            # /pause: no new automatic entries; stops and exits keep working
+        self._load_breaker_state()
+
+        # ---- Limit-order execution (spot longs, live/testnet only) ----
+        # Set "use_limit_orders": false in config.json to fall back to plain market orders.
+        self._lock = threading.RLock()
+        self.pending_entries = {}   # symbol -> entry order state (limit buy being repriced)
+        self.pending_exits = {}     # symbol -> {'st': exit order state, 'reason': str}
+        self.order_manager = None
+        if (self.trading_mode in ('live', 'testnet') and self.binance_client
+                and self.config.get('use_limit_orders', True)):
+            self.order_manager = SpotOrderManager(self.binance_client, self.config)
+            self.stop_market_fallback_pct = float(self.config.get('stop_market_fallback_pct', 0.006))
+            self.stop_trigger_timeout = float(self.config.get('stop_trigger_timeout_seconds', 120))
+            self.oco_ratchet_min_pct = float(self.config.get('oco_ratchet_min_pct', 0.002))
+            self._load_pending()
+            logger.info("🧾 Limit-order execution enabled (entries, exits, OCO stops with market fallback)")
+
         logger.info(f"Trading Engine initialized for {self.trading_mode.upper()} mode")
         logger.info(f"Monitoring {len(self.symbols)} symbols on {self.timeframe}")
 
@@ -342,28 +375,143 @@ class TradingEngine:
             
         return units
 
-    def check_drawdown(self) -> bool:
-        """
-        Checks if drawdown exceeds max_drawdown. If yes, activates circuit breaker.
-        Returns True if trading is allowed, False if circuit breaker is active.
-        """
-        # Get current drawdown from portfolio summary
-        summary = get_portfolio_summary()
-        current_drawdown = -summary['total_return_pct'] / 100 if summary['total_return_pct'] < 0 else 0
-        max_drawdown = self.config.get('max_drawdown', 0.05)
+    # ------------------------------------------------------------------
+    # CIRCUIT BREAKER
+    #
+    # Drawdown = (peak equity - current equity) / peak equity, where equity is read from the
+    # EXCHANGE in live/testnet (stable coins + the coins we trade, at market price) and from
+    # portfolio.json only in paper mode. The peak is persisted, so restarts don't reset it.
+    #
+    # Trips when drawdown > max_drawdown (default 5%). Resets when either
+    #   - drawdown recovers below max_drawdown * circuit_breaker_reset_ratio (default 0.8), or
+    #   - circuit_breaker_cooldown_hours (default 48) have passed; that timed reset REBASES the
+    #     peak to the current equity, otherwise the same loss would trip it again immediately.
+    # It only blocks NEW entries. Stops, OCOs and exits never depend on it.
+    # ------------------------------------------------------------------
+    STABLE_COINS = {'USDC', 'USDT', 'FDUSD', 'BUSD', 'TUSD', 'USDP', 'DAI'}
 
-        if current_drawdown > max_drawdown and not self.circuit_breaker_triggered:
-            self.circuit_breaker_triggered = True
-            logger.warning(f"🚨 Circuit breaker triggered – drawdown {current_drawdown:.1%} > {max_drawdown:.1%}")
-            # Optional: send notification via notifier
+    def _exchange_equity(self) -> float:
+        tracked = self.STABLE_COINS | {s.split('/')[0] for s in self.symbols if '/' in s}
+        prices = {t['symbol']: float(t['price']) for t in self.binance_client.get_all_tickers()}
+        total = 0.0
+        for b in self.binance_client.get_account()['balances']:
+            asset = b['asset']
+            if asset not in tracked:
+                continue
+            amount = float(b['free']) + float(b['locked'])
+            if amount <= 0:
+                continue
+            if asset in self.STABLE_COINS:
+                total += amount
+                continue
+            for quote in ('USDC', 'USDT'):
+                price = prices.get(asset + quote)
+                if price:
+                    total += amount * price
+                    break
+        return total
+
+    def _current_equity(self) -> Optional[float]:
+        """Account equity, cached for 30s. None if it can't be measured right now."""
+        now = _time.time()
+        cached_at, cached = self._equity_cache
+        if cached is not None and now - cached_at < 30:
+            return cached
+        try:
+            if self.trading_mode in ('live', 'testnet') and self.binance_client:
+                value = self._exchange_equity()
+            else:
+                value = float(get_portfolio_summary()['total_value'])
+        except Exception as e:
+            logger.warning(f"⚠️ Could not measure equity for the circuit breaker: {e}")
+            return None
+        self._equity_cache = (now, value)
+        return value
+
+    def _save_breaker_state(self):
+        try:
+            with open(BREAKER_STATE_FILE, 'w') as f:
+                json.dump({'peak': self._equity_peak,
+                           'triggered': self.circuit_breaker_triggered,
+                           'triggered_at': self.circuit_breaker_time,
+                           'paused': getattr(self, 'paused', False)}, f)
+        except Exception as e:
+            logger.error(f"❌ Could not save circuit breaker state: {e}")
+
+    def _load_breaker_state(self):
+        try:
+            if os.path.exists(BREAKER_STATE_FILE):
+                with open(BREAKER_STATE_FILE) as f:
+                    s = json.load(f)
+                self._equity_peak = s.get('peak')
+                self.circuit_breaker_triggered = bool(s.get('triggered', False))
+                self.circuit_breaker_time = s.get('triggered_at')
+                self.paused = bool(s.get('paused', False))
+                if self.paused:
+                    logger.warning("⏸️ Trading was PAUSED at last shutdown - still paused (/resume to continue)")
+                if self.circuit_breaker_triggered:
+                    logger.warning("🚨 Circuit breaker was ACTIVE at last shutdown - restored")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load circuit breaker state: {e}")
+
+    def reset_circuit_breaker(self, rebase: bool = True):
+        """Manual reset (Telegram /resetcircuitbreaker). Rebases the peak so it doesn't re-trip."""
+        self.circuit_breaker_triggered = False
+        self.circuit_breaker_time = None
+        if rebase:
+            equity = self._current_equity()
+            if equity:
+                self._equity_peak = equity
+        self._save_breaker_state()
+        logger.info("✅ Circuit breaker manually reset")
+
+    def check_drawdown(self) -> bool:
+        """Returns True if new entries are allowed, False while the circuit breaker is active."""
+        equity = self._current_equity()
+        if equity is None:
+            return not self.circuit_breaker_triggered     # can't measure: keep the current state
+        if equity <= 0 and not self._equity_peak:
+            return not self.circuit_breaker_triggered     # empty/unfunded account: nothing to protect
+
+        now = _time.time()
+        max_drawdown = float(self.config.get('max_drawdown', 0.05))
+        reset_ratio = float(self.config.get('circuit_breaker_reset_ratio', 0.8))
+        cooldown = float(self.config.get('circuit_breaker_cooldown_hours', 48)) * 3600
+
+        if self._equity_peak is None or equity > self._equity_peak:
+            self._equity_peak = equity
+            self._save_breaker_state()
+        drawdown = (self._equity_peak - equity) / self._equity_peak if self._equity_peak else 0.0
+
+        if not self.circuit_breaker_triggered:
+            if drawdown > max_drawdown:
+                self.circuit_breaker_triggered = True
+                self.circuit_breaker_time = now
+                self._save_breaker_state()
+                logger.warning(f"🚨 Circuit breaker triggered – drawdown {drawdown:.1%} > {max_drawdown:.1%} "
+                               f"(peak ${self._equity_peak:,.2f}, now ${equity:,.2f}). New entries paused; "
+                               f"stops and exits stay active.")
+                self._notify(f"🚨 <b>Circuit breaker</b>: drawdown {drawdown:.1%} "
+                             f"(peak ${self._equity_peak:,.2f} → ${equity:,.2f}). New entries paused.")
+                return False
+            return True
+
+        # ---- breaker is active: decide whether to reset ----
+        since = now - (self.circuit_breaker_time or now)
+        if drawdown < max_drawdown * reset_ratio:
+            reason = f"drawdown recovered to {drawdown:.1%}"
+        elif since >= cooldown:
+            self._equity_peak = equity                    # rebase, or it re-trips on the same loss
+            reason = f"{since / 3600:.0f}h cooldown elapsed (peak rebased to ${equity:,.2f})"
+        else:
             return False
 
-        # Auto‑reset when drawdown recovers below half of the limit
-        if self.circuit_breaker_triggered and current_drawdown < max_drawdown * 0.5:
-            self.circuit_breaker_triggered = False
-            logger.info("✅ Circuit breaker reset – drawdown recovered")
-
-        return not self.circuit_breaker_triggered
+        self.circuit_breaker_triggered = False
+        self.circuit_breaker_time = None
+        self._save_breaker_state()
+        logger.info(f"✅ Circuit breaker reset – {reason}")
+        self._notify(f"✅ <b>Circuit breaker reset</b> – {reason}")
+        return True
 
     def get_cash_balance(self, quote_currency: str = "USDC") -> float:
         """Get balance for specific quote currency"""
@@ -409,32 +557,39 @@ class TradingEngine:
     
     def check_stop_losses(self) -> bool:
         """Fixed: Ensures state is saved after every evaluation"""
-        positions_closed = False
-        if not self.open_positions:
-            return False
+        with self._lock:
+            positions_closed = False
+            if not self.open_positions:
+                return False
 
-        current_prices = self.get_current_prices()
-        from modules.exit_manager import evaluate_exit
+            current_prices = self.get_current_prices()
+            from modules.exit_manager import evaluate_exit
 
-        for symbol, position in list(self.open_positions.items()):
-            price = current_prices.get(symbol)
-            if not price: continue
+            for symbol, position in list(self.open_positions.items()):
+                if symbol in self.pending_exits:
+                    continue                      # already being sold
+                price = current_prices.get(symbol)
+                if not price: continue
 
-            # Get latest OHLCV for indicators used in exit_manager (like trailing ATR)
-            df = self.data_feed.get_ohlcv(symbol, self.timeframe, limit=50)
-            
-            should_exit, reason = evaluate_exit(symbol, position, price, df)
+                # Get latest OHLCV for indicators used in exit_manager (like trailing ATR)
+                df = self.data_feed.get_ohlcv(symbol, self.timeframe, limit=self._exit_history_limit(position))
 
-            if should_exit:
-                self.close_position(symbol, price, reason)
-                positions_closed = True
-            else:
-                # Update the position object with any changes (like trailing SL)
-                # and save to file immediately to prevent loss on crash.
-                self.open_positions[symbol] = position
-                save_positions_to_file(self.open_positions)
+                should_exit, reason = evaluate_exit(symbol, position, price, df)
 
-        return positions_closed
+                if should_exit:
+                    if self.order_manager and position.get('side') == 'long':
+                        self._handle_exit_signal(symbol, position, price, reason)
+                    else:
+                        self.close_position(symbol, price, reason)
+                    positions_closed = True
+
+                # Persist any changes (like a raised trailing SL) immediately, so a crash
+                # can't lose them. manage_orders() ratchets the exchange OCO to this stop.
+                if symbol in self.open_positions:
+                    self.open_positions[symbol] = position
+                    save_positions_to_file(self.open_positions)
+
+            return positions_closed
     
     def close_position(self, symbol: str, exit_price: float, reason: str) -> bool:
         """Close an existing position and execute sell on exchange"""
@@ -454,6 +609,11 @@ class TradingEngine:
             pnl     = (entry_price - exit_price) * amount
             pnl_pct = (1 - exit_price / entry_price) * 100
 
+        if self.order_manager and position['side'] == 'long':
+            # Non-blocking: cancels the OCO, sells with limit orders (market fallback).
+            # The trade is recorded by _finalize_close() once the sell has filled.
+            return self._begin_exit(symbol, reason)
+
         if self.trading_mode in ['live', 'testnet'] and self.binance_client:
             try:
                 binance_symbol = symbol.replace('/', '')
@@ -470,6 +630,25 @@ class TradingEngine:
         else:
             logger.warning(f"⚠️ Cannot close position — no exchange client or unsupported mode: {self.trading_mode}")
             return False
+
+        return self._finalize_close(symbol, exit_price, reason)
+
+    def _finalize_close(self, symbol: str, exit_price: float, reason: str,
+                        qty: Optional[float] = None) -> bool:
+        """Record a completed close (position already sold on the exchange)."""
+        if symbol not in self.open_positions:
+            return False
+        position       = self.open_positions[symbol]
+        amount         = qty if qty else position['amount']
+        entry_price    = position['entry_price']
+        quote_currency = position.get('quote_currency', 'USDC')
+
+        if position['side'] == 'long':
+            pnl     = (exit_price - entry_price) * amount
+            pnl_pct = (exit_price / entry_price - 1) * 100
+        else:
+            pnl     = (entry_price - exit_price) * amount
+            pnl_pct = (1 - exit_price / entry_price) * 100
 
         del self.open_positions[symbol]
         save_positions_to_file(self.open_positions)
@@ -533,15 +712,23 @@ class TradingEngine:
             logger.warning(f"⚠️ Invalid units: {units}")
             return False
 
+        # SAFETY: live trend_hold entries are opt-in until they have run on testnet. (Protection
+        # is a stop-only order, ratcheted like the OCO stop; the BTC gate is in scan_and_trade.)
+        if (str(signal_type).startswith('trend_hold') and self.trading_mode in ('live', 'testnet')
+                and not self.config.get('trend_hold_live_enabled', False)):
+            logger.error(f"🛑 {symbol}: live trend_hold entry blocked - trend_hold_live_enabled is false "
+                         f"(validate on testnet first, then set it to true)")
+            return False
+
         if entry_price <= 0:
             logger.warning(f"⚠️ Invalid entry price: {entry_price}")
             return False
 
-        if symbol in self.open_positions:
-            logger.info(f"⏭️ Already in position for {symbol}")
+        if symbol in self.open_positions or symbol in self.pending_entries:
+            logger.info(f"⏭️ Already in position (or entry order pending) for {symbol}")
             return False
 
-        if len(self.open_positions) >= self.max_positions:
+        if len(self.open_positions) + len(self.pending_entries) >= self.max_positions:
             logger.info(f"⏭️ At max positions ({self.max_positions})")
             return False
 
@@ -557,7 +744,7 @@ class TradingEngine:
             elif self.binance_client:
                 try:
                     if side == 'long':
-                        usdc_balance = get_usdc_balance(self.binance_client)
+                        usdc_balance = get_asset_balance(self.binance_client, quote_currency)
                         cost = units * entry_price
                         logger.info(f"   USDC balance: ${usdc_balance:.2f}")
                         logger.info(f"   Required: ${cost:.2f}")
@@ -573,6 +760,13 @@ class TradingEngine:
                         if adjusted_units != units:
                             logger.info(f"🔄 Quantity adjusted: {units} → {adjusted_units}")
                             units = adjusted_units
+
+                        if self.order_manager:
+                            # Limit entry: the position is registered (and its OCO stop
+                            # placed) by manage_orders() once the order fills.
+                            return self._submit_limit_entry(symbol, entry_price, units, stop_loss,
+                                                            take_profit, signal_type,
+                                                            kwargs.get('atr', 0.0))
 
                         order = self.binance_client.order_market_buy(
                             symbol=symbol.replace('/', ''),
@@ -597,30 +791,9 @@ class TradingEngine:
             return False
 
         if execution_success:
-            pair_cfg = get_pair_config(symbol)
-
-            self.open_positions[symbol] = {
-                'side':                    side,
-                'amount':                  units,
-                'entry_price':             entry_price,
-                'current_price':           entry_price,
-                'stop_loss':               stop_loss,
-                'take_profit':             take_profit,
-                'quote_currency':          quote_currency,
-                'value':                   units * entry_price,
-                'pnl':                     0.0,
-                'pnl_pct':                 0.0,
-                'signal_type':             signal_type if signal_type else 'unknown',
-                'atr':                     kwargs.get('atr', 0.0),
-                'trailing_stop_active':    False,
-                'entry_time':              datetime.now().isoformat(),
-                'mode':                    self.trading_mode,
-                'candles_held':            0,
-                'last_candle_time':        None,
-                'trailing_min_pct':        pair_cfg.get('trailing_min_pct', 0.04),
-                'trailing_max_pct':        pair_cfg.get('trailing_max_pct', 0.08),
-                'trailing_activation_pct': 0.15,
-            }
+            self.open_positions[symbol] = self._build_position(
+                symbol, side, units, entry_price, stop_loss, take_profit,
+                signal_type, kwargs.get('atr', 0.0))
 
             log_trade('open', symbol=symbol, side=side, entry=entry_price,
                     units=units, stop_loss=stop_loss, take_profit=take_profit)
@@ -658,6 +831,454 @@ class TradingEngine:
             return True
 
         return False
+
+    # ------------------------------------------------------------------
+    # POSITION BUILDER (shared by market and limit-order paths)
+    # ------------------------------------------------------------------
+    def _build_position(self, symbol: str, side: str, amount: float, entry_price: float,
+                        stop_loss: float, take_profit: float, signal_type: str,
+                        atr: float = 0.0) -> Dict:
+        pair_cfg = get_pair_config(symbol)
+        return {
+            'side':                    side,
+            'amount':                  amount,
+            'entry_price':             entry_price,
+            'current_price':           entry_price,
+            'stop_loss':               stop_loss,
+            'take_profit':             take_profit,
+            'quote_currency':          symbol.split('/')[1],
+            'value':                   amount * entry_price,
+            'pnl':                     0.0,
+            'pnl_pct':                 0.0,
+            'signal_type':             signal_type if signal_type else 'unknown',
+            'atr':                     atr,
+            'trailing_stop_active':    False,
+            'entry_time':              datetime.now().isoformat(),
+            'mode':                    self.trading_mode,
+            'candles_held':            0,
+            'last_candle_time':        None,
+            'trailing_min_pct':        pair_cfg.get('trailing_min_pct', 0.04),
+            'trailing_max_pct':        pair_cfg.get('trailing_max_pct', 0.08),
+            'trailing_activation_pct': 0.15,
+        }
+
+    # ------------------------------------------------------------------
+    # LIMIT-ORDER EXECUTION (spot longs, live / testnet)
+    #
+    # entry : limit buy, repriced toward the ask, cancelled if unfilled
+    # stop  : exchange-side OCO (take-profit limit + stop-limit). The stop is ratcheted by
+    #         cancel + re-place when the trailing logic raises it. If price runs through
+    #         the stop-limit (or sits below the stop too long) the OCO is cancelled and the
+    #         position is sold at MARKET.
+    # exits : limit sell ask -> mid -> bid, then MARKET fallback (indicator exits, manual)
+    #
+    # manage_orders() is called every minute by the scheduler and advances all of it.
+    # ------------------------------------------------------------------
+    URGENT_EXITS = ('stop_loss', 'trailing_stop', 'emergency_sell', 'stop_loss_market')
+
+    def _save_pending(self):
+        try:
+            with open(PENDING_ORDERS_FILE, 'w') as f:
+                json.dump({'entries': self.pending_entries, 'exits': self.pending_exits}, f)
+        except Exception as e:
+            logger.error(f"❌ Could not save pending orders: {e}")
+
+    def _load_pending(self):
+        try:
+            if os.path.exists(PENDING_ORDERS_FILE):
+                with open(PENDING_ORDERS_FILE) as f:
+                    data = json.load(f)
+                self.pending_entries = data.get('entries', {})
+                self.pending_exits = data.get('exits', {})
+                logger.info(f"📂 Restored {len(self.pending_entries)} pending entries, "
+                            f"{len(self.pending_exits)} pending exits")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load pending orders: {e}")
+
+    def set_paused(self, value: bool):
+        """Pause/resume NEW automatic entries. Open positions, stops and exits are unaffected."""
+        self.paused = bool(value)
+        self._save_breaker_state()
+        logger.info(f"{'⏸️ Trading PAUSED' if self.paused else '▶️ Trading RESUMED'}")
+
+    def cancel_pending_entries(self) -> int:
+        """Cancel entry orders that are still working (partial fills are kept and registered)."""
+        with self._lock:
+            n = 0
+            for st in self.pending_entries.values():
+                st['cancel_requested'] = True
+                n += 1
+            if n:
+                self._save_pending()
+        if n and self.order_manager:
+            self.manage_orders()                 # resolve them now instead of waiting for the next minute
+        return n
+
+    def gate_status(self) -> Dict:
+        """BTC gate details for display: allowed flag plus BTC price and its EMA."""
+        days = int(self.config.get('btc_gate_days', 50 if self.strategy_mode == 'trend_hold' else 0))
+        out = {'enabled': days > 0, 'days': days, 'allowed': self._longs_allowed(),
+               'symbol': None, 'btc': None, 'ema': None}
+        if days <= 0:
+            return out
+        out['symbol'] = next((s for s in ('BTC/USDC', 'BTC/USDT') if s in self.symbols), 'BTC/USDC')
+        try:
+            df = market_gate.closed_only(
+                self.data_feed.get_ohlcv(symbol=out['symbol'], interval=self.timeframe, limit=1000), self.timeframe)
+            span = int(days * market_gate.BARS_PER_DAY.get(self.timeframe, 6))
+            if len(df) >= span + 1:
+                close = df['close']
+                out['btc'] = float(close.iloc[-1])
+                out['ema'] = float(close.ewm(span=span, adjust=False).mean().iloc[-1])
+        except Exception as e:
+            logger.debug(f"gate_status: {e}")
+        return out
+
+    def _tradable_symbols(self, symbols):
+        """Keep only symbols that are TRADING on the connected exchange; log the rest."""
+        try:
+            info = self.binance_client.get_exchange_info()
+            live = {s['symbol'] for s in info['symbols'] if s.get('status') == 'TRADING'}
+        except Exception as e:
+            logger.warning(f"⚠️ Could not verify symbols against the exchange: {e}")
+            return list(symbols)
+        keep = [s for s in symbols if s.replace('/', '') in live]
+        dropped = [s for s in symbols if s not in keep]
+        if dropped:
+            logger.warning(f"⚠️ Not tradable on this exchange, ignoring: {', '.join(dropped)}")
+        return keep
+
+    @property
+    def strategy_mode(self) -> str:
+        return self.config.get('strategy_mode') or 'legacy'
+
+    def _history_limit(self) -> int:
+        """Candles to fetch when scanning: trend_hold needs ~330 (55-day channel on 4h)."""
+        if self.strategy_mode == 'trend_hold':
+            return min(1000, max(200, trend_hold.history_needed(self.config) + 50))
+        return 200
+
+    def _exit_history_limit(self, position: Dict) -> int:
+        if trend_hold.is_trend_hold(position):
+            return min(1000, max(50, trend_hold.history_needed(self.config) + 5))
+        return 50
+
+    def _longs_allowed(self) -> bool:
+        """BTC gate: new longs only while BTC's close is above its N-day EMA (default 50 for
+        trend_hold, off otherwise; btc_gate_days=0 disables). Fails CLOSED when BTC data is
+        unavailable. Cached for 60s - it only changes when a candle closes."""
+        days = int(self.config.get('btc_gate_days', 50 if self.strategy_mode == 'trend_hold' else 0))
+        if days <= 0:
+            return True
+        now = _time.time()
+        cached_at, cached = getattr(self, '_gate_cache', (0.0, None))
+        if cached is not None and now - cached_at < 60:
+            return cached
+        symbol = next((s for s in ('BTC/USDC', 'BTC/USDT') if s in self.symbols), 'BTC/USDC')
+        try:
+            df = self.data_feed.get_ohlcv(symbol=symbol, interval=self.timeframe, limit=1000)
+            up = market_gate.btc_uptrend(market_gate.closed_only(df, self.timeframe), days, self.timeframe)
+        except Exception as e:
+            logger.warning(f"⚠️ BTC gate: could not read {symbol}: {e}")
+            up = None
+        if up is None:
+            logger.warning("⚠️ BTC gate: not enough BTC history - blocking new longs (fail closed)")
+            up = False
+        elif cached is not None and up != cached:
+            logger.info(f"🚦 BTC gate {'OPEN' if up else 'CLOSED'}: BTC is "
+                        f"{'above' if up else 'below'} its {days}-day EMA")
+        self._gate_cache = (now, up)
+        return up
+
+    @property
+    def shorts_enabled(self) -> bool:
+        """Long-only unless "enable_shorts": true in config.json (default: off)."""
+        return bool(self.config.get('enable_shorts', False))
+
+    @property
+    def active_slots(self) -> int:
+        """Open spot + futures positions + entry orders still working."""
+        return len(self.open_positions) + len(self.open_futures_positions) + len(self.pending_entries)
+
+    def _notify(self, text: str):
+        if has_notifier:
+            try:
+                notifier.send_message_sync(text)
+            except Exception:
+                pass
+
+    def _submit_limit_entry(self, symbol: str, signal_price: float, units: float,
+                            stop_loss: float, take_profit: float,
+                            signal_type: str, atr: float) -> bool:
+        om = self.order_manager
+        with self._lock:
+            try:
+                qty = om.round_qty_down(symbol, units)
+                if qty <= 0 or qty * signal_price < om.min_notional(symbol):
+                    logger.warning(f"⚠️ {symbol}: order too small after rounding ({qty})")
+                    return False
+                st = om.start_entry(symbol, qty, signal_price)
+            except Exception as e:
+                logger.error(f"❌ Failed to place entry limit order for {symbol}: {e}")
+                return False
+            if st is None:
+                logger.warning(f"⚠️ {symbol}: entry order could not be placed")
+                return False
+            st.update(stop_loss=float(stop_loss), take_profit=float(take_profit),
+                      signal_type=signal_type or 'unknown', atr=float(atr or 0.0))
+            self.pending_entries[symbol] = st
+            self._save_pending()
+
+        logger.info(f"📥 Entry limit order working for {symbol}: {qty} @ {st['price']}")
+        self._notify(f"📥 <b>ENTRY ORDER</b> [{self.trading_mode.upper()}]\n"
+                     f"📊 <b>{symbol}</b>  {qty} @ <code>${st['price']}</code>\n"
+                     f"🛑 Stop: <code>${stop_loss:.4f}</code>  🎯 Target: <code>${take_profit:.4f}</code>")
+        return True
+
+    def manage_orders(self):
+        """Advance entries, exits and exchange-side stops. Safe to call every minute."""
+        if not self.order_manager:
+            return
+        with self._lock:
+            for step in (self._manage_pending_entries, self._manage_pending_exits,
+                         self._manage_oco_protection):
+                try:
+                    step()
+                except Exception as e:
+                    logger.error(f"❌ manage_orders/{step.__name__}: {e}")
+
+    def _manage_pending_entries(self):
+        om = self.order_manager
+        for symbol, st in list(self.pending_entries.items()):
+            try:
+                res = om.advance_entry(st)
+            except Exception as e:
+                logger.error(f"❌ Entry order error for {symbol}: {e}")
+                continue
+            self._save_pending()                       # step / order id may have changed
+            if res['status'] == 'open':
+                continue
+            del self.pending_entries[symbol]
+            self._save_pending()
+            if res['status'] == 'filled':
+                self._register_filled_entry(symbol, st, res)
+            else:
+                logger.info(f"⌛ {symbol}: entry not filled - cancelled, no position opened")
+                self._notify(f"⌛ Entry not filled for <b>{symbol}</b> - order cancelled")
+
+    def _register_filled_entry(self, symbol: str, st: dict, res: dict):
+        fill, qty, sp = res['avg_price'], res['qty'], st['signal_price']
+        # keep the signal's percentage distances, anchored to the real fill price
+        stop = fill * (1 - abs(sp - st['stop_loss']) / sp)
+        target = fill * (1 + abs(st['take_profit'] - sp) / sp) if st.get('take_profit') else 0.0   # none for trend_hold
+
+        self.open_positions[symbol] = self._build_position(
+            symbol, 'long', qty, fill, stop, target, st.get('signal_type'), st.get('atr', 0.0))
+        self.open_positions[symbol]['oco'] = None
+        save_positions_to_file(self.open_positions)
+
+        log_trade('open', symbol=symbol, side='long', entry=fill, units=qty,
+                  stop_loss=stop, take_profit=target)
+        add_trade({
+            'symbol': symbol, 'action': 'open', 'side': 'long', 'amount': qty,
+            'price': fill, 'stop_loss': stop, 'take_profit': target,
+            'mode': self.trading_mode, 'signal_type': st.get('signal_type') or 'unknown',
+            'quote_currency': symbol.split('/')[1],
+        })
+        logger.info(f"✅ Entry filled {symbol}: {qty} @ {fill:.6f}")
+        self._notify(f"📈 <b>TRADE OPENED</b> [{self.trading_mode.upper()}]\n"
+                     f"📊 <b>{symbol}</b>\n💵 Entry: <code>${fill:.4f}</code>\n"
+                     f"📦 Units: <code>{qty:.6f}</code>\n"
+                     f"🛑 Stop: <code>${stop:.4f}</code>\n🎯 Target: <code>${target:.4f}</code>")
+        self._place_protection(symbol)
+
+    def _place_protection(self, symbol: str) -> bool:
+        """Place the exchange-side OCO (take-profit limit + stop-limit) for a position."""
+        om = self.order_manager
+        pos = self.open_positions.get(symbol)
+        if not pos:
+            return False
+        try:
+            price = om.last_price(symbol)
+            qty = om.sellable_qty(symbol, pos['amount'])
+            if qty <= 0:
+                res = {'ok': False, 'error': 'too_small', 'detail': 'no sellable balance'}
+            else:
+                res = om.place_protection(symbol, qty, pos['stop_loss'], pos.get('take_profit') or 0.0, price)
+        except Exception as e:
+            res = {'ok': False, 'error': 'api', 'detail': str(e)}
+
+        if res['ok']:
+            pos['oco'] = {k: v for k, v in res.items() if k != 'ok'}      # kind + order id(s) + stop/limit/target/qty
+            save_positions_to_file(self.open_positions)
+            logger.info(f"🛡️ {symbol} OCO placed: stop {res['stop']} (limit {res['limit']}), "
+                        f"target {res['target']}")
+            return True
+
+        pos['oco'] = None
+        save_positions_to_file(self.open_positions)
+        err = res['error']
+        if err == 'stop_breached':
+            logger.warning(f"⚠️ {symbol}: price already at/below stop - exiting now")
+            self._begin_exit(symbol, 'stop_loss')
+        elif err == 'target_reached':
+            logger.info(f"🎯 {symbol}: price already at/above target - exiting now")
+            self._begin_exit(symbol, 'take_profit')
+        else:
+            logger.error(f"❌ {symbol} has NO exchange stop ({err}: {res.get('detail', '')}). "
+                         f"Software stop + market fallback remain active; retrying every minute.")
+            if not pos.get('unprotected_notified'):
+                pos['unprotected_notified'] = True
+                self._notify(f"⚠️ <b>{symbol}</b> has no exchange-side stop ({err}). "
+                             f"Bot-side stop is active, retrying.")
+        return False
+
+    def _replace_oco(self, symbol: str):
+        """Ratchet: cancel the OCO and re-place it at the position's raised stop."""
+        om = self.order_manager
+        pos = self.open_positions[symbol]
+        old = pos['oco']
+        result = om.cancel_protection(symbol, old)
+        if result != 'cancelled':
+            return                                     # 'done' -> settled next cycle; 'error' -> retry
+        pos['oco'] = None
+        logger.info(f"🔼 {symbol}: ratcheting stop {old['stop']} -> {pos['stop_loss']:.6f}")
+        self._place_protection(symbol)
+
+    def _market_stop(self, symbol: str, why: str):
+        """Safety net: cancel the OCO and sell at MARKET."""
+        om = self.order_manager
+        pos = self.open_positions[symbol]
+        oco = pos['oco']
+        result = om.cancel_protection(symbol, oco)
+        if result == 'done':
+            return                                     # it just filled - handled next cycle
+        if result == 'error':
+            logger.critical(f"🚨 {symbol}: stop breached ({why}) but OCO cancel failed - retrying")
+            self._notify(f"🚨 <b>{symbol}</b>: stop breached but could not cancel OCO, retrying")
+            return
+        pos['oco'] = None
+        logger.warning(f"⚠️ {symbol}: stop-limit not filled ({why}) - MARKET SELL")
+        sold = om.market_sell(symbol, pos['amount'])
+        if sold and sold['qty'] > 0:
+            self._finalize_close(symbol, sold['avg_price'], 'stop_loss_market', qty=sold['qty'])
+        else:
+            logger.error(f"❌ {symbol}: market fallback sold nothing - will retry")
+
+    def _manage_oco_protection(self):
+        om = self.order_manager
+        now = _time.time()
+        for symbol, pos in list(self.open_positions.items()):
+            if pos.get('side') != 'long' or symbol in self.pending_exits:
+                continue
+            if pos.get('mode') != self.trading_mode:
+                continue
+            oco = pos.get('oco')
+            if not oco:
+                self._place_protection(symbol)
+                continue
+            try:
+                status = om.protection_status(symbol, oco)
+                if status['status'] == 'ALL_DONE':
+                    if status['filled']:
+                        if status['filled'] == 'take_profit':
+                            reason = 'take_profit'
+                        else:
+                            reason = 'trailing_stop' if pos.get('trailing_stop_active') else 'stop_loss'
+                        self._finalize_close(symbol, status['avg_price'], reason, qty=status['qty'])
+                    else:
+                        logger.warning(f"⚠️ {symbol}: OCO ended without a fill (cancelled outside the bot?)")
+                        pos['oco'] = None
+                        save_positions_to_file(self.open_positions)
+                    continue
+
+                price = om.last_price(symbol)
+                stop = oco['stop']
+
+                # ---- MARKET FALLBACK: stop-limit didn't (or can't) fill ----
+                if price <= stop:
+                    oco.setdefault('breach_since', now)
+                else:
+                    oco.pop('breach_since', None)
+                through = price <= stop * (1 - self.stop_market_fallback_pct)
+                stuck = 'breach_since' in oco and now - oco['breach_since'] >= self.stop_trigger_timeout
+                if through or stuck:
+                    self._market_stop(symbol, 'price through stop-limit' if through
+                                      else f'below stop for {now - oco["breach_since"]:.0f}s')
+                    continue
+
+                # ---- RATCHET the exchange stop up to the bot's trailing stop ----
+                new_stop = pos['stop_loss']
+                if new_stop > stop * (1 + self.oco_ratchet_min_pct) and price > new_stop * 1.001:
+                    self._replace_oco(symbol)
+            except Exception as e:
+                logger.error(f"❌ OCO management error for {symbol}: {e}")
+        if self.open_positions:
+            save_positions_to_file(self.open_positions)
+
+    def _manage_pending_exits(self):
+        om = self.order_manager
+        for symbol, ex in list(self.pending_exits.items()):
+            try:
+                res = om.advance_exit(ex['st'])
+            except Exception as e:
+                logger.error(f"❌ Exit order error for {symbol}: {e}")
+                continue
+            self._save_pending()
+            if res['status'] == 'open':
+                continue
+            del self.pending_exits[symbol]
+            self._save_pending()
+            if symbol not in self.open_positions:
+                continue
+            if res['qty'] > 0:
+                self._finalize_close(symbol, res['avg_price'], ex['reason'], qty=res['qty'])
+            else:
+                logger.warning(f"⚠️ {symbol}: nothing left to sell (dust) - closing record")
+                self._finalize_close(symbol, om.last_price(symbol), ex['reason'] + '_dust')
+
+    def _begin_exit(self, symbol: str, reason: str) -> bool:
+        """Start a non-blocking exit: cancel the OCO, then limit sell (market fallback)."""
+        om = self.order_manager
+        with self._lock:
+            if symbol in self.pending_exits:
+                return True
+            pos = self.open_positions.get(symbol)
+            if not pos:
+                return False
+            oco = pos.get('oco')
+            if oco:
+                result = om.cancel_protection(symbol, oco)
+                if result == 'done':
+                    return True                        # already filled - settled next cycle
+                if result == 'error':
+                    return False
+                pos['oco'] = None
+            try:
+                qty = om.sellable_qty(symbol, pos['amount'])
+                if qty <= 0:
+                    logger.error(f"❌ {symbol}: no sellable balance for exit ({reason})")
+                    return False
+                st = om.start_exit(symbol, qty, urgent=reason in self.URGENT_EXITS)
+            except Exception as e:
+                logger.error(f"❌ Could not start exit for {symbol}: {e}")
+                return False
+            self.pending_exits[symbol] = {'st': st, 'reason': reason}
+            self._save_pending()
+        logger.info(f"📤 Exit started for {symbol} ({reason})")
+        return True
+
+    def _handle_exit_signal(self, symbol: str, position: Dict, price: float, reason: str):
+        """An exit rule fired for a live spot long (called from check_stop_losses)."""
+        oco = position.get('oco')
+        if oco and reason == 'take_profit':
+            return                                     # the exchange limit sell handles it
+        if oco and reason in ('stop_loss', 'trailing_stop'):
+            # The exchange stop + market fallback own this, unless the bot's stop was raised
+            # above the OCO's and hasn't been ratcheted yet - then price is already through it.
+            if position['stop_loss'] <= oco['stop'] * (1 + 1e-4):
+                return
+        self.close_position(symbol, price, reason)
 
     def validate_and_adjust_order(self, symbol: str, quantity: float) -> Tuple[bool, float, str]:
         """
@@ -851,18 +1472,29 @@ class TradingEngine:
         if not self.check_drawdown():
             logger.info("⛔ Circuit breaker active – no new trades")
             return []
+
+        if getattr(self, 'paused', False):
+            logger.info("⏸️ Trading paused - no new entries")
+            return []
         
         # Check if we can take new positions (spot + futures combined)
-        current_positions = len(self.open_positions) + len(self.open_futures_positions)
+        current_positions = self.active_slots
         if current_positions >= self.max_positions:
             logger.info(f"⏭️ At max positions ({current_positions}/{self.max_positions})")
             return []
         
+        slow = self.strategy_mode == 'trend_hold'
+        if slow and not self.shorts_enabled and not self._longs_allowed():
+            logger.info("📉 BTC gate closed (BTC below its EMA) - no new longs this scan")
+            return []
+
         slots_available = self.max_positions - current_positions
         logger.info(f"🔍 Scanning {len(self.symbols)} symbols for signals ({slots_available} slots available)...")
         
         # Get current cash balance
-        cash_balance = self.get_cash_balance()
+        # Use the quote currencies actually traded (e.g. USDT), not a hardcoded USDC
+        quotes = {s.split('/')[1] for s in self.symbols if '/' in s}
+        cash_balance = max((self.get_cash_balance(q) for q in quotes), default=0)
         if cash_balance <= 10:
             logger.warning(f"⚠️ Low cash balance: ${cash_balance:.2f}")
             return []
@@ -872,7 +1504,8 @@ class TradingEngine:
         for symbol in self.symbols:
             try:
                 # Skip if already in spot or futures position for this symbol
-                if symbol in self.open_positions or symbol in self.open_futures_positions:
+                if (symbol in self.open_positions or symbol in self.open_futures_positions
+                        or symbol in self.pending_entries):
                     continue
                 
                 # ===== PER-PAIR COOLDOWN CHECK =====
@@ -887,26 +1520,31 @@ class TradingEngine:
                 df = self.data_feed.get_ohlcv(
                     symbol=symbol,
                     interval=self.timeframe,
-                    limit=200
+                    limit=self._history_limit()
                 )
+                if slow and not df.empty:
+                    df = market_gate.closed_only(df, self.timeframe)   # act on closed candles only
                 
                 if df.empty or len(df) < 50:
                     logger.debug(f"⏭️ {symbol}: Insufficient data ({len(df)} candles)")
                     continue
                 
-                # ===== REGIME DETECTION =====
-                try:
-                    regime = predict_regime(df)
-                    logger.debug(f"📊 {symbol} regime: {regime}")
-                    
-                    # Skip trading in certain regimes if desired
-                    if "Volatile" in regime and self.trading_mode != 'paper':
-                        logger.debug(f"⏭️ Skipping {symbol} due to volatile regime")
-                        continue
-                        
-                except Exception as e:
-                    logger.debug(f"Could not detect regime for {symbol}: {e}")
-                    regime = "unknown"
+                # ===== REGIME DETECTION (trend_hold does not use regimes) =====
+                if slow:
+                    regime = "trend_hold"
+                else:
+                    try:
+                        regime = predict_regime(df)
+                        logger.debug(f"📊 {symbol} regime: {regime}")
+
+                        # Skip trading in certain regimes if desired
+                        if "Volatile" in regime and self.trading_mode != 'paper':
+                            logger.debug(f"⏭️ Skipping {symbol} due to volatile regime")
+                            continue
+
+                    except Exception as e:
+                        logger.debug(f"Could not detect regime for {symbol}: {e}")
+                        regime = "unknown"
                 
                 # Generate signal — regime passed so strategy selection is regime-aware
                 try:
@@ -922,6 +1560,14 @@ class TradingEngine:
                     logger.error(f"❌ Error generating signal for {symbol}: {e}")
                     continue
                 
+                if signal and signal.get('side') == 'short' and not self.shorts_enabled:
+                    logger.debug(f"⏭️ {symbol}: short signal ignored (enable_shorts is false)")
+                    continue
+
+                if signal and signal.get('side') == 'long' and not self._longs_allowed():
+                    logger.debug(f"⏭️ {symbol}: long signal ignored (BTC gate closed)")
+                    continue
+
                 if signal:
                     # Check for duplicate signals
                     if signal.get('entry_price', 0) <= 0:
@@ -933,6 +1579,10 @@ class TradingEngine:
                         continue
                     
                     signal_key = f"{symbol}_{signal.get('signal_type', 'unknown')}"
+                    if slow:
+                        # one attempt per closed candle. The plain key never resets, which would
+                        # block a coin's second breakout forever.
+                        signal_key += f"_{df['timestamp'].iloc[-1]}"
     
                     if signal_key != self.last_signals.get(symbol):
                         signals_found.append({
@@ -997,21 +1647,25 @@ class TradingEngine:
             logger.info(f"   Target: ${signal.get('take_profit', 0):.2f}")
             
             # Check if we already have a position (spot or futures)
-            if symbol in self.open_positions:
-                logger.warning(f"⚠️ Already in spot position for {symbol}")
+            if symbol in self.open_positions or symbol in self.pending_entries:
+                logger.warning(f"⚠️ Already in spot position (or entry pending) for {symbol}")
                 return False
             if symbol in self.open_futures_positions:
                 logger.warning(f"⚠️ Already in futures position for {symbol}")
                 return False
 
             # Check max positions (combined)
-            total_positions = len(self.open_positions) + len(self.open_futures_positions)
+            total_positions = self.active_slots
             if total_positions >= self.max_positions:
                 logger.warning(f"⚠️ At max positions ({self.max_positions})")
                 return False
 
             # ===== ROUTE BY MARKET =====
             market = signal.get('market', 'spot')
+
+            if (signal['side'] == 'short' or market == 'futures') and not self.shorts_enabled:
+                logger.info(f"⏭️ {symbol}: short/futures signal not executed (enable_shorts is false)")
+                return False
 
             # --- SHORT → Futures engine ---
             if signal['side'] == 'short' or market == 'futures':

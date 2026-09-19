@@ -68,9 +68,15 @@ def check_stop_losses_and_take_profits():
     except Exception as e:
         logger.error(f"Error in spot stop loss check: {e}")
 
+    # --- Limit-order lifecycle: entries, exits, exchange-side OCO stops (+ market fallback) ---
+    try:
+        trading_engine.manage_orders()
+    except Exception as e:
+        logger.error(f"Error managing orders: {e}")
+
     # --- Futures stop losses ---
     try:
-        if futures_engine:
+        if futures_engine and (trading_engine.shorts_enabled or trading_engine.open_futures_positions):
             futures_closed = futures_engine.check_stops()
             if futures_closed:
                 logger.info(f"Futures: closed {len(futures_closed)} position(s): {futures_closed}")
@@ -86,8 +92,8 @@ def scan_for_trading_signals():
         return
     
     try:
-        current_positions = len(trading_engine.open_positions) + len(trading_engine.open_futures_positions)
-        
+        current_positions = trading_engine.active_slots
+
         if current_positions >= trading_engine.max_positions:
             logger.info(f"At max positions ({current_positions}/{trading_engine.max_positions})")
             return
@@ -109,7 +115,7 @@ def scan_for_trading_signals():
                         failed += 1
                         logger.warning(f"Failed to execute {signal['symbol']}")
                     
-                    current_positions = len(trading_engine.open_positions) + len(trading_engine.open_futures_positions)
+                    current_positions = trading_engine.active_slots
                     if current_positions >= trading_engine.max_positions:
                         logger.info(f"⏭Max positions reached ({trading_engine.max_positions}), stopping execution")
                         break
@@ -121,6 +127,25 @@ def scan_for_trading_signals():
             
     except Exception as e:
         logger.error(f"Error scanning signals: {e}")
+
+def _live_account_view():
+    """Exchange-based numbers for live/testnet. portfolio.json cash is NOT the account there
+    (it stays at its paper defaults), so the summary/health job must not use it."""
+    eng = trading_engine
+    if not eng or eng.trading_mode not in ('live', 'testnet'):
+        return None
+    equity = eng._current_equity()
+    if equity is None:
+        return None
+    peak = eng._equity_peak or equity
+    quotes = {s.split('/')[1] for s in eng.symbols if '/' in s}
+    return {
+        'total_value': equity,
+        'total_cash': max((eng.get_cash_balance(q) for q in quotes), default=0.0),
+        'drawdown_pct': max(0.0, (peak - equity) / peak * 100) if peak else 0.0,
+        'positions_count': len(eng.open_positions) + len(eng.open_futures_positions) + len(eng.pending_entries),
+    }
+
 
 def update_portfolio_summary():
     """
@@ -134,6 +159,12 @@ def update_portfolio_summary():
         total_return = summary.get('total_return_pct', 0)
         positions_count = summary.get('positions_count', 0)
         win_rate = summary.get('win_rate', 0)
+
+        live = _live_account_view()
+        if live:                                   # report the real account, as change from peak
+            total_value, total_cash = live['total_value'], live['total_cash']
+            positions_count = live['positions_count']
+            total_return = -live['drawdown_pct']
         
         logger.info(f"Portfolio: ${total_value:,.2f}")
         logger.info(f"   Cash: ${total_cash:,.2f}")
@@ -203,6 +234,9 @@ def health_check():
     try:
         summary = get_portfolio_summary()
         return_pct = summary.get('total_return_pct', 0)
+        live = _live_account_view()
+        if live:                                   # live/testnet: drawdown from the equity peak, not portfolio.json
+            return_pct = -live['drawdown_pct']
         is_healthy = return_pct > -10
         
         if not is_healthy:

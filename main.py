@@ -54,7 +54,9 @@ def main():
             return # Don't start live/testnet if we can't get data
 
     # 4. REGIME MODEL TRAINING
-    if trading_mode in ('paper', 'testnet'):
+    if trading_mode in ('paper', 'testnet') and config.config.get('strategy_mode') == 'trend_hold':
+        logger.info("⏭️ strategy_mode is trend_hold - it does not use the regime model, skipping training")
+    elif trading_mode in ('paper', 'testnet'):
         try:
             from modules.regime_switcher import train_model
             logger.info("🔄 Training regime detection model...")
