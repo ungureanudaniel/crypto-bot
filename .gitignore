@@ -11,7 +11,7 @@ ed25519_pub_key.pem
 # logs
 logs/
 config.json
-
+config.testnet.example.json
 portfolio.json
 trade_history.json
 daily_performance.log
