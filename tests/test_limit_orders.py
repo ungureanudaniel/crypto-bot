@@ -65,13 +65,39 @@ class FakeExchange:
     def get_symbol_ticker(self, symbol):
         return {'price': str(self.mid)}
 
+    timestamp_offset = 0
+
+    def get_server_time(self):
+        import time as _t
+        return {'serverTime': int(_t.time() * 1000)}
+
     def get_open_orders(self, **kw):
         return [{'symbol': o['symbol'], 'side': o['side'], 'type': o['type'], 'origQty': str(o['qty']),
                  'price': str(o['price']), 'stopPrice': str(o.get('stop', ''))}
                 for o in self.orders.values() if o['status'] == 'NEW']
 
     def get_account(self):
-        return {'balances': [{'asset': a, 'free': str(round(v, 8)), 'locked': '0'} for a, v in self.bal.items()]}
+        locked, seen_lists = 0.0, set()
+        for o in self.orders.values():
+            if o['status'] == 'NEW' and o['side'] == 'SELL':
+                lid = o.get('list')
+                if lid is not None:                          # an OCO locks its quantity once, not per leg
+                    if lid in seen_lists:
+                        continue
+                    seen_lists.add(lid)
+                locked += o['qty']
+        return {'balances': [{'asset': a, 'free': str(round(v, 8)),
+                              'locked': str(round(locked if a == 'ETH' else 0.0, 8))}
+                             for a, v in self.bal.items()]}
+
+    # --- things the USER does on the exchange, outside the bot -------------
+    def user_buy(self, qty, price):
+        o = self._new(symbol='ETHUSDC', side='BUY', type='MARKET', qty=float(qty), price=float(price))
+        self._fill(o, price)
+        return o['orderId']
+
+    def user_sell(self, qty):
+        self.bal['ETH'] -= float(qty)
 
     def get_asset_balance(self, asset):
         return {'free': str(round(self.bal[asset], 8))}
@@ -125,7 +151,11 @@ class FakeExchange:
     def get_order(self, symbol, orderId):
         return dict(self.orders[orderId])
 
-    def get_my_trades(self, symbol, orderId):
+    def get_my_trades(self, symbol, orderId=None, limit=None):
+        if orderId is None:
+            return [{'isBuyer': True, 'qty': str(o['qty']),
+                     'price': str(float(o['cummulativeQuoteQty']) / float(o['executedQty']))}
+                    for o in self.orders.values() if o['side'] == 'BUY' and o['status'] == 'FILLED']
         o = self.orders[orderId]
         if o['side'] == 'BUY' and o['status'] == 'FILLED':
             return [{'commission': str(o['qty'] * COMMISSION), 'commissionAsset': 'ETH'}]
@@ -229,6 +259,8 @@ def make_engine(cfg=None):
     eng.stop_trigger_timeout = 120.0
     eng.oco_ratchet_min_pct = 0.002
     eng._save_pending = lambda: None
+    eng._save_manual_state = lambda: None          # never touch the real manual_state.json
+    eng._manual_baseline, eng._manual_checked_at = None, 0.0
     # keep the tests off the real portfolio / logs / telegram
     eng.trades = []
     te.save_positions_to_file = lambda p: None

@@ -180,6 +180,11 @@ def build_status() -> str:
     if e.pending_exits:
         extra += f" | {len(e.pending_exits)} exit(s) in progress"
     lines.append(f"📊 Positions: <b>{len(e.open_positions)}/{e.max_positions}</b>{extra}")
+    manual = sum(1 for p in e.open_positions.values() if p.get('signal_type') in trend_hold.MANUAL_TYPES)
+    auto_cap = int(e.config.get('auto_max_positions', 2))
+    lines.append(f"🤝 Manual {manual} | automatic {len(e.open_positions) - manual}"
+                 + (f"/{auto_cap} allowed" if auto_cap > 0 else '')
+                 + ('' if e.config.get('auto_entries', True) else ' - automatic entries are OFF'))
 
     if e.order_manager:
         bare = [s for s, p in e.open_positions.items()
@@ -461,6 +466,7 @@ async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return
     if answer == 'no':
+        _PENDING_BUYS.pop(stamp, None)
         await q.edit_message_text("Cancelled. Nothing was done.")
         return
     if not fresh:
@@ -472,6 +478,15 @@ async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tb.stop_event:
             tb.stop_event.set()              # the main loop exits, then stops the scheduler and shuts down cleanly
         return
+    if action == 'buy':
+        spec = _PENDING_BUYS.pop(stamp, None)
+        if not spec:
+            await q.edit_message_text("That buy request is no longer available. Send /buy again.")
+            return
+        await q.edit_message_text("⏳ Placing the buy order...")
+        text = await asyncio.to_thread(engine.manual_buy, *spec)
+        await q.edit_message_text(esc(text))
+        return
     await q.edit_message_text("⏳ Working...")
     text = await asyncio.to_thread(do_close_all, action == 'sellall')
     await q.edit_message_text(text, parse_mode=ParseMode.HTML)
@@ -480,6 +495,132 @@ async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================================
 # help + menu + registration
 # =====================================================================
+# ---------------------------------------------------------------------
+# manual trading: the bot guards the trades YOU make
+# ---------------------------------------------------------------------
+_PENDING_BUYS: Dict[str, tuple] = {}
+
+
+def _parse_stop(arg: str, ref_price: float) -> float:
+    """'2500' -> price; '5%' -> that far below the reference price."""
+    a = arg.strip().lower().replace('stop=', '')
+    return ref_price * (1 - float(a[:-1]) / 100) if a.endswith('%') else float(a)
+
+
+async def cmd_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = context.args
+    usage = ("Usage: <code>/buy SYMBOL USD [STOP]</code>\n"
+             "e.g. <code>/buy ETH 200</code> (stop chosen for you) or <code>/buy ETH 200 2400</code> "
+             "or <code>/buy ETH 200 5%</code>\nThe stop goes on automatically when the order fills.")
+    if len(a) < 2:
+        await reply(update, usage)
+        return
+
+    def work():
+        if not engine.order_manager:
+            return ('err', "Manual buys need live/testnet mode with limit orders enabled.")
+        symbol = parse_symbol(a[0])
+        if symbol is None:
+            return ('err', f"❓ Unknown symbol <code>{esc(a[0])}</code>.")
+        usd = float(a[1].lstrip('$'))
+        stop = _parse_stop(a[2], engine.order_manager.book(symbol)[1]) if len(a) > 2 else None
+        pv = engine.manual_buy_preview(symbol, usd, stop)
+        return ('err', esc(pv['error'])) if 'error' in pv else ('ok', (symbol, pv))
+
+    try:
+        kind, res = await asyncio.to_thread(work)
+    except ValueError:
+        await reply(update, usage)
+        return
+    if kind == 'err':
+        await reply(update, res)
+        return
+    symbol, pv = res
+    stamp = str(int(time.time()))
+    _PENDING_BUYS[stamp] = (symbol, pv['usd'], pv['stop'])
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes, buy", callback_data=f"buy:yes:{stamp}"),
+                                    InlineKeyboardButton("❌ Cancel", callback_data=f"buy:no:{stamp}")]])
+    await reply(update,
+                f"🛒 <b>Buy ~${pv['usd']:,.0f} of {esc(symbol)}?</b>\n"
+                f"≈ {pv['qty']:.6g} coins at ~${price_fmt(pv['price'])}\n"
+                f"🛑 Stop ${price_fmt(pv['stop'])} ({pv['stop_pct']:+.1f}%), trailing up as the price rises\n"
+                f"Limit order near the bid, nudged up (max +0.3% over the signal price); cancelled if not filled in ~3 min.",
+                reply_markup=markup)
+
+
+async def cmd_holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def work() -> str:
+        rows = engine.holdings_report()
+        if not rows:
+            return "💼 No holdings in the coins I watch."
+        lines = ["💼 <b>Holdings</b> (coins in your list)"]
+        for symbol, held, tracked, ignored, value in rows:
+            base = symbol.split('/')[0]
+            if tracked > 0 and held - tracked <= max(ignored, 1e-12) + held * 0.02:
+                tag = f"🛡️ managed ({tracked:.6g})"
+            elif tracked > 0:
+                tag = f"🛡️ managed {tracked:.6g} + {held - tracked:.6g} untracked"
+            else:
+                tag = f"⚪ not managed - left alone. <code>/adopt {esc(base)}</code> to protect it"
+            lines.append(f"• <b>{esc(base)}</b> {held:.6g} (${value:,.0f}) {tag}")
+        lines.append("\nNew manual buys are adopted automatically within ~2 minutes.")
+        return '\n'.join(lines)
+    await reply(update, await asyncio.to_thread(work))
+
+
+def _symbol_command(fn):
+    """Wrap 'one SYMBOL argument -> engine call -> text reply'."""
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not context.args:
+            await reply(update, f"Usage: <code>/{fn.__name__[4:]} SYMBOL</code>")
+            return
+        symbol = parse_symbol(context.args[0])
+        if symbol is None:
+            await reply(update, f"❓ Unknown symbol <code>{esc(context.args[0])}</code>.")
+            return
+        await reply(update, esc(await asyncio.to_thread(fn, symbol)))
+    handler.__name__ = fn.__name__
+    return handler
+
+
+@_symbol_command
+def cmd_adopt(symbol):
+    return engine.adopt_now(symbol)
+
+
+@_symbol_command
+def cmd_ignore(symbol):
+    return engine.ignore_holding(symbol)
+
+
+@_symbol_command
+def cmd_release(symbol):
+    return engine.release_position(symbol)
+
+
+async def cmd_setstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    a = context.args
+    if len(a) < 2:
+        await reply(update, "Usage: <code>/setstop SYMBOL PRICE</code> or <code>/setstop SYMBOL 5%</code> "
+                            "(moves the stop up or down and replaces the exchange order)")
+        return
+    symbol = parse_symbol(a[0])
+
+    def work() -> str:
+        if symbol is None:
+            return f"Unknown symbol {a[0]}."
+        pos = engine.open_positions.get(symbol)
+        if not pos:
+            return f"No managed position in {symbol}."
+        ref = engine.order_manager.last_price(symbol) if engine.order_manager else pos['entry_price']
+        return engine.set_stop(symbol, _parse_stop(a[1], ref))
+
+    try:
+        await reply(update, esc(await asyncio.to_thread(work)))
+    except ValueError:
+        await reply(update, "Give the stop as a price (<code>2450</code>) or a percentage below the price (<code>5%</code>).")
+
+
 # (command, description shown in Telegram's menu)
 MENU_COMMANDS = [
     ('status', 'Dashboard: mode, gate, breaker, equity'),
@@ -490,6 +631,11 @@ MENU_COMMANDS = [
     ('breaker', 'Circuit breaker'),
     ('pause', 'Pause new entries'),
     ('resume', 'Resume new entries'),
+    ('buy', 'Buy by hand with an automatic stop'),
+    ('holdings', 'Coins in the account: managed or not'),
+    ('adopt', 'Protect coins you already hold'),
+    ('setstop', 'Move a stop: /setstop SYMBOL PRICE'),
+    ('release', 'Stop managing a position'),
     ('close', 'Close one position: /close SYMBOL [now]'),
     ('closeall', 'Close everything (orderly)'),
     ('sellall', 'EMERGENCY: sell everything'),
@@ -506,6 +652,15 @@ HELP_TEXT = """<b>🤖 Commands</b>
 /gate - BTC trend gate details
 /breaker - circuit breaker details
 
+<b>Your manual trades</b> (the bot guards them)
+Buy on the exchange as usual: within ~2 min the bot adopts new coins, works out your entry, puts an exchange-side stop under them and trails it up. Coins already in the account are left alone until you /adopt them.
+/buy SYMBOL USD [STOP] - buy from here; the stop is placed when it fills
+/holdings - what is managed and what is not
+/adopt SYMBOL - protect coins you already hold
+/setstop SYMBOL PRICE|% - move the stop (up or down)
+/release SYMBOL - stop managing it (cancels its stop so you can sell by hand)
+/ignore SYMBOL - never adopt what is in the account now
+
 <b>Control</b>
 /pause - no new automatic entries (positions and stops keep working)
 /resume - allow new entries again
@@ -519,7 +674,6 @@ HELP_TEXT = """<b>🤖 Commands</b>
 /scan  /execute SYMBOL  /executeall
 /limitbuy SYMBOL AMOUNT PRICE [STOP] [TARGET]
 /limitsell SYMBOL AMOUNT PRICE
-/setstop SYMBOL STOP [TARGET]
 /cancelorder ID  /cancelsymbol SYMBOL  /cancelall
 /price SYMBOL  /balance  /summary  /syncpositions
 
@@ -541,6 +695,8 @@ HANDLERS = [
     (['trades'], cmd_trades), (['gate'], cmd_gate), (['breaker'], cmd_breaker),
     (['pause'], cmd_pause), (['resume'], cmd_resume),
     (['close'], cmd_close), (['closeall'], cmd_closeall),
+    (['buy'], cmd_buy), (['holdings'], cmd_holdings), (['adopt'], cmd_adopt), (['ignore'], cmd_ignore),
+    (['release'], cmd_release), (['setstop'], cmd_setstop),
     (['sellall'], cmd_sellall), (['stop'], cmd_stop),
 ]
 
@@ -550,4 +706,4 @@ def register_commands(application):
     application.add_handler(TypeHandler(Update, guard), group=-1)     # runs first, for every update
     for names, fn in HANDLERS:
         application.add_handler(CommandHandler(names, fn))
-    application.add_handler(CallbackQueryHandler(on_confirm, pattern=r'^(sellall|closeall|stop):(yes|no):\d+$'))
+    application.add_handler(CallbackQueryHandler(on_confirm, pattern=r'^(sellall|closeall|stop|buy):(yes|no):\d+$'))

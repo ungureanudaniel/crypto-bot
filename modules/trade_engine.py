@@ -28,6 +28,8 @@ PENDING_ORDERS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspa
                                    'pending_orders.json')
 BREAKER_STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                   'breaker_state.json')
+MANUAL_STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 'manual_state.json')
 
 # ============================================================================
 # SETUP LOGGING
@@ -242,6 +244,9 @@ class TradingEngine:
         self._equity_cache = (0.0, None)
         self.paused = False            # /pause: no new automatic entries; stops and exits keep working
         self._load_breaker_state()
+        self._manual_baseline = None   # symbol -> qty of untracked holdings we deliberately leave alone
+        self._manual_checked_at = 0.0
+        self._load_manual_state()
 
         # ---- Limit-order execution (spot longs, live/testnet only) ----
         # Set "use_limit_orders": false in config.json to fall back to plain market orders.
@@ -895,6 +900,307 @@ class TradingEngine:
         except Exception as e:
             logger.warning(f"⚠️ Could not load pending orders: {e}")
 
+    # ------------------------------------------------------------------
+    # MANUAL TRADES: adopt coins you bought yourself, protect + trail them, notice when you sell.
+    #
+    # Holdings that already exist when the bot first starts are LISTED but left alone (they may be
+    # long-term coins you never want stopped out) - use /adopt SYMBOL to protect one. Anything that
+    # APPEARS afterwards (a manual buy) is adopted automatically. Only coins in "coins" are watched.
+    # ------------------------------------------------------------------
+    def _save_manual_state(self):
+        try:
+            with open(MANUAL_STATE_FILE, 'w') as f:
+                json.dump({'baseline': getattr(self, '_manual_baseline', None) or {}}, f)
+        except Exception as e:
+            logger.error(f"❌ Could not save manual state: {e}")
+
+    def _load_manual_state(self):
+        try:
+            if os.path.exists(MANUAL_STATE_FILE):
+                with open(MANUAL_STATE_FILE) as f:
+                    self._manual_baseline = dict(json.load(f).get('baseline', {}))
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load manual state: {e}")
+
+    def _balances_total(self) -> Dict[str, float]:
+        """asset -> free + locked (coins locked in our own stop orders still count as held)."""
+        acct = self.binance_client.get_account()
+        out = {}
+        for b in acct['balances']:
+            total = float(b['free']) + float(b['locked'])
+            if total > 0:
+                out[b['asset']] = total
+        return out
+
+    def _manual_stop(self, symbol: str, price: float):
+        """(stop, atr) for an adopted/manual position. Measured from the CURRENT price, not the entry,
+        so an already-losing position is not sold on the spot; 2 x daily ATR, clamped to 3-12%."""
+        lo = float(self.config.get('manual_stop_min_pct', 0.03))
+        hi = float(self.config.get('manual_stop_max_pct', 0.12))
+        dist, atr = float(self.config.get('manual_stop_pct', 0.06)), 0.0
+        try:
+            df = self.data_feed.get_ohlcv(symbol=symbol, interval=self.timeframe,
+                                          limit=self._exit_history_limit({'signal_type': 'manual'}))
+            atr = trend_hold.daily_atr(df, self.config)
+            if atr > 0:
+                dist = min(hi, max(lo, trend_hold.params(self.config)['stop_atr_mult'] * atr / price))
+        except Exception as e:
+            logger.debug(f"manual stop: no ATR for {symbol}, using {dist:.0%}: {e}")
+        return price * (1 - dist), atr
+
+    def _estimate_entry(self, symbol: str, qty: float) -> Optional[float]:
+        """Volume-weighted price of the most recent buys that add up to `qty` (from the trade history)."""
+        try:
+            trades = self.binance_client.get_my_trades(symbol=symbol.replace('/', ''), limit=200)
+        except Exception as e:
+            logger.debug(f"entry estimate for {symbol}: {e}")
+            return None
+        need, got, cost = qty, 0.0, 0.0
+        for t in reversed(trades):
+            if not t.get('isBuyer'):
+                continue
+            take = min(float(t['qty']), need - got)
+            cost += take * float(t['price'])
+            got += take
+            if got >= need * 0.999:
+                break
+        return cost / got if got >= need * 0.5 and got > 0 else None
+
+    def _adopt(self, symbol: str, qty: float, source: str = 'auto') -> bool:
+        """Take `qty` coins under the bot's care: record the position and place the exchange-side stop."""
+        om = self.order_manager
+        price = om.last_price(symbol)
+        entry = self._estimate_entry(symbol, qty) or price
+        existing = self.open_positions.get(symbol)
+
+        if existing:                                       # more coins bought on top of a managed position
+            old = existing['amount']
+            total = old + qty
+            existing['entry_price'] = (existing['entry_price'] * old + entry * qty) / total
+            existing['amount'] = total
+            existing['value'] = total * price
+            prot = existing.get('oco')
+            if prot:
+                res = om.cancel_protection(symbol, prot)
+                if res == 'done':
+                    return True                            # it just filled - handled by the normal path
+                existing['oco'] = None
+            save_positions_to_file(self.open_positions)
+            self._place_protection(symbol)
+            self._notify(f"➕ Added {qty:.6g} to your managed <b>{symbol}</b> (now {total:.6g}). "
+                         f"Stop re-placed at ${existing['stop_loss']:.4f}.")
+            return True
+
+        stop, atr = self._manual_stop(symbol, price)
+        pos = self._build_position(symbol, 'long', qty, entry, stop, 0.0, 'manual_adopted', atr)
+        pos['oco'] = None
+        pos['initial_stop'] = stop
+        self.open_positions[symbol] = pos
+        save_positions_to_file(self.open_positions)
+        add_trade({'symbol': symbol, 'action': 'open', 'side': 'long', 'amount': qty, 'price': entry,
+                   'stop_loss': stop, 'take_profit': 0.0, 'mode': self.trading_mode,
+                   'signal_type': 'manual_adopted', 'quote_currency': symbol.split('/')[1]})
+        pnl_pct = (price / entry - 1) * 100
+        logger.info(f"🛡️ Adopted {symbol}: {qty} @ {entry:.6f} (now {price:.6f}), stop {stop:.6f} [{source}]")
+        self._notify(f"🛡️ <b>Adopted your {symbol}</b> ({source})\n"
+                     f"{qty:.6g} coins, entry ~${entry:,.4f} ({pnl_pct:+.1f}% now)\n"
+                     f"Stop ${stop:,.4f} ({(stop / price - 1) * 100:+.1f}%), trailing up as it rises. "
+                     f"/setstop {symbol.split('/')[0]} PRICE to change it.")
+        self._place_protection(symbol)
+        return True
+
+    def _reconcile_position(self, symbol: str, pos: Dict, held: float):
+        """The exchange holds less than we track: the user sold (some of) it outside the bot."""
+        om = self.order_manager
+        amount = pos['amount']
+        if held + 1e-12 >= amount * 0.98:
+            return
+        prot = pos.get('oco')
+        if prot:                                           # our own stop may just have filled: let that path run
+            st = om.protection_status(symbol, prot)
+            if st['status'] == 'ALL_DONE' and st['filled']:
+                return
+        price = om.last_price(symbol)
+        if held < om.min_qty(symbol) or held * price < 5:
+            if prot:
+                om.cancel_protection(symbol, prot)
+            logger.info(f"📤 {symbol} was sold outside the bot - closing the record at ~{price}")
+            self._finalize_close(symbol, price, 'manual_sell', qty=amount)
+            return
+        logger.info(f"✂️ {symbol}: you sold part of it ({amount:.6g} -> {held:.6g})")
+        if prot:
+            if om.cancel_protection(symbol, prot) == 'done':
+                return
+        pos['amount'] = held
+        pos['oco'] = None
+        save_positions_to_file(self.open_positions)
+        self._place_protection(symbol)
+        self._notify(f"✂️ You sold part of <b>{symbol}</b>. Tracking {held:.6g} coins now, stop re-placed.")
+
+    def sync_manual_positions(self, force: bool = False):
+        """Every ~2 min: reconcile tracked positions with the exchange and adopt new manual buys."""
+        if not (self.order_manager and self.config.get('adopt_manual_positions', True)):
+            return
+        now = _time.time()
+        if not force and now - getattr(self, '_manual_checked_at', 0.0) < 120:
+            return
+        self._manual_checked_at = now
+        try:
+            balances = self._balances_total()
+        except Exception as e:
+            logger.warning(f"⚠️ Could not read balances for manual-trade sync: {e}")
+            return
+
+        om = self.order_manager
+        ignore = {a.upper() for a in self.config.get('adopt_ignore', [])}
+        min_usd = float(self.config.get('adopt_min_usd', 15))
+        first_run = getattr(self, '_manual_baseline', None) is None
+        if first_run:
+            self._manual_baseline = {}
+        found_at_start = []
+
+        for symbol in self.symbols:
+            base = symbol.split('/')[0]
+            if symbol in self.pending_entries or symbol in self.pending_exits:
+                continue
+            try:
+                held = balances.get(base, 0.0)
+                pos = self.open_positions.get(symbol)
+                if pos and pos.get('side') == 'long':
+                    self._reconcile_position(symbol, pos, held)
+                    pos = self.open_positions.get(symbol)
+                tracked = pos['amount'] if pos else 0.0
+                untracked = max(0.0, held - tracked)
+                baseline = self._manual_baseline.get(symbol, 0.0)
+
+                if base.upper() in ignore:
+                    self._manual_baseline[symbol] = untracked
+                    continue
+                if first_run:
+                    self._manual_baseline[symbol] = untracked
+                    if untracked > 0 and untracked * om.last_price(symbol) >= min_usd:
+                        found_at_start.append((symbol, untracked, untracked * om.last_price(symbol)))
+                    continue
+                if untracked < baseline:                   # user sold coins we were ignoring
+                    self._manual_baseline[symbol] = baseline = untracked
+                extra = untracked - baseline
+                if extra > 0 and extra * om.last_price(symbol) >= min_usd:
+                    self._adopt(symbol, extra, source='new manual buy')
+            except Exception as e:
+                logger.error(f"❌ Manual-trade sync failed for {symbol}: {e}")
+
+        self._save_manual_state()
+        if found_at_start:
+            lines = ", ".join(f"{s.split('/')[0]} {q:.6g} (${v:,.0f})" for s, q, v in found_at_start)
+            self._notify(f"👋 I found coins already in the account that I do NOT manage: {lines}.\n"
+                         f"I will leave them alone. Send /adopt SYMBOL to protect one, or buy more and I will "
+                         f"protect the new coins automatically.")
+
+    def holdings_report(self) -> list:
+        """[(symbol, held, tracked, ignored, value)] for coins with a meaningful balance."""
+        balances = self._balances_total()
+        out = []
+        for symbol in self.symbols:
+            base = symbol.split('/')[0]
+            held = balances.get(base, 0.0)
+            if held <= 0:
+                continue
+            price = self.order_manager.last_price(symbol) if self.order_manager else 0.0
+            tracked = self.open_positions[symbol]['amount'] if symbol in self.open_positions else 0.0
+            ignored = (getattr(self, '_manual_baseline', None) or {}).get(symbol, 0.0)
+            if held * price >= 5 or tracked > 0:
+                out.append((symbol, held, tracked, ignored, held * price))
+        return out
+
+    def adopt_now(self, symbol: str) -> str:
+        """User asked to protect the coins we are currently ignoring (or any untracked balance)."""
+        held = self._balances_total().get(symbol.split('/')[0], 0.0)
+        tracked = self.open_positions[symbol]['amount'] if symbol in self.open_positions else 0.0
+        qty = held - tracked
+        price = self.order_manager.last_price(symbol)
+        if qty * price < float(self.config.get('adopt_min_usd', 15)):
+            return f"Nothing to adopt: no untracked {symbol.split('/')[0]} above ${self.config.get('adopt_min_usd', 15)}."
+        base = getattr(self, '_manual_baseline', None)
+        if base is not None:
+            base[symbol] = max(0.0, base.get(symbol, 0.0) - qty)
+            self._save_manual_state()
+        self._adopt(symbol, qty, source='/adopt')
+        return f"Adopted {qty:.6g} {symbol.split('/')[0]}."
+
+    def ignore_holding(self, symbol: str) -> str:
+        held = self._balances_total().get(symbol.split('/')[0], 0.0)
+        tracked = self.open_positions[symbol]['amount'] if symbol in self.open_positions else 0.0
+        if self._manual_baseline is None:
+            self._manual_baseline = {}
+        self._manual_baseline[symbol] = max(0.0, held - tracked)
+        self._save_manual_state()
+        return f"OK - I will not touch the untracked {symbol.split('/')[0]} in the account."
+
+    def release_position(self, symbol: str) -> str:
+        """Stop managing a position: cancel its stop and hand the coins back for manual trading."""
+        with self._lock:
+            pos = self.open_positions.get(symbol)
+            if not pos:
+                return f"No managed position in {symbol}."
+            if symbol in self.pending_exits:
+                return f"{symbol} is already being sold by the bot."
+            if pos.get('oco') and self.order_manager:
+                if self.order_manager.cancel_protection(symbol, pos['oco']) == 'error':
+                    return f"Could not cancel the stop on {symbol}; try again."
+            amount = pos['amount']
+            del self.open_positions[symbol]
+            save_positions_to_file(self.open_positions)
+            if self._manual_baseline is None:
+                self._manual_baseline = {}
+            self._manual_baseline[symbol] = self._manual_baseline.get(symbol, 0.0) + amount
+            self._save_manual_state()
+        return f"Released {symbol}: stop cancelled, the coins are yours to sell by hand. I will not manage them."
+
+    def set_stop(self, symbol: str, stop: float) -> str:
+        """Move a managed position's stop (up OR down) and replace the exchange order."""
+        with self._lock:
+            pos = self.open_positions.get(symbol)
+            if not pos:
+                return f"No managed position in {symbol}."
+            price = self.order_manager.last_price(symbol) if self.order_manager else pos.get('current_price', 0)
+            if not (0 < stop < price):
+                return f"A stop must be below the current price (${price:,.4f})."
+            pos['stop_loss'] = stop
+            pos['initial_stop'] = stop
+            prot = pos.get('oco')
+            if prot and self.order_manager:
+                res = self.order_manager.cancel_protection(symbol, prot)
+                if res == 'done':
+                    return f"{symbol}'s old stop had just filled - nothing to move."
+                pos['oco'] = None
+            pos.pop('protect_after', None)
+            save_positions_to_file(self.open_positions)
+        ok = self._place_protection(symbol) if self.order_manager else True
+        return (f"Stop for {symbol} set to ${stop:,.4f} ({(stop / price - 1) * 100:+.1f}%)." if ok
+                else f"Stop saved at ${stop:,.4f} but the exchange order failed - retrying every minute.")
+
+    def manual_buy_preview(self, symbol: str, usd: float, stop: Optional[float] = None) -> Dict:
+        om = self.order_manager
+        bid, ask = om.book(symbol)
+        auto_stop, atr = self._manual_stop(symbol, ask)
+        stop = stop if stop else auto_stop
+        if not 0 < stop < ask:
+            return {'error': f"The stop must be below the price (${ask:,.4f})."}
+        return {'price': ask, 'qty': usd / ask, 'stop': stop, 'stop_pct': (stop / ask - 1) * 100, 'atr': atr,
+                'usd': usd}
+
+    def manual_buy(self, symbol: str, usd: float, stop: Optional[float] = None) -> str:
+        """Limit-buy (repriced toward the ask) with an automatic stop the moment it fills."""
+        pv = self.manual_buy_preview(symbol, usd, stop)
+        if 'error' in pv:
+            return pv['error']
+        if symbol in self.open_positions or symbol in self.pending_entries:
+            return f"Already have {symbol} (or an order for it). Use /close first, or buy it on the exchange and I will add to it."
+        ok = self._submit_limit_entry(symbol, pv['price'], pv['qty'], pv['stop'], 0.0, 'manual', pv['atr'])
+        return (f"Buy order placed for ~${usd:,.0f} of {symbol} with a stop at ${pv['stop']:,.4f}. "
+                f"You will get a message when it fills and the stop is on." if ok
+                else "The buy order could not be placed - check /orders and the logs.")
+
     def set_paused(self, value: bool):
         """Pause/resume NEW automatic entries. Open positions, stops and exits are unaffected."""
         self.paused = bool(value)
@@ -1039,9 +1345,10 @@ class TradingEngine:
         """Advance entries, exits and exchange-side stops. Safe to call every minute."""
         if not self.order_manager:
             return
+        self.order_manager.maybe_sync_clock()      # keeps signed requests inside Binance's time window
         with self._lock:
             for step in (self._manage_pending_entries, self._manage_pending_exits,
-                         self._manage_oco_protection):
+                         self._manage_oco_protection, self.sync_manual_positions):
                 try:
                     step()
                 except Exception as e:
@@ -1106,7 +1413,7 @@ class TradingEngine:
             else:
                 res = om.place_protection(symbol, qty, pos['stop_loss'], pos.get('take_profit') or 0.0, price)
         except Exception as e:
-            res = {'ok': False, 'error': 'api', 'detail': str(e)}
+            res = {'ok': False, 'error': 'api', 'detail': f"{type(e).__name__}(code={getattr(e, 'code', None)}): {e}"}
 
         if res['ok']:
             pos['oco'] = {k: v for k, v in res.items() if k != 'ok'}      # kind + order id(s) + stop/limit/target/qty
@@ -1175,6 +1482,9 @@ class TradingEngine:
                 continue
             oco = pos.get('oco')
             if not oco:
+                if pos.get('protect_after', 0) > now:
+                    continue                       # user cancelled the stop on purpose: give them time
+                pos.pop('protect_after', None)
                 self._place_protection(symbol)
                 continue
             try:
@@ -1187,8 +1497,13 @@ class TradingEngine:
                             reason = 'trailing_stop' if pos.get('trailing_stop_active') else 'stop_loss'
                         self._finalize_close(symbol, status['avg_price'], reason, qty=status['qty'])
                     else:
-                        logger.warning(f"⚠️ {symbol}: OCO ended without a fill (cancelled outside the bot?)")
+                        logger.warning(f"⚠️ {symbol}: protective order ended without a fill (cancelled outside the bot?)")
                         pos['oco'] = None
+                        wait = float(self.config.get('manual_override_seconds', 300))
+                        pos['protect_after'] = now + wait
+                        self._notify(f"👀 The stop on <b>{symbol}</b> was cancelled outside the bot. I will put it back in "
+                                     f"{wait / 60:.0f} min unless the coins are gone. Sell them now, or /release {symbol.split('/')[0]} "
+                                     f"to take it off my hands.")
                         save_positions_to_file(self.open_positions)
                     continue
 
@@ -1476,6 +1791,17 @@ class TradingEngine:
         if getattr(self, 'paused', False):
             logger.info("⏸️ Trading paused - no new entries")
             return []
+
+        if not self.config.get('auto_entries', True):
+            logger.info("🖐️ auto_entries is off - the bot only manages your manual trades")
+            return []
+        auto_cap = int(self.config.get('auto_max_positions', 2))       # 0 = no separate cap
+        if auto_cap > 0:
+            n_auto = (sum(1 for p in self.open_positions.values() if p.get('signal_type') not in trend_hold.MANUAL_TYPES)
+                      + sum(1 for st in self.pending_entries.values() if st.get('signal_type') not in trend_hold.MANUAL_TYPES))
+            if n_auto >= auto_cap:
+                logger.info(f"🎯 {n_auto}/{auto_cap} automatic positions open - not looking for new automatic entries")
+                return []
         
         # Check if we can take new positions (spot + futures combined)
         current_positions = self.active_slots

@@ -26,6 +26,9 @@ DEFAULTS = {'entry_days': 20, 'exit_days': 10, 'atr_days': 20,
 BARS_PER_DAY = {'1m': 1440, '5m': 288, '15m': 96, '30m': 48, '1h': 24, '2h': 12,
                 '4h': 6, '6h': 4, '12h': 2, '1d': 1}
 SIGNAL_TYPE = 'trend_hold_breakout'
+# Positions the USER opened (bought by hand, or via /buy). They are protected and trailed by the
+# same rule as trend_hold: a stop that only rises to the N-day low, never a take-profit.
+MANUAL_TYPES = ('manual', 'manual_adopted')
 MIN_ORDER_USD = 10.0
 
 
@@ -41,7 +44,8 @@ def params(cfg: dict) -> Dict:
 
 
 def is_trend_hold(position: dict) -> bool:
-    return str(position.get('signal_type', '')).startswith('trend_hold')
+    st = str(position.get('signal_type', ''))
+    return st.startswith('trend_hold') or st in MANUAL_TYPES
 
 
 def history_needed(cfg: dict) -> int:

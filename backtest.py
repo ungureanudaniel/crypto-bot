@@ -250,10 +250,11 @@ class Backtester:
                  workers: Optional[int] = None, refresh: bool = False, fetch_days: int = 730,
                  tag: Optional[str] = None, use_cache: bool = True, log_experiment: bool = True,
                  data_dir: Optional[str] = None, results_dir: Optional[str] = None,
-                 btc_gate_days: int = 0, gate_shorts: bool = False):
+                 btc_gate_days: int = 0, gate_shorts: bool = False, fixed_tp: float = 0.0):
         self.cfg = _cfg.config
         self.btc_gate_days = btc_gate_days
         self.gate_shorts = gate_shorts
+        self.fixed_tp = fixed_tp
         self.coins = coins
         self.days = days
         self.use_regime = use_regime
@@ -624,6 +625,8 @@ class Backtester:
             stop, target = entry * (1 + sl_pct), entry * (1 - tp_pct)
         if not sig.get('take_profit'):
             target = 0.0                                   # no take-profit
+        if self.fixed_tp:                                  # hardcoded take-profit: +X% from the fill
+            target = entry * (1 + self.fixed_tp) if side == 'long' else entry * (1 - self.fixed_tp)
 
         pair_cfg = get_pair_config(symbol)
         pos = {
@@ -851,7 +854,7 @@ class Backtester:
             'when': datetime.now().strftime('%Y-%m-%d %H:%M'), 'tag': self.tag or '',
             'timeframe': self.timeframe, 'period': self.period,
             'window': f"{self.window[0]:%Y-%m-%d}..{self.window[1]:%Y-%m-%d}",
-            'strategy': self.cfg.get('strategy_mode') or 'legacy', 'btc_gate_days': self.btc_gate_days, 'gate_shorts': self.gate_shorts, 'side': self.side, 'include': ' '.join(self.include), 'exclude': ' '.join(self.exclude),
+            'strategy': self.cfg.get('strategy_mode') or 'legacy', 'fixed_tp': self.fixed_tp, 'btc_gate_days': self.btc_gate_days, 'gate_shorts': self.gate_shorts, 'side': self.side, 'include': ' '.join(self.include), 'exclude': ' '.join(self.exclude),
             'trades': m['trades'], 'net_pnl': round(m['net_pnl'], 2), 'roi_pct': round(m['roi_pct'], 2),
             'pf': round(m['profit_factor'], 3), 'win_pct': round(m['win_rate'], 1),
             'max_dd_pct': round(m['max_dd_pct'], 2), 'fees': round(m['fees'], 2),
@@ -903,6 +906,8 @@ if __name__ == '__main__':
                         help='trend_hold: breakout lookback in days (default 20; classic slow variant: 55)')
     parser.add_argument('--th-exit-days', type=int, default=None,
                         help='trend_hold: exit-channel lookback in days (default 10; classic slow variant: 20)')
+    parser.add_argument('--fixed-tp', type=float, default=0.0, metavar='FRACTION',
+                        help='hardcoded take-profit from the fill, e.g. 0.02 = +2% (stops unchanged)')
     parser.add_argument('--refresh', action='store_true', help='re-download the price snapshot')
     parser.add_argument('--fetch-days', type=int, default=730, help='history to download for the snapshot')
     parser.add_argument('--workers', type=int, default=None, help='processes for signal precompute (1 = in-process)')
@@ -927,7 +932,7 @@ if __name__ == '__main__':
                     start=args.start, end=args.end, workers=args.workers, refresh=args.refresh,
                     fetch_days=args.fetch_days, tag=args.tag, use_cache=not args.no_cache,
                     log_experiment=not args.no_log, btc_gate_days=args.btc_gate,
-                    gate_shorts=args.gate_shorts)
+                    gate_shorts=args.gate_shorts, fixed_tp=args.fixed_tp)
     bt.coins = args.coins if args.coins else bt.default_coins
 
     all_trades = bt.run()

@@ -27,3 +27,4 @@ pending_orders.json
 breaker_state.json
 backtest_data/
 backtest_results/
+manual_state.json

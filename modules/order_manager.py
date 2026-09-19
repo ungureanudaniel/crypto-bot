@@ -33,6 +33,16 @@ def _d(x) -> Decimal:
     return Decimal(str(x))
 
 
+def _err(e: Exception) -> str:
+    """Full error text incl. type and Binance code, so logs/alerts are never just one word."""
+    return f"{type(e).__name__}(code={getattr(e, 'code', None)}): {e}"
+
+
+def _is_clock_error(e: Exception) -> bool:
+    """-1021: request timestamp outside Binance's recvWindow (our clock is off)."""
+    return getattr(e, 'code', None) == -1021 or 'timestamp' in str(e).lower()
+
+
 def _fmt(d: Decimal) -> str:
     """Plain decimal string (no scientific notation) for the API."""
     return format(d.normalize(), 'f')
@@ -43,6 +53,7 @@ class SpotOrderManager:
         self.client = client
         self._now = now
         self._info_cache: Dict[str, dict] = {}
+        self._clock_synced_at = 0.0
         g = cfg.get
         # entries
         self.entry_step_seconds = float(g('entry_step_seconds', 60))
@@ -115,6 +126,35 @@ class SpotOrderManager:
         free = self.free_balance(self.info(symbol)['base'])
         q = self._floor_qty(symbol, min(_d(want), _d(free)))
         return float(q) if q >= self.info(symbol)['min_qty'] else 0.0
+
+    # ------------------------------------------------------------------
+    # Clock: signed requests carry a timestamp; if the server clock drifts even ~1s ahead, Binance
+    # rejects them intermittently (-1021). We measure the offset and let python-binance apply it.
+    # ------------------------------------------------------------------
+    def sync_clock(self) -> bool:
+        try:
+            server_ms = int(self.client.get_server_time()['serverTime'])
+            self.client.timestamp_offset = server_ms - int(time.time() * 1000)
+            self._clock_synced_at = self._now()
+            logger.info(f"🕒 Clock synced with Binance (offset {self.client.timestamp_offset} ms)")
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ Could not sync clock with Binance: {_err(e)}")
+            self._clock_synced_at = self._now() - 1800 + 300          # try again in 5 minutes, not every minute
+            return False
+
+    def maybe_sync_clock(self, every_seconds: float = 1800):
+        if self._now() - self._clock_synced_at >= every_seconds:
+            self.sync_clock()
+
+    def _signed(self, fn, *args, **kwargs):
+        """Call an order endpoint; on a timestamp error re-sync the clock and retry ONCE."""
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if _is_clock_error(e) and self.sync_clock():
+                return fn(*args, **kwargs)
+            raise
 
     def _cancel_order(self, symbol: str, order_id):
         try:
@@ -333,14 +373,14 @@ class SpotOrderManager:
             return {'ok': False, 'error': 'too_small'}
 
         try:
-            resp = self.client.create_oco_order(
+            resp = self._signed(self.client.create_oco_order,
                 symbol=self.sym(symbol), side='SELL', quantity=_fmt(q),
                 aboveType='LIMIT_MAKER', abovePrice=_fmt(tp),
                 belowType='STOP_LOSS_LIMIT', belowStopPrice=_fmt(trigger),
                 belowPrice=_fmt(limit), belowTimeInForce='GTC',
             )
         except Exception as e:
-            return {'ok': False, 'error': 'api', 'detail': str(e)}
+            return {'ok': False, 'error': 'api', 'detail': _err(e)}
 
         return {'ok': True, 'kind': 'oco', 'order_list_id': resp['orderListId'], 'stop': float(trigger),
                 'limit': float(limit), 'target': float(tp), 'qty': float(q),
@@ -395,11 +435,11 @@ class SpotOrderManager:
         if q < info['min_qty'] or q * limit < info['min_notional']:
             return {'ok': False, 'error': 'too_small'}
         try:
-            resp = self.client.create_order(
+            resp = self._signed(self.client.create_order,
                 symbol=self.sym(symbol), side='SELL', type='STOP_LOSS_LIMIT', timeInForce='GTC',
                 quantity=_fmt(q), price=_fmt(limit), stopPrice=_fmt(trigger))
         except Exception as e:
-            return {'ok': False, 'error': 'api', 'detail': str(e)}
+            return {'ok': False, 'error': 'api', 'detail': _err(e)}
         return {'ok': True, 'kind': 'stop', 'order_id': resp['orderId'], 'stop': float(trigger),
                 'limit': float(limit), 'target': 0.0, 'qty': float(q), 'placed_at': self._now()}
 
