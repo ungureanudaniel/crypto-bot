@@ -22,7 +22,8 @@ import pandas as pd
 from typing import Dict, Optional, Tuple
 
 DEFAULTS = {'entry_days': 20, 'exit_days': 10, 'atr_days': 20,
-            'stop_atr_mult': 2.0, 'max_position_pct': 0.15}
+            'stop_atr_mult': 2.0, 'max_position_pct': 0.15,
+            'stage2_gain': 0.0, 'stage2_exit_days': 40}      # stage2_gain 0 = two-stage exit OFF
 BARS_PER_DAY = {'1m': 1440, '5m': 288, '15m': 96, '30m': 48, '1h': 24, '2h': 12,
                 '4h': 6, '6h': 4, '12h': 2, '1d': 1}
 SIGNAL_TYPE = 'trend_hold_breakout'
@@ -40,6 +41,8 @@ def params(cfg: dict) -> Dict:
     p['exit_bars'] = max(2, int(p['exit_days'] * bpd))
     p['atr_bars'] = max(2, int(p['atr_days'] * bpd))
     p['bars_per_day'] = bpd
+    p['stage2_gain'] = float(p.get('stage2_gain') or 0.0)
+    p['stage2_exit_bars'] = max(2, int(p['stage2_exit_days'] * bpd))
     return p
 
 
@@ -51,15 +54,16 @@ def is_trend_hold(position: dict) -> bool:
 def history_needed(cfg: dict) -> int:
     """Candles a caller must supply to entry_signal / exit_level."""
     p = params(cfg)
-    return max(p['entry_bars'], p['exit_bars'], p['atr_bars'] + p['bars_per_day']) + 2
+    wide = p['stage2_exit_bars'] if p['stage2_gain'] > 0 else 0
+    return max(p['entry_bars'], p['exit_bars'], p['atr_bars'] + p['bars_per_day'], wide) + 2
 
 
-def exit_level(df: pd.DataFrame, cfg: dict) -> Optional[float]:
-    """Lowest low of the previous `exit_bars` candles (the current one excluded)."""
-    p = params(cfg)
-    if df is None or len(df) < p['exit_bars'] + 2:
+def exit_level(df: pd.DataFrame, cfg: dict, bars: Optional[int] = None) -> Optional[float]:
+    """Lowest low of the previous `bars` candles (default: the exit channel); the current one is excluded."""
+    n = bars or params(cfg)['exit_bars']
+    if df is None or len(df) < n + 2:
         return None
-    return float(df['low'].iloc[-(p['exit_bars'] + 1):-1].min())
+    return float(df['low'].iloc[-(n + 1):-1].min())
 
 
 def daily_atr(df: pd.DataFrame, cfg: dict) -> float:
@@ -126,13 +130,30 @@ def entry_signal(df: pd.DataFrame, equity: float, risk_per_trade: float,
 
 def evaluate_exit(position: dict, price: float, df: Optional[pd.DataFrame],
                   cfg: dict) -> Tuple[bool, str]:
-    """Ratchet the stop up to the exit channel and report whether price has broken it."""
+    """Ratchet the stop up to the exit channel and report whether price has broken it.
+
+    Optional two-stage exit (stage2_gain > 0): once the trade's highest price is at least
+    `stage2_gain` above the entry, the channel widens to `stage2_exit_days` - but the stop is never
+    worse than breakeven, so a trade that was +30% cannot become a loss. Note that stage 2 can
+    LOWER the stop relative to stage 1 (that is the point), unlike the normal ratchet."""
+    p = params(cfg)
     initial = position.setdefault('initial_stop', position.get('stop_loss', 0.0))
-    level = exit_level(df, cfg) if df is not None else None
+    entry = position.get('entry_price') or price
+    high = float(df['high'].iloc[-1]) if df is not None and len(df) else price
+    position['peak_price'] = peak = max(position.get('peak_price', entry), price, high)
+    if p['stage2_gain'] > 0 and not position.get('stage2') and peak >= entry * (1 + p['stage2_gain']):
+        position['stage2'] = True
+
     stop = position.get('stop_loss', 0.0) or 0.0
-    if level is not None and level > stop:
-        stop = level
+    if position.get('stage2'):
+        level = exit_level(df, cfg, p['stage2_exit_bars']) if df is not None else None
+        stop = max(initial, entry, level or 0.0)
         position['stop_loss'] = stop
+    else:
+        level = exit_level(df, cfg) if df is not None else None
+        if level is not None and level > stop:
+            stop = level
+            position['stop_loss'] = stop
     if stop > initial:
         position['trailing_stop_active'] = True
     if stop and price <= stop:

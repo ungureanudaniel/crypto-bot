@@ -72,6 +72,24 @@ class TelegramHandler(logging.Handler):
             pass
 
 
+import re as _re
+
+_TOKEN_RE = _re.compile(r'bot\d{6,}:[A-Za-z0-9_-]{20,}')
+
+
+class RedactSecrets(logging.Filter):
+    """Masks Telegram bot tokens (bot<id>:<secret>) in every log line, whatever logged them."""
+
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+            if _TOKEN_RE.search(msg):
+                record.msg, record.args = _TOKEN_RE.sub('bot<redacted>', msg), ()
+        except Exception:
+            pass
+        return True
+
+
 def setup_logging(verbose: bool = True, notifier=None):
     """Configure all loggers"""
     
@@ -79,6 +97,10 @@ def setup_logging(verbose: bool = True, notifier=None):
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     
+    # httpx logs every request URL at INFO, and for Telegram that URL contains the bot token
+    for _noisy in ('httpx', 'httpcore'):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
+
     # Clear existing handlers
     root_logger.handlers.clear()
     
@@ -147,6 +169,9 @@ def setup_logging(verbose: bool = True, notifier=None):
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ Could not setup Telegram logging: {e}")
     
+    for _h in list(root_logger.handlers) + list(trade_logger.handlers):
+        _h.addFilter(RedactSecrets())
+
     return root_logger
 
 

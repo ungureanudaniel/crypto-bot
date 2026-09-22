@@ -94,9 +94,10 @@ if os.environ.get('BACKTEST_MODEL_DIR'):
     apply_model_dir(os.environ['BACKTEST_MODEL_DIR'])
 
 
-def apply_trend_hold_params(entry_days=None, exit_days=None):
+def apply_trend_hold_params(entry_days=None, exit_days=None, stage2_gain=None, stage2_days=None):
     """Override trend_hold day counts (exported by env var so worker processes match)."""
-    over = {k: v for k, v in (('entry_days', entry_days), ('exit_days', exit_days)) if v}
+    over = {k: v for k, v in (('entry_days', entry_days), ('exit_days', exit_days),
+                              ('stage2_gain', stage2_gain), ('stage2_exit_days', stage2_days)) if v}
     if over:
         os.environ['BACKTEST_TREND_HOLD'] = json.dumps(over)
         _cfg.config['trend_hold'] = {**(_cfg.config.get('trend_hold') or {}), **over}
@@ -250,7 +251,8 @@ class Backtester:
                  workers: Optional[int] = None, refresh: bool = False, fetch_days: int = 730,
                  tag: Optional[str] = None, use_cache: bool = True, log_experiment: bool = True,
                  data_dir: Optional[str] = None, results_dir: Optional[str] = None,
-                 btc_gate_days: int = 0, gate_shorts: bool = False, fixed_tp: float = 0.0):
+                 btc_gate_days: int = 0, gate_shorts: bool = False, fixed_tp: float = 0.0,
+                 trail_min: Optional[float] = None, trail_max: Optional[float] = None):
         self.cfg = _cfg.config
         self.btc_gate_days = btc_gate_days
         self.gate_shorts = gate_shorts
@@ -285,6 +287,8 @@ class Backtester:
         self.trail_max        = self.cfg.get('trailing_stop_max_pct', 0.08)
         self.trail_activation = self.cfg.get('trailing_activation_pct', 0.15)
         self.max_candles      = self.cfg.get('max_trade_candles', 336)
+        # explicit trailing bounds override the config AND the per-coin values, for every coin
+        self.trail_override   = (trail_min, trail_max) if trail_min is not None and trail_max is not None else None
         self.max_positions    = int(self.cfg.get('max_positions', 3))
         self.max_drawdown     = float(self.cfg.get('max_drawdown', 0.05))
         self.breaker_reset_ratio    = float(self.cfg.get('circuit_breaker_reset_ratio', 0.8))
@@ -644,8 +648,10 @@ class Backtester:
             'in_sample':     idx >= self._data_lengths[symbol] - REGIME_TRAIN_CANDLES,
             'candles_held':  0,
             'last_candle_time': None,
-            'trailing_min_pct': pair_cfg.get('trailing_min_pct', self.trail_min),
-            'trailing_max_pct': pair_cfg.get('trailing_max_pct', self.trail_max),
+            'trailing_min_pct': (self.trail_override[0] if self.trail_override
+                                 else pair_cfg.get('trailing_min_pct', self.trail_min)),
+            'trailing_max_pct': (self.trail_override[1] if self.trail_override
+                                 else pair_cfg.get('trailing_max_pct', self.trail_max)),
             'trailing_activation_pct': self.trail_activation,
         }
         # NOTE: the live open_position() stores neither 'regime' nor 'exit_strategy',
@@ -908,6 +914,14 @@ if __name__ == '__main__':
                         help='trend_hold: exit-channel lookback in days (default 10; classic slow variant: 20)')
     parser.add_argument('--fixed-tp', type=float, default=0.0, metavar='FRACTION',
                         help='hardcoded take-profit from the fill, e.g. 0.02 = +2% (stops unchanged)')
+    parser.add_argument('--trail-min', type=float, default=None, metavar='FRACTION',
+                        help='legacy trailing stop: minimum distance below the peak, for ALL coins (e.g. 0.10)')
+    parser.add_argument('--trail-max', type=float, default=None, metavar='FRACTION',
+                        help='legacy trailing stop: maximum distance below the peak, for ALL coins (e.g. 0.15)')
+    parser.add_argument('--th-stage2-gain', type=float, default=None, metavar='FRACTION',
+                        help='trend_hold two-stage exit: once the trade has gained this much (e.g. 0.30), widen the exit')
+    parser.add_argument('--th-stage2-days', type=int, default=None,
+                        help='trend_hold two-stage exit: channel length in days after the gain is reached (default 40)')
     parser.add_argument('--refresh', action='store_true', help='re-download the price snapshot')
     parser.add_argument('--fetch-days', type=int, default=730, help='history to download for the snapshot')
     parser.add_argument('--workers', type=int, default=None, help='processes for signal precompute (1 = in-process)')
@@ -920,7 +934,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.strategy:
         apply_strategy(args.strategy)
-    apply_trend_hold_params(args.th_entry_days, args.th_exit_days)
+    apply_trend_hold_params(args.th_entry_days, args.th_exit_days, args.th_stage2_gain, args.th_stage2_days)
     if args.model_dir:
         apply_model_dir(args.model_dir)
         print(f"Using regime model from {os.environ['BACKTEST_MODEL_DIR']}")
@@ -932,7 +946,8 @@ if __name__ == '__main__':
                     start=args.start, end=args.end, workers=args.workers, refresh=args.refresh,
                     fetch_days=args.fetch_days, tag=args.tag, use_cache=not args.no_cache,
                     log_experiment=not args.no_log, btc_gate_days=args.btc_gate,
-                    gate_shorts=args.gate_shorts, fixed_tp=args.fixed_tp)
+                    gate_shorts=args.gate_shorts, fixed_tp=args.fixed_tp,
+                    trail_min=args.trail_min, trail_max=args.trail_max)
     bt.coins = args.coins if args.coins else bt.default_coins
 
     all_trades = bt.run()
